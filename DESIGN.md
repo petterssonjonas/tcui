@@ -1,0 +1,129 @@
+# TermChatUI Design System
+
+## 1. Atmosphere & Identity
+
+A focused terminal chat workspace: calm, dense, and readable under long sessions. The signature is a command-strip chat surface where provider, model, tools, and status stay visible without turning the terminal into a dashboard.
+
+## 2. Color
+
+### Palette
+
+| Role | Token | Light | Dark | Usage |
+|------|-------|-------|------|-------|
+| Surface/primary | terminal-default | terminal-default | terminal-default | Main terminal background |
+| Surface/elevated | terminal-black | terminal-black | terminal-black | Popups, dropdowns, status bar |
+| Text/primary | terminal-white | terminal-white | terminal-white | Main messages |
+| Text/secondary | terminal-gray | terminal-gray | terminal-gray | Hints and labels |
+| Text/muted | terminal-dark-gray | terminal-dark-gray | terminal-dark-gray | Placeholders |
+| Accent/primary | terminal-cyan | terminal-cyan | terminal-cyan | Provider/model controls, focus |
+| Accent/secondary | terminal-magenta | terminal-magenta | terminal-magenta | MCP/tool controls |
+| Status/success | terminal-green | terminal-green | terminal-green | User messages, connected |
+| Status/warning | terminal-yellow | terminal-yellow | terminal-yellow | Cautions, unconfigured state |
+| Status/error | terminal-red | terminal-red | terminal-red | Failed calls |
+
+### Rules
+
+- Use terminal colors through `ratatui::style::Color`; no raw ANSI escape sequences in widgets.
+- Cyan is reserved for chat controls and assistant identity. Green is reserved for user identity and success.
+- Warning yellow means the user can fix the state from settings.
+
+## 3. Typography
+
+### Scale
+
+Terminal UI uses the active terminal font. Hierarchy comes from labels, spacing, and modifiers.
+
+| Level | Size | Weight | Line Height | Tracking | Usage |
+|-------|------|--------|-------------|----------|-------|
+| Title | terminal-cell | bold | 1 cell | 0 | Chat title and active modal headings |
+| Body | terminal-cell | normal | 1 cell | 0 | Messages and controls |
+| Label | terminal-cell | bold | 1 cell | 0 | Role labels, selected controls |
+| Caption | terminal-cell | normal | 1 cell | 0 | Status and hints |
+
+### Font Stack
+
+- Primary: user's terminal font
+- Mono: user's terminal font
+
+### Rules
+
+- Do not rely on emoji width. Use ASCII or ratatui symbols with predictable terminal width.
+- Keep command labels short enough for 80-column terminals.
+
+## 4. Spacing & Layout
+
+### Base Unit
+
+All spacing is terminal cells.
+
+| Token | Value | Usage |
+|-------|-------|-------|
+| cell-1 | 1 cell | Inline gaps, separators |
+| cell-2 | 2 cells | Dropdown padding and input borders |
+| row-1 | 1 row | Status/options rows |
+| row-3 | 3 rows | Compact input |
+| row-5 | 5 rows | Empty-chat centered input |
+
+### Grid
+
+- Main layout: top bar, chat surface, status bar.
+- Chat controls sit in a single command strip when enabled.
+- Sidebar width is 24 cells.
+
+### Rules
+
+- Controls must remain useful at 80 columns.
+- The active chat surface is framed as the current workspace pane.
+- Avoid nested bordered panels; borders are for the active pane, input, dropdowns, and modals.
+
+## 5. Components
+
+### Chat Command Strip
+
+- **Structure**: provider, model, skills, MCP as four compact status cells.
+- **Variants**: configured, missing model, missing key.
+- **Spacing**: `cell-1`, `row-1`.
+- **States**: selected values use cyan; missing values use yellow.
+- **Accessibility**: click areas match visible labels.
+- **Motion**: none.
+
+### Chat Pane Frame
+
+- **Structure**: one outer border around the active chat surface.
+- **Variants**: empty chat, active chat, streaming.
+- **Spacing**: `cell-1`.
+- **States**: active border cyan, inactive chrome dark gray.
+- **Accessibility**: title includes current provider and model.
+- **Motion**: streaming spinner in status, not inside message text.
+
+### Message Input
+
+- **Structure**: bordered paragraph with concise placeholder.
+- **Variants**: centered empty-chat input, compact active-chat input.
+- **Spacing**: `row-3` or `row-5`.
+- **States**: placeholder muted, entered text primary.
+- **Accessibility**: visible title explains action.
+- **Motion**: none.
+
+## 6. Motion & Interaction
+
+### Timing
+
+Terminal interactions update per frame; avoid animation unless it clarifies loading.
+
+| Type | Duration | Easing | Usage |
+|------|----------|--------|-------|
+| Frame | 33ms | linear | Redraw loop |
+| Stream | model-driven | linear | Assistant response chunks |
+| Spinner | 132ms | linear | Provider call in progress |
+
+### Rules
+
+- Prefer streaming text over spinners.
+- Focus and selection must be visible without color alone where practical.
+
+## 7. Depth & Surface
+
+### Strategy
+
+Borders-only. Use single-line borders for inputs, dropdowns, settings, and confirmations. Use tonal terminal colors for status, not shadows.

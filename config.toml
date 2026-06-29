@@ -1,0 +1,184 @@
+theme = "nord"
+default_model = "gpt-4o"
+default_provider = "openai"
+user_alignment = "right"
+ai_alignment = "left"
+markdown_mode = "off"
+show_selector = true
+show_chat_scrollbar = true
+collapse_thinking = true
+kitty_enhanced_text = true
+kitty_text_max_scale = 3
+quit_confirmation = false
+use_env_keys = false
+disabled_providers = []
+image_protocol = "auto"
+
+[notifications]
+desktop = true
+
+[notifications.ntfy]
+enabled = false
+host = ""
+port = 80
+topic = "tcui"
+
+[local_inference]
+enabled = false
+scheme = "http"
+host = "127.0.0.1"
+port = 11434
+server_type = "auto"
+selected_model = ""
+health_check_interval_seconds = 15
+connect_timeout_ms = 2500
+request_timeout_ms = 120000
+
+[web_search]
+enabled = false
+
+[memory]
+enabled = false
+auto_capture = true
+max_memories = 2
+max_context_chars = 320
+min_similarity = 0.550000011920929
+
+[[providers]]
+name = "OpenAI"
+endpoint = "https://api.openai.com/v1"
+env_var = "OPENAI_API_KEY"
+backend_type = "openai"
+auth_type = "api_key"
+
+[[providers]]
+name = "Anthropic"
+endpoint = "https://api.anthropic.com/v1"
+env_var = "ANTHROPIC_API_KEY"
+backend_type = "anthropic"
+auth_type = "api_key"
+
+[[providers]]
+name = "Google AI"
+endpoint = "https://generativelanguage.googleapis.com/v1beta/openai"
+env_var = "GOOGLE_AI_API_KEY"
+backend_type = "gemini"
+auth_type = "api_key"
+
+[[providers]]
+name = "OpenRouter"
+endpoint = "https://openrouter.ai/api/v1"
+env_var = "OPENROUTER_API_KEY"
+backend_type = "openrouter"
+auth_type = "api_key"
+
+[[providers]]
+name = "Kilo Gateway"
+endpoint = "https://api.kilo.ai/api/gateway"
+env_var = "KILO_API_KEY"
+backend_type = "kilo"
+auth_type = "api_key"
+
+[[providers]]
+name = "Mistral"
+endpoint = "https://api.mistral.ai/v1"
+env_var = "MISTRAL_API_KEY"
+backend_type = "openai"
+auth_type = "api_key"
+
+[[providers]]
+name = "Groq"
+endpoint = "https://api.groq.com/openai/v1"
+env_var = "GROQ_API_KEY"
+backend_type = "openai"
+auth_type = "api_key"
+
+[[providers]]
+name = "Berget.ai"
+endpoint = "https://api.berget.ai/v1"
+env_var = "BERGET_API_KEY"
+backend_type = "openai"
+auth_type = "api_key"
+
+[[providers]]
+name = "OpenCode Go"
+endpoint = "https://opencode.ai/zen/go/v1"
+env_var = "OPENCODE_GO_API_KEY"
+backend_type = "openai"
+auth_type = "api_key"
+
+[[providers]]
+name = "OpenCode Zen"
+endpoint = "https://opencode.ai/zen/v1"
+env_var = "ZEN_API_KEY"
+backend_type = "openai"
+auth_type = "api_key"
+
+[[providers]]
+name = "Gemini"
+endpoint = "https://generativelanguage.googleapis.com/v1beta/openai"
+env_var = "GEMINI_API_KEY"
+backend_type = "gemini"
+auth_type = "oauth"
+
+[[providers]]
+name = "Codex"
+endpoint = "https://api.openai.com/v1"
+env_var = "CODEX_API_KEY"
+backend_type = "openai"
+auth_type = "oauth"
+
+[[mcp_servers]]
+name = "Exa"
+transport = "stdio"
+command = "npx"
+args = [
+    "-y",
+    "exa-mcp-server@3.2.1",
+]
+enabled = false
+
+[[mcp_servers]]
+name = "Tavily"
+transport = "stdio"
+command = "npx"
+args = [
+    "-y",
+    "tavily-mcp@0.2.20",
+]
+enabled = false
+
+[[mcp_servers]]
+name = "Firecrawl"
+transport = "stdio"
+command = "npx"
+args = [
+    "-y",
+    "firecrawl-mcp@3.22.1",
+]
+enabled = false
+
+[[mcp_servers]]
+name = "GNOME Desktop"
+transport = "stdio"
+command = "uvx"
+args = ["gnome-desktop-mcp==0.1.0"]
+enabled = false
+
+[[mcp_servers]]
+name = "Obsidian"
+transport = "stdio"
+command = "uvx"
+args = [
+    "--from",
+    "git+https://github.com/Vasallo94/obsidian-mcp-server.git@ac9889f93c39c3a6a38515fdeb374e61f87c70a2",
+    "obsidian-mcp-server",
+]
+enabled = false
+
+[[tab_configs]]
+name = "Local"
+provider = "ollama"
+model = "llama3.1"
+endpoint = "http://localhost:11434/v1"
+soul_name = "default"

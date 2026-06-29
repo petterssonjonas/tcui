@@ -1,0 +1,16 @@
+.gitnexus
+target/
+.omo/
+.sisyphus/
+.claude/
+.debug-journal.md
+scratchpad.md
+TODO.md
+PLAN.md
+*audit.md
+*review.md
+*.log
+*.rpm
+*.deb
+*.tgz
+*.tar.gz

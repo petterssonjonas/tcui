@@ -1,0 +1,20 @@
+mod activity;
+mod config;
+mod directive;
+mod embedding;
+mod host;
+mod index;
+mod markdown;
+mod mcp_server;
+mod paths;
+mod recall;
+mod store;
+mod sync;
+mod write;
+
+pub(crate) use activity::{activities, set_activities, MemoryActivity};
+pub(crate) use config::MemoryConfig;
+pub(crate) use directive::RememberFilter;
+pub(crate) use host::{append_recall, capture, recall, run_skill_operation, AUTO_CAPTURE_POLICY};
+pub(crate) use mcp_server::run as run_mcp;
+pub(crate) use write::WriteOutcome;
