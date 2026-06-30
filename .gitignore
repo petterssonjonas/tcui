@@ -5,6 +5,7 @@ target/
 .claude/
 .debug-journal.md
 scratchpad.md
+temp/
 TODO.md
 PLAN.md
 *audit.md

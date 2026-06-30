@@ -5,6 +5,7 @@ use crate::ui::components::markdown::MarkdownRenderer;
 use crate::ui::components::markdown_model::{LinkTarget, RenderedImage};
 use crate::ui::settings_tab::ModelInfo;
 use ratatui::{layout::Rect, prelude::*, widgets::*, Frame};
+use unicode_width::UnicodeWidthStr;
 
 pub struct ChatTab<'a> {
     pub state: &'a mut crate::ui::ChatTabState,
@@ -160,23 +161,30 @@ impl<'a> ChatTab<'a> {
                     .take(max_visible)
                     .collect();
 
+                let labels: Vec<String> = visible_providers
+                    .iter()
+                    .map(|(name, _, _, _, _)| clipped_label(name, 12))
+                    .collect();
                 let items: Vec<ListItem> = visible_providers
                     .iter()
-                    .map(|(name, _, _, _, _)| {
-                        let style = if *name == self.state.tab.provider {
+                    .zip(labels.iter())
+                    .map(|(provider, label)| {
+                        let name = &provider.0;
+                        let style = if name == &self.state.tab.provider {
                             Style::default().fg(Color::Black).bg(Color::Cyan)
                         } else {
                             Style::default().fg(Color::White)
                         };
-                        ListItem::new(name.as_str()).style(style)
+                        ListItem::new(label.as_str()).style(style)
                     })
                     .collect();
 
                 let content_height = max_visible as u16;
+                let dropdown_width = dropdown_width_for(&labels, 12, SCROLLBAR_WIDTH);
                 let dropdown_area = Rect::new(
                     anchor.x,
                     anchor.y.saturating_sub(content_height + 2),
-                    anchor.width,
+                    dropdown_width,
                     content_height + 2,
                 );
                 let content_width = dropdown_area.width.saturating_sub(2 + SCROLLBAR_WIDTH);
@@ -244,35 +252,30 @@ impl<'a> ChatTab<'a> {
                 let visible_models: Vec<_> =
                     self.models.iter().skip(offset).take(max_visible).collect();
 
+                let labels: Vec<String> = visible_models
+                    .iter()
+                    .map(|model| clipped_label(&model.id, 16))
+                    .collect();
                 let items: Vec<ListItem> = visible_models
                     .iter()
-                    .map(|m| {
+                    .zip(labels.iter())
+                    .map(|(m, label)| {
                         let is_selected = m.id == self.state.tab.model;
-                        let price_text = match (m.input_price, m.output_price) {
-                            (Some(inp), Some(out)) => format!("${:.2}/${:.2}", inp, out),
-                            (Some(inp), None) => format!("${:.2}/-", inp),
-                            (None, Some(out)) => format!("-/${:.2}", out),
-                            (None, None) => String::new(),
-                        };
-                        let label = if price_text.is_empty() {
-                            m.id.clone()
-                        } else {
-                            format!("{:30} {}", m.id, price_text)
-                        };
                         let style = if is_selected {
                             Style::default().fg(Color::Black).bg(Color::Cyan)
                         } else {
                             Style::default().fg(Color::White)
                         };
-                        ListItem::new(label).style(style)
+                        ListItem::new(label.as_str()).style(style)
                     })
                     .collect();
 
                 let content_height = max_visible as u16;
+                let dropdown_width = dropdown_width_for(&labels, 16, SCROLLBAR_WIDTH);
                 let dropdown_area = Rect::new(
                     anchor.x,
                     anchor.y.saturating_sub(content_height + 2),
-                    anchor.width,
+                    dropdown_width,
                     content_height + 2,
                 );
                 let content_width = dropdown_area.width.saturating_sub(2 + SCROLLBAR_WIDTH);
@@ -344,9 +347,14 @@ impl<'a> ChatTab<'a> {
                     .take(max_visible)
                     .collect();
 
+                let labels: Vec<String> = visible_options
+                    .iter()
+                    .map(|option| clipped_label(option, 8))
+                    .collect();
                 let items: Vec<ListItem> = visible_options
                     .iter()
-                    .map(|option| {
+                    .zip(labels.iter())
+                    .map(|(option, label)| {
                         let is_selected =
                             self.state.tab.reasoning_effort.as_deref() == Some(option.as_str());
                         let style = if is_selected {
@@ -354,18 +362,19 @@ impl<'a> ChatTab<'a> {
                         } else {
                             Style::default().fg(Color::White)
                         };
-                        ListItem::new(option.as_str()).style(style)
+                        ListItem::new(label.as_str()).style(style)
                     })
                     .collect();
 
                 let content_height = max_visible as u16;
+                let dropdown_width = dropdown_width_for(&labels, 8, 0);
                 let dropdown_area = Rect::new(
                     anchor.x,
                     anchor.y.saturating_sub(content_height + 2),
-                    anchor.width,
+                    dropdown_width,
                     content_height + 2,
                 );
-                let content_width = dropdown_area.width.saturating_sub(2 + SCROLLBAR_WIDTH);
+                let content_width = dropdown_area.width.saturating_sub(2);
                 let viewport = Rect::new(
                     dropdown_area.x + 1,
                     dropdown_area.y + 1,
@@ -851,6 +860,29 @@ fn animated_dots(frame_tick: u64) -> &'static str {
     }
 }
 
+fn clipped_label(label: &str, max_chars: usize) -> String {
+    if label.chars().count() <= max_chars {
+        return label.to_string();
+    }
+    let mut clipped = label
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    clipped.push('~');
+    clipped
+}
+
+fn dropdown_width_for(labels: &[String], max_chars: usize, scrollbar_width: u16) -> u16 {
+    let content_width = labels
+        .iter()
+        .map(|label| UnicodeWidthStr::width(label.as_str()))
+        .max()
+        .unwrap_or(1)
+        .min(max_chars)
+        .max(1) as u16;
+    content_width + 2 + scrollbar_width
+}
+
 #[cfg(feature = "memory")]
 fn memory_activity_lines(
     message: &crate::app::Message,
@@ -1123,6 +1155,17 @@ mod tests {
 
         assert!(chat.state.chat_scrollbar_area.is_some());
         assert!(chat.state.input_text_area.is_some());
+    }
+
+    #[test]
+    fn dropdown_width_caps_long_provider_and_model_labels() {
+        let provider_labels = vec![clipped_label("VeryLongProviderName", 12)];
+        let model_labels = vec![clipped_label("deepseek-v4-flash", 16)];
+
+        assert_eq!(provider_labels[0], "VeryLongPro~");
+        assert_eq!(model_labels[0], "deepseek-v4-fla~");
+        assert_eq!(dropdown_width_for(&provider_labels, 12, 1), 15);
+        assert_eq!(dropdown_width_for(&model_labels, 16, 1), 19);
     }
 
     #[cfg(feature = "memory")]

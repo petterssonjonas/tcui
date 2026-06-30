@@ -184,7 +184,10 @@ impl TuiApp {
                 "Codex" | "OpenAI" | "OpenRouter" | "Groq" | "Mistral"
             )
         {
-            return vec!["low".to_string(), "medium".to_string(), "high".to_string()];
+            return ["none", "low", "medium", "high", "xhigh"]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
         }
         Vec::new()
     }

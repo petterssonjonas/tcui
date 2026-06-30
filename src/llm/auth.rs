@@ -39,6 +39,12 @@ pub(crate) fn read_oauth_token(name: &str) -> Option<String> {
         "Gemini" => vec![
             home.join(".gemini.json"),
             home.join(".gemini").join("oauth_creds.json"),
+            home.join(".gemini")
+                .join("antigravity-cli")
+                .join("antigravity-oauth-token"),
+            home.join(".gemini")
+                .join("antigravity")
+                .join("session.json"),
             home.join(".config").join("gemini").join("oauth_creds.json"),
         ],
         _ => return None,
@@ -57,6 +63,11 @@ pub(crate) fn read_oauth_token(name: &str) -> Option<String> {
             "Gemini" => value
                 .get("access_token")
                 .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    value
+                        .pointer("/token/access_token")
+                        .and_then(serde_json::Value::as_str)
+                })
                 .or_else(|| {
                     value
                         .pointer("/tokens/access_token")
@@ -237,6 +248,27 @@ mod tests {
         let token = read_oauth_token("Gemini");
 
         assert_eq!(token.as_deref(), Some("test-token"));
+
+        std::env::remove_var("HOME");
+        std::fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn reads_gemini_antigravity_session_token() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        let root = unique_temp_dir("gemini-antigravity-oauth");
+        let session_dir = root.join(".gemini").join("antigravity");
+        std::fs::create_dir_all(&session_dir).expect("create antigravity dir");
+        std::fs::write(
+            session_dir.join("session.json"),
+            r#"{"token":{"access_token":"antigravity-token"}}"#,
+        )
+        .expect("write antigravity session");
+        std::env::set_var("HOME", &root);
+
+        let token = read_oauth_token("Gemini");
+
+        assert_eq!(token.as_deref(), Some("antigravity-token"));
 
         std::env::remove_var("HOME");
         std::fs::remove_dir_all(root).expect("cleanup temp dir");
