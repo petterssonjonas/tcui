@@ -126,4 +126,22 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn kitty_heading_reports_multicell_render_metadata() {
+        // Given
+        let renderer = MarkdownRenderer::new(TerminalCapabilities {
+            terminal: TerminalKind::Kitty,
+            multiplexer: None,
+            kitty_graphics: true,
+            kitty_text_sizing: true,
+            tmux_passthrough: false,
+        });
+        let rendered = renderer.render("# Heading", MarkdownMode::Full, 40, true, 2, false);
+
+        // Then
+        assert_eq!(rendered.kitty_headings.len(), 1);
+        assert_eq!(rendered.kitty_headings[0].text, "Heading");
+        assert_eq!(rendered.kitty_headings[0].scale, 2);
+    }
 }

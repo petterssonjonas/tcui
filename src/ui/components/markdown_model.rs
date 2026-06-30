@@ -3,18 +3,17 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::config::app_config::MarkdownMode;
-use crate::ui::components::terminal_capabilities::{
-    wrap_for_terminal_passthrough, TerminalCapabilities,
-};
+use crate::ui::components::terminal_capabilities::TerminalCapabilities;
 
 #[derive(Debug, Clone)]
 pub struct RenderedMarkdown {
     pub lines: Vec<Line<'static>>,
     pub link_targets: Vec<LinkTarget>,
     pub images: Vec<RenderedImage>,
+    pub kitty_headings: Vec<RenderedHeading>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +29,13 @@ pub struct RenderedImage {
     pub start_line: usize,
     pub height: usize,
     pub source: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RenderedHeading {
+    pub start_line: usize,
+    pub text: String,
+    pub scale: u8,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -89,6 +95,7 @@ pub fn render_markdown(content: &str, opts: RenderOptions) -> RenderedMarkdown {
             lines,
             link_targets,
             images: Vec::new(),
+            kitty_headings: Vec::new(),
         };
     }
 
@@ -96,12 +103,18 @@ pub fn render_markdown(content: &str, opts: RenderOptions) -> RenderedMarkdown {
     let mut lines = Vec::new();
     let mut link_targets = Vec::new();
     let mut images = Vec::new();
+    let mut kitty_headings = Vec::new();
 
     for block in blocks {
         let theme = crate::theme::active_theme();
         let start_line = lines.len();
         match block {
-            Block::Heading { level, text } => render_heading(&mut lines, &text, level, opts),
+            Block::Heading { level, text } => {
+                if let Some(mut heading) = render_heading(&mut lines, &text, level, opts) {
+                    heading.start_line = start_line;
+                    kitty_headings.push(heading);
+                }
+            }
             Block::Paragraph(text) => {
                 render_inline_block(&mut lines, &mut link_targets, &text, opts, Style::default())
             }
@@ -171,6 +184,7 @@ pub fn render_markdown(content: &str, opts: RenderOptions) -> RenderedMarkdown {
         lines,
         link_targets,
         images,
+        kitty_headings,
     }
 }
 
@@ -483,24 +497,36 @@ fn render_table(lines: &mut Vec<Line<'static>>, rows: Vec<Vec<String>>, width: u
     }
 }
 
-fn render_heading(lines: &mut Vec<Line<'static>>, text: &str, level: usize, opts: RenderOptions) {
-    let scale = heading_scale(level, opts.kitty_text_max_scale).clamp(1, 7);
+fn render_heading(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    level: usize,
+    opts: RenderOptions,
+) -> Option<RenderedHeading> {
+    let text = text.trim();
+    let text_width = UnicodeWidthStr::width(text).max(1);
+    let fitting_scale = (opts.width / text_width).clamp(1, 7) as u8;
+    let scale = heading_scale(level, opts.kitty_text_max_scale)
+        .clamp(1, 7)
+        .min(fitting_scale);
     let fallback = heading_style(level);
     if opts.kitty_enhanced_text
         && opts.terminal_capabilities.kitty_text_sizing
         && opts.mode == MarkdownMode::Full
+        && scale > 1
     {
-        let escaped = format!("\u{1b}]66;s={scale};{}\u{7}", text.trim());
-        lines.push(Line::from(Span::raw(wrap_for_terminal_passthrough(
-            opts.terminal_capabilities,
-            &escaped,
-        ))));
+        lines.push(Line::from(Span::styled(text.to_string(), fallback)));
         for _ in 1..scale {
             lines.push(Line::from(""));
         }
-        return;
+        return Some(RenderedHeading {
+            start_line: 0,
+            text: text.to_string(),
+            scale,
+        });
     }
-    lines.push(Line::from(Span::styled(text.trim().to_string(), fallback)));
+    lines.push(Line::from(Span::styled(text.to_string(), fallback)));
+    None
 }
 
 fn parse_inline_runs(text: &str, base_style: Style) -> Vec<StyledRun> {
@@ -602,6 +628,37 @@ fn wrap_runs(runs: Vec<StyledRun>, width: usize) -> Vec<Vec<StyledRun>> {
             }
             let token_width = UnicodeWidthStr::width(token.as_str());
             let is_space = token.trim().is_empty();
+            if token_width > width && !is_space {
+                if current_width > 0 {
+                    out.push(Vec::new());
+                    current_width = 0;
+                }
+                let mut chunk = String::new();
+                let mut chunk_width = 0usize;
+                for ch in token.chars() {
+                    let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                    if chunk_width + ch_width > width && !chunk.is_empty() {
+                        out.last_mut().expect("line exists").push(StyledRun {
+                            text: std::mem::take(&mut chunk),
+                            style: run.style,
+                            link: run.link.clone(),
+                        });
+                        out.push(Vec::new());
+                        chunk_width = 0;
+                    }
+                    chunk.push(ch);
+                    chunk_width += ch_width;
+                }
+                if !chunk.is_empty() {
+                    out.last_mut().expect("line exists").push(StyledRun {
+                        text: chunk,
+                        style: run.style,
+                        link: run.link.clone(),
+                    });
+                    current_width = chunk_width;
+                }
+                continue;
+            }
             if current_width + token_width > width && current_width > 0 && !is_space {
                 out.push(Vec::new());
                 current_width = 0;

@@ -406,7 +406,7 @@ impl Default for AppConfig {
             default_provider: "openai".to_string(),
             user_alignment: TextAlignment::Right,
             ai_alignment: TextAlignment::Left,
-            markdown_mode: MarkdownMode::Off,
+            markdown_mode: MarkdownMode::Full,
             show_selector: true,
             show_chat_scrollbar: true,
             collapse_thinking: true,

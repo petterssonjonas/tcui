@@ -286,22 +286,11 @@ impl StatusBar {
     }
 
     fn right_label(&self, status_text: &str) -> String {
-        if self.working {
-            format!(" {}  ● {status_text} ", thinking_frame(self.tick))
-        } else {
-            format!(" ● {status_text} ")
-        }
+        format!(" ● {status_text} ")
     }
 
     fn right_line(&self, status_text: &str, dot_color: Color) -> Line<'static> {
-        let theme = crate::theme::active_theme();
         let mut spans = Vec::new();
-        if self.working {
-            spans.push(Span::styled(
-                format!(" {}  ", thinking_frame(self.tick)),
-                Style::default().fg(theme.accent),
-            ));
-        }
         spans.push(Span::styled("● ", Style::default().fg(dot_color)));
         spans.push(Span::styled(
             status_text.to_string(),
@@ -333,11 +322,6 @@ fn take_control_area(x: &mut u16, y: u16, remaining: &mut u16, label: &str) -> O
 fn spinner_frame(tick: u64) -> &'static str {
     const FRAMES: [&str; 4] = ["-", "\\", "|", "/"];
     FRAMES[((tick / 4) as usize) % FRAMES.len()]
-}
-
-fn thinking_frame(tick: u64) -> String {
-    let dots = ".".repeat(((tick / 8) as usize % 3) + 1);
-    format!("Thinking{dots}")
 }
 
 fn format_token_window(window: u32) -> String {
@@ -476,5 +460,27 @@ mod tests {
         assert!(row.contains("Connected"));
         assert!(!row.contains("provider OpenCode Go"));
         assert!(!row.contains("model deepseek-v4-flash"));
+    }
+
+    #[test]
+    fn working_status_does_not_render_thinking_animation() {
+        let row = rendered_row(StatusBar {
+            status: ConnectionStatus::CloudConnected,
+            message: None,
+            mcps: vec![],
+            working: true,
+            tick: 16,
+            provider: String::new(),
+            model: String::new(),
+            reasoning_effort: None,
+            show_reasoning_selector: false,
+            show_selector: false,
+            web_search_enabled: false,
+            context_window: None,
+            context_used_tokens: None,
+        });
+
+        assert!(!row.contains("Thinking"));
+        assert!(row.contains("Connected"));
     }
 }

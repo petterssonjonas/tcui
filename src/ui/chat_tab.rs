@@ -3,6 +3,7 @@ use crate::config::app_config::{MarkdownMode, TextAlignment};
 use crate::ui::components::image_block::{is_local_image_source, ImageBlockState};
 use crate::ui::components::markdown::MarkdownRenderer;
 use crate::ui::components::markdown_model::{LinkTarget, RenderedImage};
+use crate::ui::components::terminal_capabilities::wrap_for_terminal_passthrough;
 use crate::ui::settings_tab::ModelInfo;
 use ratatui::{layout::Rect, prelude::*, widgets::*, Frame};
 use unicode_width::UnicodeWidthStr;
@@ -45,7 +46,15 @@ struct RenderedMessages {
     thinking_toggle_lines: Vec<(usize, usize)>,
     link_targets: Vec<LinkTarget>,
     images: Vec<RenderedImage>,
+    kitty_headings: Vec<RenderedKittyHeading>,
     answer_anchor_lines: Vec<(usize, usize)>,
+}
+
+struct RenderedKittyHeading {
+    line: usize,
+    text: String,
+    scale: u8,
+    alignment: Alignment,
 }
 
 impl<'a> ChatTab<'a> {
@@ -481,10 +490,45 @@ impl<'a> ChatTab<'a> {
 
         let list = Paragraph::new(rendered.lines)
             .block(Block::default().borders(Borders::NONE))
-            .wrap(Wrap { trim: true })
             .scroll((scroll_offset as u16, 0));
 
         f.render_widget(list, viewport);
+        for heading in &rendered.kitty_headings {
+            if heading.line < scroll_offset
+                || heading.line >= scroll_offset + viewport.height as usize
+            {
+                continue;
+            }
+            let width =
+                UnicodeWidthStr::width(heading.text.as_str()) as u16 * u16::from(heading.scale);
+            let x = viewport.x
+                + match heading.alignment {
+                    Alignment::Left => 0,
+                    Alignment::Center => viewport.width.saturating_sub(width) / 2,
+                    Alignment::Right => viewport.width.saturating_sub(width),
+                };
+            let y = viewport.y + (heading.line - scroll_offset) as u16;
+            for row in y..y
+                .saturating_add(u16::from(heading.scale))
+                .min(viewport.bottom())
+            {
+                for column in x..x.saturating_add(width).min(viewport.right()) {
+                    f.buffer_mut()[(column, row)].reset();
+                }
+            }
+            let text = heading
+                .text
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .collect::<String>();
+            let advance = UnicodeWidthStr::width(text.as_str()) * usize::from(heading.scale);
+            let sequence = format!("\u{1b}]66;s={};{text}\u{7}", heading.scale);
+            let mut symbol = wrap_for_terminal_passthrough(self.terminal_capabilities, &sequence);
+            if advance > 1 {
+                symbol.push_str(&format!("\u{1b}[{}D", advance - 1));
+            }
+            f.buffer_mut()[(x, y)].set_symbol(&symbol);
+        }
         self.render_images(f, viewport, scroll_offset, &rendered.images);
         if show_scrollbar {
             let track = Rect::new(viewport.right(), viewport.y, 1, viewport.height);
@@ -511,6 +555,7 @@ impl<'a> ChatTab<'a> {
         let mut thinking_toggle_lines = Vec::new();
         let mut link_targets = Vec::new();
         let mut images = Vec::new();
+        let mut kitty_headings = Vec::new();
         let mut answer_anchor_lines = Vec::new();
         let content_width = area.width.saturating_sub(2) as usize;
 
@@ -617,6 +662,14 @@ impl<'a> ChatTab<'a> {
                 self.kitty_text_max_scale,
                 self.image_protocol != "off",
             );
+            for heading in rendered.kitty_headings {
+                kitty_headings.push(RenderedKittyHeading {
+                    line: heading.start_line + lines.len(),
+                    text: heading.text,
+                    scale: heading.scale,
+                    alignment: alignment.as_ratatui(),
+                });
+            }
             if !rendered.lines.is_empty() {
                 answer_anchor = answer_anchor.min(lines.len());
             }
@@ -649,6 +702,7 @@ impl<'a> ChatTab<'a> {
             thinking_toggle_lines,
             link_targets,
             images,
+            kitty_headings,
             answer_anchor_lines,
         }
     }
@@ -1082,6 +1136,110 @@ mod tests {
         let anchor = rendered.answer_anchor_lines[0].1;
 
         assert_eq!(rendered.lines[anchor].to_string().trim(), "four");
+    }
+
+    #[test]
+    fn bottom_scroll_keeps_long_markdown_tail_and_thinking_hit_area_aligned() {
+        // Given
+        let mut ui = crate::ui::UI::new();
+        ui.tabs[0].messages.push(crate::app::message::Message::new(
+            1,
+            "user".to_string(),
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ".to_string(),
+        ));
+        let mut assistant =
+            crate::app::message::Message::new(1, "assistant".to_string(), "final tail".to_string());
+        assistant.thinking_content = Some("reason".to_string());
+        ui.tabs[0].messages.push(assistant);
+        ui.tabs[0].scroll_offset = usize::MAX;
+        let mut terminal = Terminal::new(TestBackend::new(20, 4)).expect("test terminal");
+        let mut chat = ChatTab::new(
+            &mut ui.tabs[0],
+            ChatTabProps {
+                user_alignment: TextAlignment::Left,
+                ai_alignment: TextAlignment::Left,
+                markdown_mode: MarkdownMode::Full,
+                collapse_thinking: true,
+                show_chat_scrollbar: false,
+                kitty_enhanced_text: false,
+                kitty_text_max_scale: 3,
+                image_protocol: "off",
+                terminal_capabilities: TerminalCapabilities {
+                    terminal: TerminalKind::Unknown,
+                    multiplexer: None,
+                    kitty_graphics: false,
+                    kitty_text_sizing: false,
+                    tmux_passthrough: false,
+                },
+                frame_tick: 0,
+                providers: &[],
+                models: &[],
+                reasoning_options: &[],
+            },
+        );
+
+        // When
+        terminal
+            .draw(|frame| chat.render_messages(frame, Rect::new(0, 0, 20, 4)))
+            .expect("render messages");
+        let screen = terminal.backend().to_string();
+
+        // Then
+        assert!(screen.contains("final tail"), "{screen}");
+        let toggle_row = screen
+            .lines()
+            .position(|line| line.contains("> show thinking"))
+            .expect("visible thinking toggle") as u16;
+        assert_eq!(chat.state.thinking_hit_areas[0].1.y, toggle_row);
+    }
+
+    #[test]
+    fn kitty_heading_reaches_backend_as_one_protocol_sequence() {
+        // Given
+        let mut ui = crate::ui::UI::new();
+        ui.tabs[0].messages.push(crate::app::message::Message::new(
+            1,
+            "assistant".to_string(),
+            "# Heading".to_string(),
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(40, 6)).expect("test terminal");
+        let mut chat = ChatTab::new(
+            &mut ui.tabs[0],
+            ChatTabProps {
+                user_alignment: TextAlignment::Left,
+                ai_alignment: TextAlignment::Left,
+                markdown_mode: MarkdownMode::Full,
+                collapse_thinking: true,
+                show_chat_scrollbar: false,
+                kitty_enhanced_text: true,
+                kitty_text_max_scale: 2,
+                image_protocol: "off",
+                terminal_capabilities: TerminalCapabilities {
+                    terminal: TerminalKind::Kitty,
+                    multiplexer: None,
+                    kitty_graphics: true,
+                    kitty_text_sizing: true,
+                    tmux_passthrough: false,
+                },
+                frame_tick: 0,
+                providers: &[],
+                models: &[],
+                reasoning_options: &[],
+            },
+        );
+
+        // When
+        terminal
+            .draw(|frame| chat.render_messages(frame, Rect::new(0, 0, 40, 6)))
+            .expect("render kitty heading");
+
+        // Then
+        assert!(terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .any(|cell| { cell.symbol() == "\u{1b}]66;s=2;Heading\u{7}\u{1b}[13D" }));
     }
 
     #[test]
