@@ -87,7 +87,11 @@ pub struct UI {
     pub terminal_capabilities: TerminalCapabilities,
     pub web_search_enabled: bool,
     pub db_providers: Vec<(String, String, String, String, String)>,
+    pub visible_providers: Vec<(String, String, String, String, String)>,
     pub current_models: Vec<crate::ui::settings_tab::ModelInfo>,
+    pub current_reasoning_options: Vec<String>,
+    pub disabled_providers: HashSet<String>,
+    pub disabled_models: HashSet<String>,
     pub frame_tick: u64,
 }
 
@@ -116,8 +120,10 @@ pub struct ChatTabState {
     pub generated_title: Option<String>,
     pub provider_dropdown_open: bool,
     pub model_dropdown_open: bool,
+    pub reasoning_dropdown_open: bool,
     pub provider_hit_area: Option<Rect>,
     pub model_hit_area: Option<Rect>,
+    pub reasoning_hit_area: Option<Rect>,
     pub input_area: Option<Rect>,
     pub input_text_area: Option<Rect>,
     pub dropdown_item_areas: Vec<Rect>,
@@ -186,8 +192,10 @@ impl UI {
                 generated_title: None,
                 provider_dropdown_open: false,
                 model_dropdown_open: false,
+                reasoning_dropdown_open: false,
                 provider_hit_area: None,
                 model_hit_area: None,
+                reasoning_hit_area: None,
                 input_area: None,
                 input_text_area: None,
                 dropdown_item_areas: vec![],
@@ -237,7 +245,11 @@ impl UI {
             terminal_capabilities: TerminalCapabilities::detect(),
             web_search_enabled: false,
             db_providers: vec![],
+            visible_providers: vec![],
             current_models: vec![],
+            current_reasoning_options: vec![],
+            disabled_providers: HashSet::new(),
+            disabled_models: HashSet::new(),
             frame_tick: 0,
         }
     }
@@ -378,8 +390,9 @@ impl UI {
                         image_protocol: &self.image_protocol,
                         terminal_capabilities: self.terminal_capabilities,
                         frame_tick: self.frame_tick,
-                        providers: &self.db_providers,
+                        providers: &self.visible_providers,
                         models: &self.current_models,
+                        reasoning_options: &self.current_reasoning_options,
                     },
                 );
                 chat_tab.render(f, chat_chunks[0]);
@@ -393,13 +406,27 @@ impl UI {
                 tick: self.frame_tick,
                 provider: tab_state.tab.provider.clone(),
                 model: tab_state.tab.model.clone(),
+                reasoning_effort: tab_state.tab.reasoning_effort.clone(),
+                show_reasoning_selector: !self.current_reasoning_options.is_empty(),
                 show_selector: self.show_selector,
                 web_search_enabled: self.web_search_enabled,
+                context_window: self
+                    .current_models
+                    .iter()
+                    .find(|model| model.id == tab_state.tab.model)
+                    .and_then(|model| model.context_window),
+                context_used_tokens: tab_state
+                    .messages
+                    .iter()
+                    .rev()
+                    .find_map(|message| message.token_count)
+                    .and_then(|count| u32::try_from(count).ok()),
             };
             let status_areas = status_bar.render(f, main_layout[2]);
             self.status_bar_areas = Some(status_areas);
             tab_state.provider_hit_area = status_areas.provider;
             tab_state.model_hit_area = status_areas.model;
+            tab_state.reasoning_hit_area = status_areas.reasoning;
 
             let mut chat_tab = chat_tab::ChatTab::new(
                 tab_state,
@@ -414,8 +441,9 @@ impl UI {
                     image_protocol: &self.image_protocol,
                     terminal_capabilities: self.terminal_capabilities,
                     frame_tick: self.frame_tick,
-                    providers: &self.db_providers,
+                    providers: &self.visible_providers,
                     models: &self.current_models,
+                    reasoning_options: &self.current_reasoning_options,
                 },
             );
             chat_tab.render_dropdowns(f);
@@ -482,10 +510,12 @@ impl UI {
             streaming: false,
             pending_diff: None,
             generated_title: None,
-            provider_dropdown_open: false,
-            model_dropdown_open: false,
-            provider_hit_area: None,
-            model_hit_area: None,
+                provider_dropdown_open: false,
+                model_dropdown_open: false,
+                reasoning_dropdown_open: false,
+                provider_hit_area: None,
+                model_hit_area: None,
+                reasoning_hit_area: None,
             input_area: None,
             input_text_area: None,
             dropdown_item_areas: vec![],

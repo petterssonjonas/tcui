@@ -67,6 +67,7 @@ impl Storage {
             "ALTER TABLE providers ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'api_key'",
             [],
         );
+        let _ = conn.execute("ALTER TABLE models ADD COLUMN context_window INTEGER", []);
         let storage = Self {
             conn,
             chat_key: Self::load_or_create_chat_key()?,
@@ -401,7 +402,7 @@ impl Storage {
     pub fn save_models(
         &self,
         provider: &str,
-        models: &[(String, Option<f64>, Option<f64>)],
+        models: &[(String, Option<f64>, Option<f64>, Option<u32>)],
     ) -> Result<()> {
         if models.is_empty() {
             return Ok(());
@@ -410,26 +411,30 @@ impl Storage {
         let tx = self.conn.unchecked_transaction()?;
         self.conn
             .execute("DELETE FROM models WHERE provider = ?1", params![provider])?;
-        for (model_id, input_price, output_price) in models {
+        for (model_id, input_price, output_price, context_window) in models {
             self.conn.execute(
-                "INSERT INTO models (provider, model_id, input_price, output_price, fetched_at)
-                 VALUES (?1, ?2, ?3, ?4, datetime('now'))",
-                params![provider, model_id, input_price, output_price],
+                "INSERT INTO models (provider, model_id, input_price, output_price, context_window, fetched_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
+                params![provider, model_id, input_price, output_price, context_window],
             )?;
         }
         tx.commit()?;
         Ok(())
     }
 
-    pub fn get_models(&self, provider: &str) -> Result<Vec<(String, Option<f64>, Option<f64>)>> {
+    pub fn get_models(
+        &self,
+        provider: &str,
+    ) -> Result<Vec<(String, Option<f64>, Option<f64>, Option<u32>)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT model_id, input_price, output_price FROM models WHERE provider = ?1 ORDER BY model_id"
+            "SELECT model_id, input_price, output_price, context_window FROM models WHERE provider = ?1 ORDER BY model_id"
         )?;
         let rows = stmt.query_map([provider], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<f64>>(1)?,
                 row.get::<_, Option<f64>>(2)?,
+                row.get::<_, Option<u32>>(3)?,
             ))
         })?;
         rows.filter_map(|r| r.ok())

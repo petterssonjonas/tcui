@@ -418,6 +418,7 @@ mod tests {
             provider: "unused".to_string(),
             endpoint: "http://127.0.0.1:1".to_string(),
             model: String::new(),
+            reasoning_effort: None,
             backend_type: "openai".to_string(),
             api_key: None,
             system_prompt: String::new(),

@@ -209,6 +209,7 @@ pub struct AppConfig {
     pub quit_confirmation: bool,
     pub use_env_keys: bool,
     pub disabled_providers: Vec<String>,
+    pub disabled_models: Vec<String>,
     pub key_file: Option<String>,
     pub image_protocol: String,
     pub vault_path: Option<String>,
@@ -247,7 +248,7 @@ pub struct ProviderConfig {
 
 impl AppConfig {
     pub fn load() -> Result<Self> {
-        if let Some(path) = Self::repo_config_path().filter(|path| path.exists()) {
+        if let Some(path) = Self::load_repo_config_path().filter(|path| path.exists()) {
             let config = Self::load_toml(&path)?;
             Self::bootstrap_xdg_layout(&config)?;
             return Ok(config);
@@ -308,16 +309,51 @@ impl AppConfig {
     }
 
     fn write_path() -> Result<PathBuf> {
-        if let Some(path) = Self::repo_config_path().filter(|path| path.exists()) {
+        if let Some(path) = Self::cwd_repo_config_path().filter(|path| path.exists()) {
             return Ok(path);
         }
         Ok(Self::xdg_config_path()?.unwrap_or_else(|| PathBuf::from(".").join("config.toml")))
     }
 
-    fn repo_config_path() -> Option<PathBuf> {
+    fn load_repo_config_path() -> Option<PathBuf> {
+        let mut search_roots = Vec::new();
+        if let Ok(current_dir) = std::env::current_dir() {
+            search_roots.push(current_dir);
+        }
+        if let Ok(current_exe) = std::env::current_exe() {
+            let exe_is_tcui = current_exe
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(|stem| stem == "tcui")
+                .unwrap_or(false);
+            if exe_is_tcui {
+                if let Some(parent) = current_exe.parent() {
+                    search_roots.push(parent.to_path_buf());
+                }
+            }
+        }
+        Self::repo_config_path_from_roots(search_roots)
+    }
+
+    fn cwd_repo_config_path() -> Option<PathBuf> {
         std::env::current_dir()
             .ok()
-            .map(|dir| dir.join("config.toml"))
+            .and_then(|current_dir| Self::repo_config_path_from_roots([current_dir]))
+    }
+
+    fn repo_config_path_from_roots<I>(roots: I) -> Option<PathBuf>
+    where
+        I: IntoIterator<Item = PathBuf>,
+    {
+        for root in roots {
+            for dir in root.ancestors() {
+                let candidate = dir.join("config.toml");
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
     }
 
     fn xdg_config_path() -> Result<Option<PathBuf>> {
@@ -379,6 +415,7 @@ impl Default for AppConfig {
             quit_confirmation: true,
             use_env_keys: false,
             disabled_providers: Vec::new(),
+            disabled_models: Vec::new(),
             key_file: None,
             image_protocol: "auto".to_string(),
             vault_path: None,
@@ -653,5 +690,20 @@ default_provider = "OpenAI"
         std::env::set_current_dir(original_dir).expect("restore current dir");
         std::fs::remove_dir_all(&root).expect("cleanup temp dir");
         std::env::remove_var("XDG_CONFIG_HOME");
+    }
+
+    #[test]
+    fn repo_config_path_walks_up_from_nested_directory() {
+        let root = unique_temp_dir("config-upward-search");
+        let nested = root.join("target").join("debug");
+        std::fs::create_dir_all(&nested).expect("create nested dir");
+        let repo_path = root.join("config.toml");
+        std::fs::write(&repo_path, "theme = \"gruvbox\"\n").expect("write repo config");
+
+        let found = AppConfig::repo_config_path_from_roots([nested]).expect("repo config path");
+
+        assert_eq!(found, repo_path);
+
+        std::fs::remove_dir_all(&root).expect("cleanup temp dir");
     }
 }

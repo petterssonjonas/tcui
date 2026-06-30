@@ -20,6 +20,7 @@ pub struct ChatTab<'a> {
     pub frame_tick: u64,
     pub providers: &'a [(String, String, String, String, String)],
     pub models: &'a [ModelInfo],
+    pub reasoning_options: &'a [String],
 }
 
 pub struct ChatTabProps<'a> {
@@ -35,6 +36,7 @@ pub struct ChatTabProps<'a> {
     pub frame_tick: u64,
     pub providers: &'a [(String, String, String, String, String)],
     pub models: &'a [ModelInfo],
+    pub reasoning_options: &'a [String],
 }
 
 struct RenderedMessages {
@@ -61,6 +63,7 @@ impl<'a> ChatTab<'a> {
             frame_tick: props.frame_tick,
             providers: props.providers,
             models: props.models,
+            reasoning_options: props.reasoning_options,
         }
     }
 
@@ -313,6 +316,73 @@ impl<'a> ChatTab<'a> {
                         thumb,
                     );
                 }
+
+                for i in 0..max_visible {
+                    self.state.dropdown_item_areas.push(Rect {
+                        x: viewport.x,
+                        y: viewport.y + i as u16,
+                        width: viewport.width,
+                        height: 1,
+                    });
+                }
+            }
+        } else if self.state.reasoning_dropdown_open {
+            if let Some(anchor) = self.state.reasoning_hit_area {
+                let total = self.reasoning_options.len();
+                let max_visible = VISIBLE_ITEMS.min(total);
+
+                let offset = self
+                    .state
+                    .dropdown_scroll_offset
+                    .min(total.saturating_sub(max_visible));
+                self.state.dropdown_scroll_offset = offset;
+
+                let visible_options: Vec<_> = self
+                    .reasoning_options
+                    .iter()
+                    .skip(offset)
+                    .take(max_visible)
+                    .collect();
+
+                let items: Vec<ListItem> = visible_options
+                    .iter()
+                    .map(|option| {
+                        let is_selected =
+                            self.state.tab.reasoning_effort.as_deref() == Some(option.as_str());
+                        let style = if is_selected {
+                            Style::default().fg(Color::Black).bg(Color::Cyan)
+                        } else {
+                            Style::default().fg(Color::White)
+                        };
+                        ListItem::new(option.as_str()).style(style)
+                    })
+                    .collect();
+
+                let content_height = max_visible as u16;
+                let dropdown_area = Rect::new(
+                    anchor.x,
+                    anchor.y.saturating_sub(content_height + 2),
+                    anchor.width,
+                    content_height + 2,
+                );
+                let content_width = dropdown_area.width.saturating_sub(2 + SCROLLBAR_WIDTH);
+                let viewport = Rect::new(
+                    dropdown_area.x + 1,
+                    dropdown_area.y + 1,
+                    content_width,
+                    content_height,
+                );
+
+                let list = List::new(items).style(Style::default().bg(Color::Black));
+                f.render_widget(Clear, dropdown_area);
+                f.render_widget(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Cyan))
+                        .style(Style::default().bg(Color::Black)),
+                    dropdown_area,
+                );
+                f.render_widget(list, viewport);
 
                 for i in 0..max_visible {
                     self.state.dropdown_item_areas.push(Rect {
@@ -636,12 +706,12 @@ impl<'a> ChatTab<'a> {
             &self.state.input_content,
             self.state.input_cursor,
             self.state.input_scroll,
-            inner.width as usize,
+            inner.width.saturating_sub(1) as usize,
             true,
         );
         self.state.input_scroll = scroll;
 
-        let input = Paragraph::new(display)
+        let input = Paragraph::new(format!(" {display}"))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -657,7 +727,7 @@ impl<'a> ChatTab<'a> {
 
         f.render_widget(input, area);
         if inner.width > 0 && inner.height > 0 {
-            f.set_cursor_position((inner.x.saturating_add(cursor_x), inner.y));
+            f.set_cursor_position((inner.x.saturating_add(cursor_x).saturating_add(1), inner.y));
         }
     }
 
@@ -684,12 +754,12 @@ impl<'a> ChatTab<'a> {
             &self.state.input_content,
             self.state.input_cursor,
             self.state.input_scroll,
-            inner.width as usize,
+            inner.width.saturating_sub(1) as usize,
             true,
         );
         self.state.input_scroll = scroll;
 
-        let input = Paragraph::new(display)
+        let input = Paragraph::new(format!(" {display}"))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -709,7 +779,7 @@ impl<'a> ChatTab<'a> {
 
         f.render_widget(input, horizontal[1]);
         if inner.width > 0 && inner.height > 0 {
-            f.set_cursor_position((inner.x.saturating_add(cursor_x), inner.y));
+            f.set_cursor_position((inner.x.saturating_add(cursor_x).saturating_add(1), inner.y));
         }
     }
 }
@@ -731,12 +801,12 @@ fn visible_input_line(
         } else {
             ""
         };
-        let visible: String = placeholder.chars().take(width.saturating_sub(1)).collect();
-        return (format!("|{visible}"), 0, 0);
+        let visible: String = placeholder.chars().take(width).collect();
+        return (visible, 0, 0);
     }
 
     let chars: Vec<char> = content.chars().collect();
-    let available = width.saturating_sub(1);
+    let available = width;
     let cursor = cursor.min(chars.len());
     let mut scroll = scroll.min(chars.len());
     if cursor < scroll {
@@ -748,20 +818,7 @@ fn visible_input_line(
     let end = (scroll + available).min(chars.len());
     let visible: String = chars[scroll..end].iter().collect();
     let relative = cursor.saturating_sub(scroll).min(available) as u16;
-    let byte = char_to_byte_index_local(&visible, relative as usize);
-    let mut rendered = visible;
-    rendered.insert(byte, '|');
-    (rendered, scroll, relative)
-}
-
-fn char_to_byte_index_local(text: &str, char_idx: usize) -> usize {
-    if char_idx == 0 {
-        return 0;
-    }
-    text.char_indices()
-        .nth(char_idx)
-        .map(|(idx, _)| idx)
-        .unwrap_or(text.len())
+    (visible, scroll, relative)
 }
 
 fn scrollbar_thumb(
@@ -919,6 +976,7 @@ mod tests {
                 frame_tick: 0,
                 providers: &[],
                 models: &[],
+                reasoning_options: &[],
             },
         );
 
@@ -943,11 +1001,11 @@ mod tests {
 
     #[test]
     fn visible_input_line_scrolls_to_keep_cursor_visible() {
-        let (display, scroll, cursor_x) = visible_input_line("abcdefghij", 10, 0, 6, false);
+        let (display, scroll, cursor_x) = visible_input_line("abcdefghij", 10, 0, 5, false);
 
         assert_eq!(scroll, 5);
         assert_eq!(cursor_x, 5);
-        assert_eq!(display, "fghij|");
+        assert_eq!(display, "fghij");
     }
 
     #[test]
@@ -984,6 +1042,7 @@ mod tests {
                 frame_tick: 0,
                 providers: &[],
                 models: &[],
+                reasoning_options: &[],
             },
         );
 
@@ -1033,6 +1092,7 @@ mod tests {
                 frame_tick: 0,
                 providers: &[],
                 models: &[],
+                reasoning_options: &[],
             },
         );
 
@@ -1112,6 +1172,7 @@ mod tests {
                 frame_tick: 0,
                 providers: &[],
                 models: &[],
+                reasoning_options: &[],
             },
         );
 

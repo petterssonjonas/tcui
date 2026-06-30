@@ -162,6 +162,7 @@ async fn probe_ollama(
             id: model.name,
             input_price: None,
             output_price: None,
+            context_window: None,
         })
         .collect::<Vec<_>>();
     let selected_model = resolve_selected_model(&config.selected_model, &models);
@@ -216,6 +217,7 @@ async fn probe_lmstudio(
                 id: model.id,
                 input_price: None,
                 output_price: None,
+                context_window: None,
             }
         })
         .collect::<Vec<_>>();
@@ -300,6 +302,7 @@ async fn fetch_openai_models(
             id: model.id,
             input_price: None,
             output_price: None,
+            context_window: None,
         })
         .collect())
 }

@@ -28,7 +28,7 @@ fn openai_stream_events_split_thinking_from_answer() {
     let events = openai_stream_events(data, &mut filter).unwrap();
 
     assert_eq!(
-        events,
+        events.events,
         vec![
             ChatStreamEvent::Thinking("working".to_string()),
             ChatStreamEvent::Answer("answer".to_string())
@@ -42,10 +42,22 @@ fn openai_stream_events_strips_title_from_answer() {
     let first = r#"{"choices":[{"delta":{"content":"<chat-title>Hidden"}}]}"#;
     let second = r#"{"choices":[{"delta":{"content":"</chat-title>\nok"}}]}"#;
 
-    let mut events = openai_stream_events(first, &mut filter).unwrap();
-    events.extend(openai_stream_events(second, &mut filter).unwrap());
+    let mut events = openai_stream_events(first, &mut filter).unwrap().events;
+    events.extend(openai_stream_events(second, &mut filter).unwrap().events);
 
     assert_eq!(events, vec![ChatStreamEvent::Answer("\nok".to_string())]);
+}
+
+#[test]
+fn openai_stream_events_capture_usage_when_present() {
+    let mut filter = TitleTagFilter::default();
+    let data =
+        r#"{"choices":[{"delta":{"content":"answer"}}],"usage":{"total_tokens":2048}}"#;
+
+    let chunk = openai_stream_events(data, &mut filter).unwrap();
+
+    assert_eq!(chunk.total_tokens, Some(2048));
+    assert_eq!(chunk.events, vec![ChatStreamEvent::Answer("answer".to_string())]);
 }
 
 #[test]

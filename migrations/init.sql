@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS models (
     model_id TEXT NOT NULL,
     input_price REAL,
     output_price REAL,
+    context_window INTEGER,
     fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(provider, model_id)
 );
