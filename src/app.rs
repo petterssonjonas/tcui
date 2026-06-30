@@ -2,9 +2,9 @@
 use futures::StreamExt;
 use ratatui::layout::Rect;
 use std::collections::HashSet;
+use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::io::IsTerminal;
 
 pub mod action;
 pub mod generated_file;
@@ -61,7 +61,8 @@ impl TuiApp {
         ui.disabled_providers = config_snapshot.disabled_providers.iter().cloned().collect();
         ui.disabled_models = config_snapshot.disabled_models.iter().cloned().collect();
         let _ = storage.sync_providers(&config_snapshot.providers);
-        ui.visible_providers = Self::filter_visible_providers(&ui.db_providers, &ui.disabled_providers);
+        ui.visible_providers =
+            Self::filter_visible_providers(&ui.db_providers, &ui.disabled_providers);
 
         let resolve_provider_name = |candidate: &str| {
             ui.db_providers
@@ -161,16 +162,27 @@ impl TuiApp {
         format!("{provider}:{model}")
     }
 
-    fn visible_models_for_provider(&self, provider: &str) -> Vec<crate::ui::settings_tab::ModelInfo> {
+    fn visible_models_for_provider(
+        &self,
+        provider: &str,
+    ) -> Vec<crate::ui::settings_tab::ModelInfo> {
         let mut models = self.cached_models_for_provider(provider);
-        models.retain(|model| !self.ui.disabled_models.contains(&Self::model_disable_key(provider, &model.id)));
+        models.retain(|model| {
+            !self
+                .ui
+                .disabled_models
+                .contains(&Self::model_disable_key(provider, &model.id))
+        });
         models
     }
 
     fn reasoning_options_for(provider: &str, model: &str) -> Vec<String> {
         let provider = crate::llm::auth::canonical_provider_name(provider);
         if model.starts_with("gpt-5")
-            && matches!(provider.as_str(), "Codex" | "OpenAI" | "OpenRouter" | "Groq" | "Mistral")
+            && matches!(
+                provider.as_str(),
+                "Codex" | "OpenAI" | "OpenRouter" | "Groq" | "Mistral"
+            )
         {
             return vec!["low".to_string(), "medium".to_string(), "high".to_string()];
         }
@@ -208,14 +220,16 @@ impl TuiApp {
                 model = first_model.id.clone();
             }
         }
-        self.ui.current_reasoning_options =
-            Self::reasoning_options_for(&provider, &model);
+        self.ui.current_reasoning_options = Self::reasoning_options_for(&provider, &model);
         if self.ui.current_reasoning_options.is_empty() {
             reasoning_effort = None;
-        } else if reasoning_effort
-            .as_ref()
-            .is_none_or(|value| !self.ui.current_reasoning_options.iter().any(|option| option == value))
-        {
+        } else if reasoning_effort.as_ref().is_none_or(|value| {
+            !self
+                .ui
+                .current_reasoning_options
+                .iter()
+                .any(|option| option == value)
+        }) {
             reasoning_effort = Some("medium".to_string());
         }
         if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
@@ -1039,14 +1053,21 @@ impl TuiApp {
                                     {
                                         settings.models_available_models = models
                                             .into_iter()
-                                            .map(|(id, input_price, output_price, context_window)| {
-                                                crate::ui::settings_tab::ModelInfo {
+                                            .map(
+                                                |(
                                                     id,
                                                     input_price,
                                                     output_price,
                                                     context_window,
-                                                }
-                                            })
+                                                )| {
+                                                    crate::ui::settings_tab::ModelInfo {
+                                                        id,
+                                                        input_price,
+                                                        output_price,
+                                                        context_window,
+                                                    }
+                                                },
+                                            )
                                             .collect();
                                     }
                                     if settings.models_available_models.is_empty() {
@@ -1359,7 +1380,8 @@ impl TuiApp {
         }
 
         if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
-            if tab.provider_dropdown_open || tab.model_dropdown_open || tab.reasoning_dropdown_open {
+            if tab.provider_dropdown_open || tab.model_dropdown_open || tab.reasoning_dropdown_open
+            {
                 let total = if tab.provider_dropdown_open {
                     self.ui.visible_providers.len()
                 } else if tab.model_dropdown_open {
@@ -1520,8 +1542,9 @@ impl TuiApp {
                                     0 => crate::ui::settings_tab::SettingsTab::General,
                                     1 => crate::ui::settings_tab::SettingsTab::Keybindings,
                                     2 => crate::ui::settings_tab::SettingsTab::Providers,
-                                    3 => crate::ui::settings_tab::SettingsTab::Local,
-                                    4 => crate::ui::settings_tab::SettingsTab::Mcp,
+                                    3 => crate::ui::settings_tab::SettingsTab::Models,
+                                    4 => crate::ui::settings_tab::SettingsTab::Local,
+                                    5 => crate::ui::settings_tab::SettingsTab::Mcp,
                                     _ => crate::ui::settings_tab::SettingsTab::General,
                                 };
                             }
@@ -1754,24 +1777,39 @@ impl TuiApp {
                         if settings.models_dropdown_open {
                             let mut provider_to_refresh = None;
                             let mut handled = false;
-                            for (i, area) in settings.models_tab_hit_areas.provider_items.iter().enumerate() {
+                            for (i, area) in settings
+                                .models_tab_hit_areas
+                                .provider_items
+                                .iter()
+                                .enumerate()
+                            {
                                 if area.contains(pos) {
                                     settings.select_models_provider_dropdown_item(i);
-                                    if let Ok(models) = self.storage.get_models(&settings.models_provider) {
+                                    if let Ok(models) =
+                                        self.storage.get_models(&settings.models_provider)
+                                    {
                                         settings.models_available_models = models
                                             .into_iter()
-                                            .map(|(id, input_price, output_price, context_window)| {
-                                                crate::ui::settings_tab::ModelInfo {
+                                            .map(
+                                                |(
                                                     id,
                                                     input_price,
                                                     output_price,
                                                     context_window,
-                                                }
-                                            })
+                                                )| {
+                                                    crate::ui::settings_tab::ModelInfo {
+                                                        id,
+                                                        input_price,
+                                                        output_price,
+                                                        context_window,
+                                                    }
+                                                },
+                                            )
                                             .collect();
                                     }
                                     if settings.models_available_models.is_empty() {
-                                        provider_to_refresh = Some(settings.models_provider.clone());
+                                        provider_to_refresh =
+                                            Some(settings.models_provider.clone());
                                     }
                                     handled = true;
                                     break;
@@ -1793,7 +1831,9 @@ impl TuiApp {
                                 return None;
                             }
                         }
-                        for (idx, row_area) in settings.models_tab_hit_areas.model_rows.iter().enumerate() {
+                        for (idx, row_area) in
+                            settings.models_tab_hit_areas.model_rows.iter().enumerate()
+                        {
                             if row_area.contains(pos) {
                                 settings.models_tab_focus =
                                     crate::ui::settings_tab::ModelsTabFocus::Model(idx);
@@ -1844,14 +1884,21 @@ impl TuiApp {
                                     {
                                         settings.available_models = models
                                             .into_iter()
-                                            .map(|(id, input_price, output_price, context_window)| {
-                                                crate::ui::settings_tab::ModelInfo {
+                                            .map(
+                                                |(
                                                     id,
                                                     input_price,
                                                     output_price,
                                                     context_window,
-                                                }
-                                            })
+                                                )| {
+                                                    crate::ui::settings_tab::ModelInfo {
+                                                        id,
+                                                        input_price,
+                                                        output_price,
+                                                        context_window,
+                                                    }
+                                                },
+                                            )
                                             .collect();
                                     }
                                     if settings.available_models.is_empty() {
@@ -2022,13 +2069,17 @@ impl TuiApp {
             let mut refresh_models_and_reasoning = false;
 
             if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
-                if tab.provider_dropdown_open || tab.model_dropdown_open || tab.reasoning_dropdown_open {
+                if tab.provider_dropdown_open
+                    || tab.model_dropdown_open
+                    || tab.reasoning_dropdown_open
+                {
                     for (i, item_area) in tab.dropdown_item_areas.iter().enumerate() {
                         if item_area.contains(pos) {
                             let real_idx = i + tab.dropdown_scroll_offset;
                             if tab.provider_dropdown_open {
                                 if real_idx < self.ui.visible_providers.len() {
-                                    let new_provider = self.ui.visible_providers[real_idx].0.clone();
+                                    let new_provider =
+                                        self.ui.visible_providers[real_idx].0.clone();
                                     if tab.tab.provider != new_provider {
                                         tab.tab.provider = new_provider.clone();
                                         tab.tab.model.clear();
@@ -2100,7 +2151,7 @@ impl TuiApp {
                 if models.is_empty() {
                     self.refresh_models_for_provider(provider);
                 } else if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
-                        if tab.tab.model.is_empty() {
+                    if tab.tab.model.is_empty() {
                         if let Some(first) = self.ui.current_models.first() {
                             tab.tab.model = first.id.clone();
                         }
@@ -2858,14 +2909,14 @@ impl TuiApp {
         let mut models = match self.storage.get_models(provider) {
             Ok(models) => models
                 .into_iter()
-                .map(
-                    |(id, input_price, output_price, context_window)| crate::ui::settings_tab::ModelInfo {
+                .map(|(id, input_price, output_price, context_window)| {
+                    crate::ui::settings_tab::ModelInfo {
                         id,
                         input_price,
                         output_price,
                         context_window,
-                    },
-                )
+                    }
+                })
                 .collect::<Vec<_>>(),
             Err(_) => Vec::new(),
         };
@@ -2944,14 +2995,14 @@ impl TuiApp {
 
             let model_infos = models
                 .into_iter()
-                .map(
-                    |(id, input_price, output_price, context_window)| crate::ui::settings_tab::ModelInfo {
+                .map(|(id, input_price, output_price, context_window)| {
+                    crate::ui::settings_tab::ModelInfo {
                         id,
                         input_price,
                         output_price,
                         context_window,
-                    },
-                )
+                    }
+                })
                 .collect();
             let _ = action_tx.send(Action::SetProviderModels(provider, model_infos));
         });
@@ -3024,14 +3075,14 @@ impl TuiApp {
                 .get_models(crate::config::LOCAL_PROVIDER_NAME)
                 .unwrap_or_default()
                 .into_iter()
-                .map(
-                    |(id, input_price, output_price, context_window)| crate::ui::settings_tab::ModelInfo {
+                .map(|(id, input_price, output_price, context_window)| {
+                    crate::ui::settings_tab::ModelInfo {
                         id,
                         input_price,
                         output_price,
                         context_window,
-                    },
-                )
+                    }
+                })
                 .collect();
         }
 
@@ -3039,14 +3090,14 @@ impl TuiApp {
             .get_models(provider)
             .unwrap_or_default()
             .into_iter()
-            .map(
-                |(id, input_price, output_price, context_window)| crate::ui::settings_tab::ModelInfo {
+            .map(|(id, input_price, output_price, context_window)| {
+                crate::ui::settings_tab::ModelInfo {
                     id,
                     input_price,
                     output_price,
                     context_window,
-                },
-            )
+                }
+            })
             .collect()
     }
 
@@ -4114,7 +4165,10 @@ selected_model = "llama3.1"
             let popup = app.ui.list_popup.as_ref().expect("command popup");
             assert_eq!(popup.title, "Commands");
             assert!(popup.items.iter().any(|item| item.label.contains("/theme")));
-            assert!(popup.items.iter().any(|item| item.label.contains("/remindme")));
+            assert!(popup
+                .items
+                .iter()
+                .any(|item| item.label.contains("/remindme")));
         });
     }
 
@@ -4247,7 +4301,9 @@ selected_model = "llama3.1"
             assert_eq!(tab.messages.len(), 2);
             assert_eq!(tab.messages[0].role, "user");
             assert_eq!(tab.messages[1].role, "assistant");
-            assert!(tab.messages[1].content.contains("Scheduled one-shot reminder"));
+            assert!(tab.messages[1]
+                .content
+                .contains("Scheduled one-shot reminder"));
 
             std::env::remove_var("TCUI_REMINDER_SYSTEMD_RUN");
         });

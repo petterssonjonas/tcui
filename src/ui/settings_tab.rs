@@ -572,7 +572,14 @@ impl SettingsPopup {
             .constraints([Constraint::Length(3), Constraint::Min(0)])
             .split(inner);
 
-        let tabs = ["General", "Keybindings", "Providers", "Models", "Local", "MCP"];
+        let tabs = [
+            "General",
+            "Keybindings",
+            "Providers",
+            "Models",
+            "Local",
+            "MCP",
+        ];
         let tab_titles: Vec<Line> = tabs
             .iter()
             .enumerate()
@@ -1634,7 +1641,11 @@ impl SettingsPopup {
         self.models_tab_hit_areas = ModelsTabHitAreas::default();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(2)])
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(0),
+                Constraint::Length(2),
+            ])
             .margin(1)
             .split(area);
 
@@ -1669,12 +1680,7 @@ impl SettingsPopup {
             if idx >= list_inner.height as usize {
                 break;
             }
-            let row_area = Rect::new(
-                list_inner.x,
-                list_inner.y + idx as u16,
-                list_inner.width,
-                1,
-            );
+            let row_area = Rect::new(list_inner.x, list_inner.y + idx as u16, list_inner.width, 1);
             let enabled = !self
                 .disabled_models
                 .contains(&Self::disabled_model_key(&self.models_provider, &model.id));
@@ -1695,9 +1701,10 @@ impl SettingsPopup {
             );
         }
 
-        let help = Paragraph::new("Toggle providers/models here to hide them from the chat selectors.")
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::DarkGray));
+        let help =
+            Paragraph::new("Toggle providers/models here to hide them from the chat selectors.")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(Color::DarkGray));
         f.render_widget(help, chunks[2]);
 
         self.render_models_dropdown(f, chunks[0]);
@@ -1716,7 +1723,11 @@ impl SettingsPopup {
             .models_dropdown_scroll_offset
             .min(total.saturating_sub(max_visible));
         self.models_dropdown_scroll_offset = offset;
-        let visible_names: Vec<_> = provider_names.iter().skip(offset).take(max_visible).collect();
+        let visible_names: Vec<_> = provider_names
+            .iter()
+            .skip(offset)
+            .take(max_visible)
+            .collect();
         let items: Vec<ListItem> = visible_names
             .iter()
             .map(|name| {
@@ -3222,7 +3233,9 @@ impl SettingsPopup {
         self.models_tab_focus = match self.models_tab_focus {
             ModelsTabFocus::Provider if forward && count > 0 => ModelsTabFocus::Model(0),
             ModelsTabFocus::Provider => ModelsTabFocus::Provider,
-            ModelsTabFocus::Model(idx) if forward && idx + 1 < count => ModelsTabFocus::Model(idx + 1),
+            ModelsTabFocus::Model(idx) if forward && idx + 1 < count => {
+                ModelsTabFocus::Model(idx + 1)
+            }
             ModelsTabFocus::Model(_) if forward => ModelsTabFocus::Provider,
             ModelsTabFocus::Model(0) => ModelsTabFocus::Provider,
             ModelsTabFocus::Model(idx) => ModelsTabFocus::Model(idx - 1),
@@ -3652,8 +3665,12 @@ impl SettingsPopup {
                     ProvidersAction::None
                 }
                 ProvidersTabFocus::PresetProvider(idx) => {
-                    if idx < self.preset_api_key_providers().len() {
-                        self.open_preset_key_popup(idx);
+                    if let Some((name, _, _, _, _)) = self.preset_api_key_providers().get(idx) {
+                        if self.disabled_providers.contains(name) {
+                            self.disabled_providers.remove(name);
+                        } else {
+                            self.disabled_providers.insert(name.clone());
+                        }
                     }
                     ProvidersAction::None
                 }
@@ -3749,11 +3766,18 @@ impl SettingsPopup {
     pub fn tab_hit_areas(&self, area: Rect) -> Vec<Rect> {
         let inner = Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2);
         let tab_row = Rect::new(inner.x, inner.y, inner.width, 3);
-        let tabs = ["General", "Keybindings", "Providers", "Models", "Local", "MCP"];
+        let tabs = [
+            "General",
+            "Keybindings",
+            "Providers",
+            "Models",
+            "Local",
+            "MCP",
+        ];
         let mut areas = Vec::new();
         let mut current_x = tab_row.x;
         for t in tabs {
-            let width = (t.len() + 1) as u16;
+            let width = t.len() as u16;
             areas.push(Rect::new(current_x, tab_row.y, width, tab_row.height));
             current_x += width + 1;
         }
@@ -4055,6 +4079,44 @@ mod tests {
             .collect();
         assert!(rendered.contains("MCP"));
         assert!(rendered.contains("server-15"));
+    }
+
+    #[test]
+    fn tab_hit_areas_include_models_before_local_and_mcp() {
+        // Given
+        let popup = popup_with_mcps(0);
+        let area = SettingsPopup::popup_area(Rect::new(0, 0, 100, 30));
+
+        // When
+        let hit_areas = popup.tab_hit_areas(area);
+
+        // Then
+        assert_eq!(hit_areas.len(), 6);
+        assert!(hit_areas[3].x < hit_areas[4].x);
+        assert!(hit_areas[4].x < hit_areas[5].x);
+    }
+
+    #[test]
+    fn activating_preset_provider_row_toggles_provider_enabled_state() {
+        // Given
+        let mut popup = popup_with_mcps(0);
+        popup.active_tab = SettingsTab::Providers;
+        popup.db_providers = vec![(
+            "OpenAI".to_string(),
+            "https://api.openai.com/v1".to_string(),
+            "OPENAI_API_KEY".to_string(),
+            "openai".to_string(),
+            "api_key".to_string(),
+        )];
+        popup.providers_tab_focus = ProvidersTabFocus::PresetProvider(0);
+
+        // When
+        let action = popup.activate_focus();
+
+        // Then
+        assert!(matches!(action, ProvidersAction::None));
+        assert!(popup.disabled_providers.contains("OpenAI"));
+        assert!(popup.preset_key_popup.is_none());
     }
 
     #[test]

@@ -90,9 +90,13 @@ impl StatusBar {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length((UnicodeWidthStr::width(left_label.as_str()) as u16).min(area.width)),
+                Constraint::Length(
+                    (UnicodeWidthStr::width(left_label.as_str()) as u16).min(area.width),
+                ),
                 Constraint::Min(0),
-                Constraint::Length((UnicodeWidthStr::width(right_label.as_str()) as u16).min(area.width)),
+                Constraint::Length(
+                    (UnicodeWidthStr::width(right_label.as_str()) as u16).min(area.width),
+                ),
             ])
             .split(area);
 
@@ -110,6 +114,7 @@ impl StatusBar {
             let middle_areas = self.render_middle_controls(f, chunks[1]);
             areas.provider = middle_areas.provider;
             areas.model = middle_areas.model;
+            areas.reasoning = middle_areas.reasoning;
         } else {
             f.render_widget(
                 Paragraph::new("").style(Style::default().bg(theme.panel)),
@@ -139,11 +144,9 @@ impl StatusBar {
         } else {
             theme.muted
         };
-        if let Some(control_area) = take_control_area(&mut x, area.y, &mut remaining, label)
-        {
+        if let Some(control_area) = take_control_area(&mut x, area.y, &mut remaining, label) {
             f.render_widget(
-                Paragraph::new(label)
-                    .style(Style::default().fg(search_color).bg(theme.panel)),
+                Paragraph::new(label).style(Style::default().fg(search_color).bg(theme.panel)),
                 control_area,
             );
             areas.web_search = Some(control_area);
@@ -394,6 +397,38 @@ mod tests {
         assert!(row.contains("deepseek-v4-flash"));
         assert!(row.contains("Context: 50% used of 256K"));
         assert!(row.contains("Not connected, check settings"));
+    }
+
+    #[test]
+    fn reasoning_selector_returns_click_area_when_visible() {
+        // Given
+        let status = StatusBar {
+            status: ConnectionStatus::CloudConnected,
+            message: None,
+            mcps: vec![],
+            working: false,
+            tick: 0,
+            provider: "Codex".to_string(),
+            model: "gpt-5.1".to_string(),
+            reasoning_effort: Some("medium".to_string()),
+            show_reasoning_selector: true,
+            show_selector: true,
+            web_search_enabled: false,
+            context_window: None,
+            context_used_tokens: None,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
+        let mut areas = StatusBarAreas::default();
+
+        // When
+        terminal
+            .draw(|frame| {
+                areas = status.render(frame, Rect::new(0, 29, 100, 1));
+            })
+            .expect("render status");
+
+        // Then
+        assert!(areas.reasoning.is_some());
     }
 
     #[test]
