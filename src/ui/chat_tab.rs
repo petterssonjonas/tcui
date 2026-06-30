@@ -3,7 +3,7 @@ use crate::config::app_config::{MarkdownMode, TextAlignment};
 use crate::ui::components::image_block::{is_local_image_source, ImageBlockState};
 use crate::ui::components::markdown::MarkdownRenderer;
 use crate::ui::components::markdown_model::{LinkTarget, RenderedImage};
-use crate::ui::components::terminal_capabilities::wrap_for_terminal_passthrough;
+use crate::ui::components::terminal_capabilities::KittyTextOverlay;
 use crate::ui::settings_tab::ModelInfo;
 use ratatui::{layout::Rect, prelude::*, widgets::*, Frame};
 use unicode_width::UnicodeWidthStr;
@@ -415,6 +415,7 @@ impl<'a> ChatTab<'a> {
     }
 
     fn render_messages(&mut self, f: &mut Frame, area: Rect) {
+        self.state.kitty_text_overlays.clear();
         if area.height == 0 {
             self.state.thinking_hit_areas.clear();
             self.state.link_hit_areas.clear();
@@ -508,26 +509,12 @@ impl<'a> ChatTab<'a> {
                     Alignment::Right => viewport.width.saturating_sub(width),
                 };
             let y = viewport.y + (heading.line - scroll_offset) as u16;
-            for row in y..y
-                .saturating_add(u16::from(heading.scale))
-                .min(viewport.bottom())
-            {
-                for column in x..x.saturating_add(width).min(viewport.right()) {
-                    f.buffer_mut()[(column, row)].reset();
-                }
-            }
-            let text = heading
-                .text
-                .chars()
-                .filter(|ch| !ch.is_control())
-                .collect::<String>();
-            let advance = UnicodeWidthStr::width(text.as_str()) * usize::from(heading.scale);
-            let sequence = format!("\u{1b}]66;s={};{text}\u{7}", heading.scale);
-            let mut symbol = wrap_for_terminal_passthrough(self.terminal_capabilities, &sequence);
-            if advance > 1 {
-                symbol.push_str(&format!("\u{1b}[{}D", advance - 1));
-            }
-            f.buffer_mut()[(x, y)].set_symbol(&symbol);
+            self.state.kitty_text_overlays.push(KittyTextOverlay {
+                x,
+                y,
+                text: heading.text.clone(),
+                scale: heading.scale,
+            });
         }
         self.render_images(f, viewport, scroll_offset, &rendered.images);
         if show_scrollbar {
@@ -1194,7 +1181,7 @@ mod tests {
     }
 
     #[test]
-    fn kitty_heading_reaches_backend_as_one_protocol_sequence() {
+    fn kitty_heading_is_not_embedded_in_ratatui_cells() {
         // Given
         let mut ui = crate::ui::UI::new();
         ui.tabs[0].messages.push(crate::app::message::Message::new(
@@ -1234,12 +1221,13 @@ mod tests {
             .expect("render kitty heading");
 
         // Then
-        assert!(terminal
+        assert!(!terminal
             .backend()
             .buffer()
             .content
             .iter()
-            .any(|cell| { cell.symbol() == "\u{1b}]66;s=2;Heading\u{7}\u{1b}[13D" }));
+            .any(|cell| cell.symbol().contains("\u{1b}]66;")));
+        assert_eq!(chat.state.kitty_text_overlays.len(), 1);
     }
 
     #[test]

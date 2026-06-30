@@ -121,6 +121,7 @@ async fn main() -> Result<()> {
 
     let mut terminal = setup_terminal()?;
     restore_on_drop(&mut terminal);
+    ui::components::terminal_capabilities::initialize_terminal_profile();
 
     let storage = Storage::new()?;
     let config = AppConfig::load()?;

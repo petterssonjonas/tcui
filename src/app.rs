@@ -407,6 +407,7 @@ impl TuiApp {
             terminal.draw(|f| {
                 self.ui.render(f);
             })?;
+            self.write_terminal_overlays(terminal)?;
             return Ok(());
         }
 
@@ -417,6 +418,7 @@ impl TuiApp {
             terminal.draw(|f| {
                 self.ui.render(f);
             })?;
+            self.write_terminal_overlays(terminal)?;
 
             tokio::select! {
                 _ = tick.tick() => {}
@@ -461,6 +463,20 @@ impl TuiApp {
             }
         }
         Ok(())
+    }
+
+    fn write_terminal_overlays(
+        &self,
+        terminal: &mut ratatui::Terminal<crate::Backend>,
+    ) -> std::io::Result<()> {
+        let Some(tab) = self.ui.tabs.get(self.ui.active_tab) else {
+            return Ok(());
+        };
+        crate::ui::components::terminal_capabilities::write_kitty_text_overlays(
+            terminal.backend_mut(),
+            &tab.kitty_text_overlays,
+            self.ui.terminal_capabilities,
+        )
     }
 
     pub async fn dispatch(&mut self, action: Action) -> color_eyre::Result<()> {

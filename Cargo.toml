@@ -22,8 +22,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"
 tokio-util = "0.7"
 futures = "0.3"
 pulldown-cmark = "0.13"
-ratatui-image = { version = "0.10", default-features = false, features = ["crossterm", "rustix"] }
-image = { version = "0.24", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+ratatui-image = { version = "11", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-native-roots"] }
 rmcp = { version = "1.8", default-features = false, features = ["client", "transport-child-process"] }
 tui-logger = "0.18"
