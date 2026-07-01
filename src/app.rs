@@ -4077,13 +4077,12 @@ mod tests {
         std::fs::create_dir_all(&root).expect("create root dir");
         std::fs::create_dir_all(&data_home).expect("create data dir");
         std::fs::create_dir_all(&config_home).expect("create config dir");
+        std::fs::create_dir_all(config_home.join("tcui")).expect("create tcui config dir");
         std::env::set_var("XDG_DATA_HOME", &data_home);
         std::env::set_var("XDG_CONFIG_HOME", &config_home);
-        let original_dir = std::env::current_dir().expect("current dir");
-        std::env::set_current_dir(&root).expect("set current dir");
 
         std::fs::write(
-            root.join("config.toml"),
+            config_home.join("tcui").join("config.toml"),
             r#"
 default_provider = "OpenCode Go"
 default_model = "deepseek-v4-flash"
@@ -4113,7 +4112,6 @@ default_model = "deepseek-v4-flash"
             Some(Action::CloseSettings)
         ));
 
-        std::env::set_current_dir(original_dir).expect("restore current dir");
         std::fs::remove_dir_all(&root).expect("cleanup temp dir");
         std::env::remove_var("XDG_DATA_HOME");
         std::env::remove_var("XDG_CONFIG_HOME");
@@ -4128,13 +4126,12 @@ default_model = "deepseek-v4-flash"
         std::fs::create_dir_all(&root).expect("create root dir");
         std::fs::create_dir_all(&data_home).expect("create data dir");
         std::fs::create_dir_all(&config_home).expect("create config dir");
+        std::fs::create_dir_all(config_home.join("tcui")).expect("create tcui config dir");
         std::env::set_var("XDG_DATA_HOME", &data_home);
         std::env::set_var("XDG_CONFIG_HOME", &config_home);
-        let original_dir = std::env::current_dir().expect("current dir");
-        std::env::set_current_dir(&root).expect("set current dir");
 
         std::fs::write(
-            root.join("config.toml"),
+            config_home.join("tcui").join("config.toml"),
             r#"
 default_provider = "Local Inference"
 default_model = ""
@@ -4170,7 +4167,6 @@ selected_model = "llama3.1"
         );
         assert_eq!(app.ui.tabs[0].tab.model, "llama3.1");
 
-        std::env::set_current_dir(original_dir).expect("restore current dir");
         std::fs::remove_dir_all(&root).expect("cleanup temp dir");
         std::env::remove_var("XDG_DATA_HOME");
         std::env::remove_var("XDG_CONFIG_HOME");

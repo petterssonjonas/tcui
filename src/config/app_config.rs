@@ -302,13 +302,10 @@ pub struct ProviderConfig {
 
 impl AppConfig {
     pub fn load() -> Result<Self> {
-        if let Some(path) = Self::load_repo_config_path().filter(|path| path.exists()) {
-            let config = Self::load_toml(&path)?;
-            Self::bootstrap_xdg_layout(&config)?;
-            return Ok(config);
-        }
         if let Some(path) = Self::xdg_config_path()?.filter(|path| path.exists()) {
+            let content = std::fs::read_to_string(&path)?;
             let config = Self::load_toml(&path)?;
+            Self::rewrite_if_migrated(&path, &content, &config)?;
             Self::bootstrap_xdg_layout(&config)?;
             return Ok(config);
         }
@@ -363,51 +360,7 @@ impl AppConfig {
     }
 
     fn write_path() -> Result<PathBuf> {
-        if let Some(path) = Self::cwd_repo_config_path().filter(|path| path.exists()) {
-            return Ok(path);
-        }
         Ok(Self::xdg_config_path()?.unwrap_or_else(|| PathBuf::from(".").join("config.toml")))
-    }
-
-    fn load_repo_config_path() -> Option<PathBuf> {
-        let mut search_roots = Vec::new();
-        if let Ok(current_dir) = std::env::current_dir() {
-            search_roots.push(current_dir);
-        }
-        if let Ok(current_exe) = std::env::current_exe() {
-            let exe_is_tcui = current_exe
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .map(|stem| stem == "tcui")
-                .unwrap_or(false);
-            if exe_is_tcui {
-                if let Some(parent) = current_exe.parent() {
-                    search_roots.push(parent.to_path_buf());
-                }
-            }
-        }
-        Self::repo_config_path_from_roots(search_roots)
-    }
-
-    fn cwd_repo_config_path() -> Option<PathBuf> {
-        std::env::current_dir()
-            .ok()
-            .and_then(|current_dir| Self::repo_config_path_from_roots([current_dir]))
-    }
-
-    fn repo_config_path_from_roots<I>(roots: I) -> Option<PathBuf>
-    where
-        I: IntoIterator<Item = PathBuf>,
-    {
-        for root in roots {
-            for dir in root.ancestors() {
-                let candidate = dir.join("config.toml");
-                if candidate.exists() {
-                    return Some(candidate);
-                }
-            }
-        }
-        None
     }
 
     fn xdg_config_path() -> Result<Option<PathBuf>> {
@@ -449,6 +402,15 @@ impl AppConfig {
         crate::config::key_store::KeyStore::save_keys(config, &[])?;
         Ok(())
     }
+
+    fn rewrite_if_migrated(path: &PathBuf, original: &str, config: &Self) -> Result<()> {
+        let original_value: toml::Value = toml::from_str(original)?;
+        let rewritten_value: toml::Value = toml::from_str(&toml::to_string_pretty(config)?)?;
+        if original_value != rewritten_value {
+            std::fs::write(path, toml::to_string_pretty(config)?)?;
+        }
+        Ok(())
+    }
 }
 
 impl Default for AppConfig {
@@ -473,7 +435,7 @@ impl Default for AppConfig {
             key_file: None,
             image_protocol: "auto".to_string(),
             vault_path: None,
-            artifact_save_dir: None,
+            artifact_save_dir: Some(default_artifact_save_dir()),
             notifications: NotificationConfig::default(),
             local_inference: LocalInferenceConfig::default(),
             web_search: WebSearchConfig::default(),
@@ -510,6 +472,15 @@ impl Default for LocalInferenceConfig {
             api_token_env: None,
         }
     }
+}
+
+pub(crate) fn default_artifact_save_dir() -> String {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("tcui")
+        .join("artifacts")
+        .display()
+        .to_string()
 }
 
 impl Default for NtfyConfig {
@@ -700,65 +671,6 @@ mod tests {
             .expect("system clock before epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("tcui-{label}-{}-{nanos}", std::process::id()))
-    }
-
-    #[test]
-    fn prefers_repo_toml_over_xdg() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
-        let root = unique_temp_dir("config-precedence");
-        let config_home = root.join("config-home");
-        let tcui_dir = config_home.join("tcui");
-        std::fs::create_dir_all(&tcui_dir).expect("create config dir");
-        std::fs::create_dir_all(&root).expect("create repo dir");
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
-        let original_dir = std::env::current_dir().expect("current dir");
-        std::env::set_current_dir(&root).expect("set current dir");
-
-        let repo_path = root.join("config.toml");
-        std::fs::write(
-            &repo_path,
-            r#"
-theme = "gruvbox"
-default_model = "repo-model"
-default_provider = "OpenCode Go"
-"#,
-        )
-        .expect("write repo config");
-
-        let xdg_path = tcui_dir.join("config.toml");
-        std::fs::write(
-            &xdg_path,
-            r#"
-theme = "solarized-dark"
-default_model = "xdg-model"
-default_provider = "OpenAI"
-"#,
-        )
-        .expect("write xdg config");
-
-        let config = AppConfig::load().expect("load config");
-        assert_eq!(config.theme, "gruvbox");
-        assert_eq!(config.default_model, "repo-model");
-        assert_eq!(config.default_provider, "OpenCode Go");
-
-        std::env::set_current_dir(original_dir).expect("restore current dir");
-        std::fs::remove_dir_all(&root).expect("cleanup temp dir");
-        std::env::remove_var("XDG_CONFIG_HOME");
-    }
-
-    #[test]
-    fn repo_config_path_walks_up_from_nested_directory() {
-        let root = unique_temp_dir("config-upward-search");
-        let nested = root.join("target").join("debug");
-        std::fs::create_dir_all(&nested).expect("create nested dir");
-        let repo_path = root.join("config.toml");
-        std::fs::write(&repo_path, "theme = \"gruvbox\"\n").expect("write repo config");
-
-        let found = AppConfig::repo_config_path_from_roots([nested]).expect("repo config path");
-
-        assert_eq!(found, repo_path);
-
-        std::fs::remove_dir_all(&root).expect("cleanup temp dir");
     }
 
     #[test]
