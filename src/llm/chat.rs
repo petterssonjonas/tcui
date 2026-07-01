@@ -8,6 +8,7 @@ pub(crate) struct ChatRequest {
     pub(crate) provider: String,
     pub(crate) endpoint: String,
     pub(crate) model: String,
+    pub(crate) reasoning_effort: Option<String>,
     pub(crate) backend_type: String,
     pub(crate) api_key: Option<String>,
     pub(crate) system_prompt: String,
@@ -18,6 +19,8 @@ pub(crate) struct ChatRequest {
 struct WireRequest<'a> {
     model: &'a str,
     messages: Vec<WireMessage<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'a str>,
     stream: bool,
 }
 
@@ -36,6 +39,7 @@ struct WireResponse {
 struct OpenAiStreamChunk {
     choices: Option<Vec<OpenAiStreamChoice>>,
     error: Option<WireError>,
+    usage: Option<OpenAiUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,6 +53,11 @@ struct OpenAiDelta {
     content: Option<String>,
     reasoning_content: Option<String>,
     thinking: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiUsage {
+    total_tokens: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +101,7 @@ pub(crate) enum ChatStreamEvent {
 pub(crate) struct ChatStreamOutput {
     pub(crate) answer: String,
     pub(crate) thinking: String,
+    pub(crate) total_tokens: Option<i64>,
 }
 
 impl ChatStreamOutput {
@@ -114,6 +124,7 @@ where
         let output = ChatStreamOutput {
             answer: "Choose a model before sending.".to_string(),
             thinking: String::new(),
+            total_tokens: None,
         };
         on_event(ChatStreamEvent::Answer(output.answer.clone()));
         return Ok(output);
@@ -161,6 +172,7 @@ where
     let mut builder = client.post(url).json(&WireRequest {
         model: request.model.as_str(),
         messages,
+        reasoning_effort: request.reasoning_effort.as_deref(),
         stream: true,
     });
 
@@ -195,7 +207,11 @@ where
     let mut output = ChatStreamOutput::default();
     let mut title_filter = TitleTagFilter::default();
     read_sse(response, |data| {
-        for event in openai_stream_events(data, &mut title_filter)? {
+        let chunk = openai_stream_events(data, &mut title_filter)?;
+        if let Some(total_tokens) = chunk.total_tokens {
+            output.total_tokens = Some(total_tokens);
+        }
+        for event in chunk.events {
             output.push(&event);
             on_event(event);
         }
@@ -382,7 +398,7 @@ where
 fn openai_stream_events(
     data: &str,
     title_filter: &mut TitleTagFilter,
-) -> color_eyre::Result<Vec<ChatStreamEvent>> {
+) -> color_eyre::Result<OpenAiChunkResult> {
     let parsed: OpenAiStreamChunk = serde_json::from_str(data)?;
     if let Some(error) = parsed.error {
         return Err(eyre!(
@@ -414,7 +430,15 @@ fn openai_stream_events(
             }
         }
     }
-    Ok(events)
+    Ok(OpenAiChunkResult {
+        events,
+        total_tokens: parsed.usage.and_then(|usage| usage.total_tokens),
+    })
+}
+
+struct OpenAiChunkResult {
+    events: Vec<ChatStreamEvent>,
+    total_tokens: Option<i64>,
 }
 
 fn anthropic_stream_events(

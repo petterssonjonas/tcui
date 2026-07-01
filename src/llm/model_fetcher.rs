@@ -7,6 +7,8 @@ struct OpenRouterModel {
     #[allow(dead_code)]
     name: Option<String>,
     pricing: Option<OpenRouterPricing>,
+    #[serde(default)]
+    context_length: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -23,6 +25,10 @@ struct OpenRouterModelsResponse {
 #[derive(Debug, Deserialize)]
 struct OpenAIModel {
     id: String,
+    #[serde(default)]
+    context_length: Option<u32>,
+    #[serde(default)]
+    context_window: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +41,10 @@ struct KiloModel {
     id: String,
     #[serde(default)]
     pricing: Option<KiloPricing>,
+    #[serde(default)]
+    context_length: Option<u32>,
+    #[serde(default)]
+    context_window: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +115,7 @@ fn parse_openai_models(text: &str) -> Vec<ModelInfo> {
                 id: m.id,
                 input_price: None,
                 output_price: None,
+                context_window: m.context_length.or(m.context_window),
             })
             .collect(),
         Err(_) => Vec::new(),
@@ -134,6 +145,7 @@ fn parse_openrouter_models(text: &str) -> Vec<ModelInfo> {
                     id: m.id,
                     input_price,
                     output_price,
+                    context_window: m.context_length,
                 }
             })
             .collect(),
@@ -151,6 +163,7 @@ fn parse_kilo_models(text: &str) -> Vec<ModelInfo> {
                 id: m.id,
                 input_price: m.pricing.as_ref().and_then(|p| p.input),
                 output_price: m.pricing.as_ref().and_then(|p| p.output),
+                context_window: m.context_length.or(m.context_window),
             })
             .collect(),
         Err(_) => Vec::new(),
@@ -170,9 +183,9 @@ pub async fn refresh_provider_models(
         models = provider_model_fallback(name);
     }
     if !models.is_empty() {
-        let db_models: Vec<(String, Option<f64>, Option<f64>)> = models
+        let db_models: Vec<(String, Option<f64>, Option<f64>, Option<u32>)> = models
             .into_iter()
-            .map(|m| (m.id, m.input_price, m.output_price))
+            .map(|m| (m.id, m.input_price, m.output_price, m.context_window))
             .collect();
         let _ = storage.save_models(name, &db_models);
     }
@@ -213,15 +226,15 @@ pub async fn refresh_all_models(storage: &crate::storage::Storage) {
             continue;
         }
 
-        let db_models: Vec<(String, Option<f64>, Option<f64>)> = models
+        let db_models: Vec<(String, Option<f64>, Option<f64>, Option<u32>)> = models
             .into_iter()
-            .map(|m| (m.id, m.input_price, m.output_price))
+            .map(|m| (m.id, m.input_price, m.output_price, m.context_window))
             .collect();
         let _ = storage.save_models(&name, &db_models);
     }
 }
 
-fn provider_model_fallback(provider: &str) -> Vec<ModelInfo> {
+pub(crate) fn provider_model_fallback(provider: &str) -> Vec<ModelInfo> {
     match crate::llm::auth::canonical_provider_name(provider).as_str() {
         "Codex" => codex_model_fallback(),
         _ => Vec::new(),
@@ -256,6 +269,7 @@ fn codex_model_fallback() -> Vec<ModelInfo> {
             id,
             input_price: None,
             output_price: None,
+            context_window: None,
         })
         .collect()
 }

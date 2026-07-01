@@ -3,15 +3,16 @@ default_model = "gpt-4o"
 default_provider = "openai"
 user_alignment = "right"
 ai_alignment = "left"
-markdown_mode = "off"
+markdown_mode = "full"
 show_selector = true
 show_chat_scrollbar = true
 collapse_thinking = true
 kitty_enhanced_text = true
 kitty_text_max_scale = 3
-quit_confirmation = false
+quit_confirmation = true
 use_env_keys = false
 disabled_providers = []
+disabled_models = []
 image_protocol = "auto"
 
 [notifications]
@@ -130,22 +131,14 @@ auth_type = "oauth"
 
 [[mcp_servers]]
 name = "Exa"
-transport = "stdio"
-command = "npx"
-args = [
-    "-y",
-    "exa-mcp-server@3.2.1",
-]
+transport = "streamable_http"
+url = "https://mcp.exa.ai/mcp"
 enabled = false
 
 [[mcp_servers]]
 name = "Tavily"
-transport = "stdio"
-command = "npx"
-args = [
-    "-y",
-    "tavily-mcp@0.2.20",
-]
+transport = "streamable_http"
+url = "https://mcp.tavily.com/mcp/"
 enabled = false
 
 [[mcp_servers]]
@@ -154,25 +147,7 @@ transport = "stdio"
 command = "npx"
 args = [
     "-y",
-    "firecrawl-mcp@3.22.1",
-]
-enabled = false
-
-[[mcp_servers]]
-name = "GNOME Desktop"
-transport = "stdio"
-command = "uvx"
-args = ["gnome-desktop-mcp==0.1.0"]
-enabled = false
-
-[[mcp_servers]]
-name = "Obsidian"
-transport = "stdio"
-command = "uvx"
-args = [
-    "--from",
-    "git+https://github.com/Vasallo94/obsidian-mcp-server.git@ac9889f93c39c3a6a38515fdeb374e61f87c70a2",
-    "obsidian-mcp-server",
+    "firecrawl-mcp",
 ]
 enabled = false
 

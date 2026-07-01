@@ -18,6 +18,7 @@ pub enum Action {
     NewConversation(usize),
     UpdateModel(String),
     UpdateStatus(String),
+    ShowToast(String),
     SetConnectionState(crate::ui::status_bar::ConnectionStatus, Option<String>),
     SetTitle(String),
     SwitchTab(usize),

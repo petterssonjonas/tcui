@@ -4,7 +4,11 @@ pub(super) fn schedule(id: &str, schedule: &ReminderSchedule) -> Result<String, 
     let unit = format!("tcui-reminder-{id}");
     let executable = std::env::current_exe()?;
     let mut command = std::process::Command::new(systemd_run_program());
-    command.arg("--user").arg("--collect").arg("--unit").arg(&unit);
+    command
+        .arg("--user")
+        .arg("--collect")
+        .arg("--unit")
+        .arg(&unit);
     match schedule {
         ReminderSchedule::After(duration) => {
             command
@@ -22,9 +26,11 @@ pub(super) fn schedule(id: &str, schedule: &ReminderSchedule) -> Result<String, 
                 .arg(format!("*-*-* {}", time.format("%H:%M:%S")));
         }
         ReminderSchedule::Weekly(weekday, time) => {
-            command
-                .arg("--on-calendar")
-                .arg(format!("{} *-*-* {}", weekday_label(*weekday), time.format("%H:%M:%S")));
+            command.arg("--on-calendar").arg(format!(
+                "{} *-*-* {}",
+                weekday_label(*weekday),
+                time.format("%H:%M:%S")
+            ));
         }
         ReminderSchedule::Calendar(expression) => {
             command.arg("--on-calendar").arg(expression);

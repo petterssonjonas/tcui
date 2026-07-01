@@ -129,7 +129,7 @@ fn resolve_secret(
 
 fn install_hint(program: &str) -> &'static str {
     match program {
-        "npx" => "install Node.js/npm so `npx` is available",
+        "npx" => "install Node.js so `npx` is available",
         "uvx" => "install `uv` so `uvx` is available",
         _ => "install the missing command and ensure it is on PATH",
     }

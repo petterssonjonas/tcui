@@ -1,4 +1,6 @@
 #![allow(dead_code)]
+use std::rc::Rc;
+
 use ratatui::{prelude::*, widgets::*, Frame};
 use unicode_width::UnicodeWidthStr;
 
@@ -14,6 +16,9 @@ pub struct TabHitArea {
     pub index: usize,
     pub area: Rect,
 }
+
+const NAV_BUTTON_WIDTH: u16 = 3;
+const SETTINGS_BUTTON_WIDTH: u16 = 12;
 
 impl<'a> TopBar<'a> {
     pub fn new(
@@ -32,15 +37,7 @@ impl<'a> TopBar<'a> {
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
         let theme = crate::theme::active_theme();
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(0),
-                Constraint::Length(3),
-                Constraint::Length(3),
-            ])
-            .split(area);
+        let chunks = top_bar_chunks(area);
 
         // Hamburger button
         let hamburger_text = if self.sidebar_open { "<" } else { ">" };
@@ -53,19 +50,25 @@ impl<'a> TopBar<'a> {
         // Tabs - render manually to track widths
         self.render_tabs(f, chunks[1]);
 
+        let settings = Paragraph::new(" ⚙ Settings ")
+            .style(Style::default().fg(theme.muted).bg(theme.sidebar))
+            .alignment(Alignment::Center)
+            .block(Block::default());
+        f.render_widget(settings, chunks[2]);
+
         let artifact_toggle_text = if self.artifact_sidebar_open { ">" } else { "<" };
         let artifact_toggle = Paragraph::new(artifact_toggle_text)
             .style(Style::default().fg(theme.foreground).bg(theme.sidebar))
             .alignment(Alignment::Center)
             .block(Block::default());
-        f.render_widget(artifact_toggle, chunks[2]);
+        f.render_widget(artifact_toggle, chunks[3]);
 
         // Close button
         let close = Paragraph::new(" x ")
             .style(Style::default().fg(theme.error).bg(theme.sidebar))
             .alignment(Alignment::Center)
             .block(Block::default());
-        f.render_widget(close, chunks[3]);
+        f.render_widget(close, chunks[4]);
     }
 
     fn render_tabs(&self, f: &mut Frame, area: Rect) {
@@ -127,54 +130,27 @@ impl<'a> TopBar<'a> {
     }
 
     pub fn hamburger_area(&self, area: Rect) -> Rect {
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(0),
-                Constraint::Length(3),
-                Constraint::Length(3),
-            ])
-            .split(area);
+        let chunks = top_bar_chunks(area);
         chunks[0]
     }
 
-    pub fn artifact_toggle_area(&self, area: Rect) -> Rect {
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(0),
-                Constraint::Length(3),
-                Constraint::Length(3),
-            ])
-            .split(area);
+    pub fn settings_area(&self, area: Rect) -> Rect {
+        let chunks = top_bar_chunks(area);
         chunks[2]
     }
 
-    pub fn close_area(&self, area: Rect) -> Rect {
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(0),
-                Constraint::Length(3),
-                Constraint::Length(3),
-            ])
-            .split(area);
+    pub fn artifact_toggle_area(&self, area: Rect) -> Rect {
+        let chunks = top_bar_chunks(area);
         chunks[3]
     }
 
+    pub fn close_area(&self, area: Rect) -> Rect {
+        let chunks = top_bar_chunks(area);
+        chunks[4]
+    }
+
     pub fn tab_hit_areas(&self, area: Rect) -> Vec<TabHitArea> {
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(0),
-                Constraint::Length(3),
-                Constraint::Length(3),
-            ])
-            .split(area);
+        let chunks = top_bar_chunks(area);
         let tab_area = chunks[1];
 
         let mut current_x = tab_area.x;
@@ -221,4 +197,17 @@ impl<'a> TopBar<'a> {
 
         hit_areas
     }
+}
+
+fn top_bar_chunks(area: Rect) -> Rc<[Rect]> {
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(NAV_BUTTON_WIDTH),
+            Constraint::Min(0),
+            Constraint::Length(SETTINGS_BUTTON_WIDTH),
+            Constraint::Length(NAV_BUTTON_WIDTH),
+            Constraint::Length(NAV_BUTTON_WIDTH),
+        ])
+        .split(area)
 }

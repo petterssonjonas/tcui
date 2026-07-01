@@ -17,32 +17,47 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - id: meta
+        run: |
+          echo "version=$(python3 - <<'PY'
+          import tomllib
+          with open('Cargo.toml', 'rb') as fh:
+              cargo = tomllib.load(fh)
+          print(cargo['package']['version'])
+          PY
+          )" >> "$GITHUB_OUTPUT"
       - run: rustup toolchain install stable --profile minimal
       - run: rustup default stable
       - run: cargo build --release
       - run: cargo install cargo-deb cargo-generate-rpm
-      - run: cargo deb --no-build --output target/release/tcui_0.1.0_amd64.deb
-      - run: cargo generate-rpm --output target/release/tcui-0.1.0-1.x86_64.rpm
+      - run: cargo deb --no-build --output target/release/tcui_${{ steps.meta.outputs.version }}_amd64.deb
+      - run: cargo generate-rpm --output target/release/tcui-${{ steps.meta.outputs.version }}-1.x86_64.rpm
       - run: tar -C target/release -czf target/release/tcui-x86_64-unknown-linux-gnu.tar.gz tcui
+      - run: git archive --format=tar.gz --output target/release/tcui-${{ steps.meta.outputs.version }}-source.tar.gz HEAD
       - run: cp scripts/install.sh target/release/install.sh
-      - run: npm pack ./npm --pack-destination target/release
+      - run: cp LICENSE target/release/LICENSE
+      - run: cp assets/models/potion-base-8M/LICENSE target/release/potion-base-8M-LICENSE
       - run: |
           cd target/release
           sha256sum \
             tcui-x86_64-unknown-linux-gnu.tar.gz \
-            tcui_0.1.0_amd64.deb \
-            tcui-0.1.0-1.x86_64.rpm \
-            tcui-0.1.0.tgz \
-            install.sh > SHA256SUMS
+            tcui-${{ steps.meta.outputs.version }}-source.tar.gz \
+            tcui_${{ steps.meta.outputs.version }}_amd64.deb \
+            tcui-${{ steps.meta.outputs.version }}-1.x86_64.rpm \
+            install.sh \
+            LICENSE \
+            potion-base-8M-LICENSE > SHA256SUMS
       - env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
           gh release upload "${RELEASE_TAG}" \
             target/release/tcui-x86_64-unknown-linux-gnu.tar.gz \
-            target/release/tcui_0.1.0_amd64.deb \
-            target/release/tcui-0.1.0-1.x86_64.rpm \
-            target/release/tcui-0.1.0.tgz \
+            target/release/tcui-${{ steps.meta.outputs.version }}-source.tar.gz \
+            target/release/tcui_${{ steps.meta.outputs.version }}_amd64.deb \
+            target/release/tcui-${{ steps.meta.outputs.version }}-1.x86_64.rpm \
             target/release/install.sh \
+            target/release/LICENSE \
+            target/release/potion-base-8M-LICENSE \
             target/release/SHA256SUMS \
             --clobber

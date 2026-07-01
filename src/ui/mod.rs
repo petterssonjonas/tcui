@@ -16,9 +16,10 @@ pub mod settings_tab;
 pub mod sidebar;
 pub mod status_bar;
 pub mod tab_bar;
+pub mod toast;
 pub mod top_bar;
 
-use crate::config::app_config::{MarkdownMode, TextAlignment};
+use crate::config::app_config::{HeadingDownscale, MarkdownMode, TextAlignment};
 use crate::ui::components::terminal_capabilities::TerminalCapabilities;
 use artifact_sidebar::{ArtifactEntry, ArtifactSidebar, ArtifactSidebarState};
 use modals::artifact_viewer::ArtifactViewerState;
@@ -28,6 +29,7 @@ use modals::save_file::SaveFileDialog;
 use settings_tab::SettingsPopup;
 use sidebar::Sidebar;
 use status_bar::{ConnectionStatus, StatusBar, StatusBarAreas};
+use toast::Toast;
 use top_bar::TopBar;
 
 #[derive(Debug, Clone)]
@@ -42,6 +44,7 @@ pub enum Action {
     NewConversation(usize),
     UpdateModel(String),
     UpdateStatus(String),
+    ShowToast(String),
     SetTitle(String),
     SwitchTab(usize),
     AddTab(crate::app::tab::Tab),
@@ -69,6 +72,7 @@ pub struct UI {
     pub chat_area: Option<Rect>,
     pub connection_status: ConnectionStatus,
     pub connection_message: Option<String>,
+    pub toast: Option<Toast>,
     pub modal_areas: Option<ModalAreas>,
     pub settings_tab_areas: Option<Vec<Rect>>,
     pub status_bar_areas: Option<StatusBarAreas>,
@@ -82,12 +86,16 @@ pub struct UI {
     pub show_chat_scrollbar: bool,
     pub collapse_thinking: bool,
     pub kitty_enhanced_text: bool,
-    pub kitty_text_max_scale: u8,
+    pub kitty_heading_downscale: HeadingDownscale,
     pub image_protocol: String,
     pub terminal_capabilities: TerminalCapabilities,
     pub web_search_enabled: bool,
     pub db_providers: Vec<(String, String, String, String, String)>,
+    pub visible_providers: Vec<(String, String, String, String, String)>,
     pub current_models: Vec<crate::ui::settings_tab::ModelInfo>,
+    pub current_reasoning_options: Vec<String>,
+    pub disabled_providers: HashSet<String>,
+    pub disabled_models: HashSet<String>,
     pub frame_tick: u64,
 }
 
@@ -116,8 +124,10 @@ pub struct ChatTabState {
     pub generated_title: Option<String>,
     pub provider_dropdown_open: bool,
     pub model_dropdown_open: bool,
+    pub reasoning_dropdown_open: bool,
     pub provider_hit_area: Option<Rect>,
     pub model_hit_area: Option<Rect>,
+    pub reasoning_hit_area: Option<Rect>,
     pub input_area: Option<Rect>,
     pub input_text_area: Option<Rect>,
     pub dropdown_item_areas: Vec<Rect>,
@@ -186,8 +196,10 @@ impl UI {
                 generated_title: None,
                 provider_dropdown_open: false,
                 model_dropdown_open: false,
+                reasoning_dropdown_open: false,
                 provider_hit_area: None,
                 model_hit_area: None,
+                reasoning_hit_area: None,
                 input_area: None,
                 input_text_area: None,
                 dropdown_item_areas: vec![],
@@ -219,6 +231,7 @@ impl UI {
             chat_area: None,
             connection_status: ConnectionStatus::Checking,
             connection_message: None,
+            toast: None,
             modal_areas: None,
             settings_tab_areas: None,
             status_bar_areas: None,
@@ -232,12 +245,16 @@ impl UI {
             show_chat_scrollbar: true,
             collapse_thinking: true,
             kitty_enhanced_text: true,
-            kitty_text_max_scale: 3,
+            kitty_heading_downscale: HeadingDownscale::None,
             image_protocol: "auto".to_string(),
             terminal_capabilities: TerminalCapabilities::detect(),
             web_search_enabled: false,
             db_providers: vec![],
+            visible_providers: vec![],
             current_models: vec![],
+            current_reasoning_options: vec![],
+            disabled_providers: HashSet::new(),
+            disabled_models: HashSet::new(),
             frame_tick: 0,
         }
     }
@@ -374,12 +391,13 @@ impl UI {
                         collapse_thinking: self.collapse_thinking,
                         show_chat_scrollbar: self.show_chat_scrollbar,
                         kitty_enhanced_text: self.kitty_enhanced_text,
-                        kitty_text_max_scale: self.kitty_text_max_scale,
+                        kitty_heading_downscale: self.kitty_heading_downscale,
                         image_protocol: &self.image_protocol,
                         terminal_capabilities: self.terminal_capabilities,
                         frame_tick: self.frame_tick,
-                        providers: &self.db_providers,
+                        providers: &self.visible_providers,
                         models: &self.current_models,
+                        reasoning_options: &self.current_reasoning_options,
                     },
                 );
                 chat_tab.render(f, chat_chunks[0]);
@@ -393,13 +411,27 @@ impl UI {
                 tick: self.frame_tick,
                 provider: tab_state.tab.provider.clone(),
                 model: tab_state.tab.model.clone(),
+                reasoning_effort: tab_state.tab.reasoning_effort.clone(),
+                show_reasoning_selector: !self.current_reasoning_options.is_empty(),
                 show_selector: self.show_selector,
                 web_search_enabled: self.web_search_enabled,
+                context_window: self
+                    .current_models
+                    .iter()
+                    .find(|model| model.id == tab_state.tab.model)
+                    .and_then(|model| model.context_window),
+                context_used_tokens: tab_state
+                    .messages
+                    .iter()
+                    .rev()
+                    .find_map(|message| message.token_count)
+                    .and_then(|count| u32::try_from(count).ok()),
             };
             let status_areas = status_bar.render(f, main_layout[2]);
             self.status_bar_areas = Some(status_areas);
             tab_state.provider_hit_area = status_areas.provider;
             tab_state.model_hit_area = status_areas.model;
+            tab_state.reasoning_hit_area = status_areas.reasoning;
 
             let mut chat_tab = chat_tab::ChatTab::new(
                 tab_state,
@@ -410,12 +442,13 @@ impl UI {
                     collapse_thinking: self.collapse_thinking,
                     show_chat_scrollbar: self.show_chat_scrollbar,
                     kitty_enhanced_text: self.kitty_enhanced_text,
-                    kitty_text_max_scale: self.kitty_text_max_scale,
+                    kitty_heading_downscale: self.kitty_heading_downscale,
                     image_protocol: &self.image_protocol,
                     terminal_capabilities: self.terminal_capabilities,
                     frame_tick: self.frame_tick,
-                    providers: &self.db_providers,
+                    providers: &self.visible_providers,
                     models: &self.current_models,
+                    reasoning_options: &self.current_reasoning_options,
                 },
             );
             chat_tab.render_dropdowns(f);
@@ -443,7 +476,7 @@ impl UI {
                 modals::artifact_viewer::ArtifactViewerProps {
                     markdown_mode: self.markdown_mode,
                     kitty_enhanced_text: self.kitty_enhanced_text,
-                    kitty_text_max_scale: self.kitty_text_max_scale,
+                    kitty_heading_downscale: self.kitty_heading_downscale,
                     image_protocol: &self.image_protocol,
                     terminal_capabilities: self.terminal_capabilities,
                 },
@@ -453,6 +486,8 @@ impl UI {
         if let Some(ref popup) = self.list_popup {
             popup.render(f, area);
         }
+
+        toast::render(f, area, &mut self.toast, self.frame_tick);
 
         // Modal overlay (rendered on top of everything)
         if let Some(modal) = self.active_modal {
@@ -484,8 +519,10 @@ impl UI {
             generated_title: None,
             provider_dropdown_open: false,
             model_dropdown_open: false,
+            reasoning_dropdown_open: false,
             provider_hit_area: None,
             model_hit_area: None,
+            reasoning_hit_area: None,
             input_area: None,
             input_text_area: None,
             dropdown_item_areas: vec![],
@@ -589,15 +626,37 @@ impl UI {
         self.connection_status = ConnectionStatus::Failed;
         self.connection_message = Some(status);
     }
+
+    pub fn show_toast(&mut self, message: String) {
+        let trimmed = message.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        self.toast = Some(Toast::new(trimmed.to_string(), self.frame_tick));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::UI;
+    use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
     fn artifact_sidebar_starts_collapsed() {
         let ui = UI::new();
         assert!(!ui.artifact_sidebar_open);
+    }
+
+    #[test]
+    fn toast_renders_notice_message() {
+        let mut ui = UI::new();
+        ui.show_toast("Update 0.7.0 available".to_string());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+
+        terminal.draw(|frame| ui.render(frame)).expect("render ui");
+
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("Notice"));
+        assert!(screen.contains("Update 0.7.0 available"));
     }
 }

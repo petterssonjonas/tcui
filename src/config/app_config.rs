@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 use color_eyre::Result;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::PathBuf;
 
 use crate::config::{McpServerConfig, WebSearchConfig};
@@ -121,6 +121,59 @@ impl MarkdownMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeadingDownscale {
+    #[default]
+    None,
+    One,
+    Two,
+}
+
+impl HeadingDownscale {
+    pub fn label(self) -> &'static str {
+        match self {
+            HeadingDownscale::None => "Original",
+            HeadingDownscale::One => "Down one level",
+            HeadingDownscale::Two => "Down two levels",
+        }
+    }
+
+    const fn from_legacy_scale(scale: u8) -> Self {
+        match scale {
+            0 | 1 => HeadingDownscale::Two,
+            2 => HeadingDownscale::One,
+            _ => HeadingDownscale::None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for HeadingDownscale {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum HeadingDownscaleValue {
+            Name(String),
+            Scale(u8),
+        }
+
+        match HeadingDownscaleValue::deserialize(deserializer)? {
+            HeadingDownscaleValue::Name(name) => match name.trim().to_ascii_lowercase().as_str() {
+                "none" | "original" => Ok(HeadingDownscale::None),
+                "one" | "down_one_level" | "down-one-level" => Ok(HeadingDownscale::One),
+                "two" | "down_two_levels" | "down-two-levels" => Ok(HeadingDownscale::Two),
+                other => Err(serde::de::Error::custom(format!(
+                    "unknown heading downscale: {other}"
+                ))),
+            },
+            HeadingDownscaleValue::Scale(scale) => Ok(HeadingDownscale::from_legacy_scale(scale)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalServerType {
@@ -205,10 +258,12 @@ pub struct AppConfig {
     pub show_chat_scrollbar: bool,
     pub collapse_thinking: bool,
     pub kitty_enhanced_text: bool,
-    pub kitty_text_max_scale: u8,
+    #[serde(default, alias = "kitty_text_max_scale")]
+    pub kitty_heading_downscale: HeadingDownscale,
     pub quit_confirmation: bool,
     pub use_env_keys: bool,
     pub disabled_providers: Vec<String>,
+    pub disabled_models: Vec<String>,
     pub key_file: Option<String>,
     pub image_protocol: String,
     pub vault_path: Option<String>,
@@ -247,7 +302,7 @@ pub struct ProviderConfig {
 
 impl AppConfig {
     pub fn load() -> Result<Self> {
-        if let Some(path) = Self::repo_config_path().filter(|path| path.exists()) {
+        if let Some(path) = Self::load_repo_config_path().filter(|path| path.exists()) {
             let config = Self::load_toml(&path)?;
             Self::bootstrap_xdg_layout(&config)?;
             return Ok(config);
@@ -308,16 +363,51 @@ impl AppConfig {
     }
 
     fn write_path() -> Result<PathBuf> {
-        if let Some(path) = Self::repo_config_path().filter(|path| path.exists()) {
+        if let Some(path) = Self::cwd_repo_config_path().filter(|path| path.exists()) {
             return Ok(path);
         }
         Ok(Self::xdg_config_path()?.unwrap_or_else(|| PathBuf::from(".").join("config.toml")))
     }
 
-    fn repo_config_path() -> Option<PathBuf> {
+    fn load_repo_config_path() -> Option<PathBuf> {
+        let mut search_roots = Vec::new();
+        if let Ok(current_dir) = std::env::current_dir() {
+            search_roots.push(current_dir);
+        }
+        if let Ok(current_exe) = std::env::current_exe() {
+            let exe_is_tcui = current_exe
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(|stem| stem == "tcui")
+                .unwrap_or(false);
+            if exe_is_tcui {
+                if let Some(parent) = current_exe.parent() {
+                    search_roots.push(parent.to_path_buf());
+                }
+            }
+        }
+        Self::repo_config_path_from_roots(search_roots)
+    }
+
+    fn cwd_repo_config_path() -> Option<PathBuf> {
         std::env::current_dir()
             .ok()
-            .map(|dir| dir.join("config.toml"))
+            .and_then(|current_dir| Self::repo_config_path_from_roots([current_dir]))
+    }
+
+    fn repo_config_path_from_roots<I>(roots: I) -> Option<PathBuf>
+    where
+        I: IntoIterator<Item = PathBuf>,
+    {
+        for root in roots {
+            for dir in root.ancestors() {
+                let candidate = dir.join("config.toml");
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
     }
 
     fn xdg_config_path() -> Result<Option<PathBuf>> {
@@ -370,15 +460,16 @@ impl Default for AppConfig {
             default_provider: "openai".to_string(),
             user_alignment: TextAlignment::Right,
             ai_alignment: TextAlignment::Left,
-            markdown_mode: MarkdownMode::Off,
+            markdown_mode: MarkdownMode::Full,
             show_selector: true,
             show_chat_scrollbar: true,
             collapse_thinking: true,
             kitty_enhanced_text: true,
-            kitty_text_max_scale: 3,
+            kitty_heading_downscale: HeadingDownscale::None,
             quit_confirmation: true,
             use_env_keys: false,
             disabled_providers: Vec::new(),
+            disabled_models: Vec::new(),
             key_file: None,
             image_protocol: "auto".to_string(),
             vault_path: None,
@@ -653,5 +744,47 @@ default_provider = "OpenAI"
         std::env::set_current_dir(original_dir).expect("restore current dir");
         std::fs::remove_dir_all(&root).expect("cleanup temp dir");
         std::env::remove_var("XDG_CONFIG_HOME");
+    }
+
+    #[test]
+    fn repo_config_path_walks_up_from_nested_directory() {
+        let root = unique_temp_dir("config-upward-search");
+        let nested = root.join("target").join("debug");
+        std::fs::create_dir_all(&nested).expect("create nested dir");
+        let repo_path = root.join("config.toml");
+        std::fs::write(&repo_path, "theme = \"gruvbox\"\n").expect("write repo config");
+
+        let found = AppConfig::repo_config_path_from_roots([nested]).expect("repo config path");
+
+        assert_eq!(found, repo_path);
+
+        std::fs::remove_dir_all(&root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn legacy_kitty_text_scale_migrates_to_heading_downscale() {
+        let config: AppConfig = toml::from_str(
+            r#"
+theme = "system"
+default_model = "gpt-4o"
+default_provider = "OpenAI"
+kitty_text_max_scale = 2
+"#,
+        )
+        .expect("parse legacy config");
+
+        assert_eq!(config.kitty_heading_downscale, HeadingDownscale::One);
+
+        let clipped: AppConfig = toml::from_str(
+            r#"
+theme = "system"
+default_model = "gpt-4o"
+default_provider = "OpenAI"
+kitty_text_max_scale = 1
+"#,
+        )
+        .expect("parse legacy clipped config");
+
+        assert_eq!(clipped.kitty_heading_downscale, HeadingDownscale::Two);
     }
 }

@@ -3,7 +3,7 @@ name = "tcui"
 version = "0.6.0"
 edition = "2021"
 description = "ChatGPT-style terminal chat UI"
-license = "MIT"
+license = "GPL-3.0-only"
 
 [features]
 default = ["memory"]
@@ -22,8 +22,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"
 tokio-util = "0.7"
 futures = "0.3"
 pulldown-cmark = "0.13"
-ratatui-image = { version = "0.10", default-features = false, features = ["crossterm", "rustix"] }
-image = { version = "0.24", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+ratatui-image = { version = "11", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-native-roots"] }
 rmcp = { version = "1.8", default-features = false, features = ["client", "transport-child-process"] }
 tui-logger = "0.18"
@@ -40,6 +40,7 @@ chrono = { version = "0.4", features = ["serde"] }
 aes-gcm = "0.10"
 rand = "0.9"
 unicode-width = "0.2"
+unicode-segmentation = "1.13"
 clap = { version = "4", features = ["derive"] }
 log = "0.4"
 thiserror = "2"
@@ -57,10 +58,14 @@ priority = "optional"
 assets = [
   ["target/release/tcui", "usr/bin/tcui", "755"],
   ["README.md", "usr/share/doc/tcui/README.md", "644"],
+  ["LICENSE", "usr/share/doc/tcui/LICENSE", "644"],
+  ["assets/models/potion-base-8M/LICENSE", "usr/share/doc/tcui/potion-base-8M-LICENSE", "644"],
 ]
 
 [package.metadata.generate-rpm]
 assets = [
   { source = "target/release/tcui", dest = "/usr/bin/tcui", mode = "755" },
   { source = "README.md", dest = "/usr/share/doc/tcui/README.md", mode = "644" },
+  { source = "LICENSE", dest = "/usr/share/doc/tcui/LICENSE", mode = "644" },
+  { source = "assets/models/potion-base-8M/LICENSE", dest = "/usr/share/doc/tcui/potion-base-8M-LICENSE", mode = "644" },
 ]
