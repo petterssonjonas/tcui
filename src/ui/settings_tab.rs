@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use crate::config::app_config::{LocalServerType, MarkdownMode, TextAlignment};
+use crate::config::app_config::{HeadingDownscale, LocalServerType, MarkdownMode, TextAlignment};
 use crate::config::McpServerConfig;
 use ratatui::{
     layout::{Position, Rect},
@@ -279,7 +279,11 @@ const ALIGNMENT_OPTIONS: &[TextAlignment] = &[
     TextAlignment::Middle,
     TextAlignment::Right,
 ];
-const KITTY_TEXT_SCALE_OPTIONS: &[u8] = &[1, 2, 3, 4, 5, 6, 7];
+const KITTY_HEADING_SIZE_OPTIONS: &[HeadingDownscale] = &[
+    HeadingDownscale::None,
+    HeadingDownscale::One,
+    HeadingDownscale::Two,
+];
 const BACKEND_TYPE_OPTIONS: &[&str] = &[
     "openai",
     "anthropic",
@@ -337,7 +341,7 @@ pub struct SettingsPopup {
     pub show_chat_scrollbar: bool,
     pub collapse_thinking: bool,
     pub kitty_enhanced_text: bool,
-    pub kitty_text_max_scale: u8,
+    pub kitty_heading_downscale: HeadingDownscale,
     pub web_search_enabled: bool,
     pub quit_confirmation: bool,
     pub local_enabled: bool,
@@ -393,7 +397,7 @@ pub struct SettingsPopupInit {
     pub show_chat_scrollbar: bool,
     pub collapse_thinking: bool,
     pub kitty_enhanced_text: bool,
-    pub kitty_text_max_scale: u8,
+    pub kitty_heading_downscale: HeadingDownscale,
     pub web_search_enabled: bool,
     pub quit_confirmation: bool,
     pub local_enabled: bool,
@@ -502,7 +506,7 @@ impl SettingsPopup {
             show_chat_scrollbar: init.show_chat_scrollbar,
             collapse_thinking: init.collapse_thinking,
             kitty_enhanced_text: init.kitty_enhanced_text,
-            kitty_text_max_scale: init.kitty_text_max_scale,
+            kitty_heading_downscale: init.kitty_heading_downscale,
             web_search_enabled: init.web_search_enabled,
             quit_confirmation: init.quit_confirmation,
             local_enabled: init.local_enabled,
@@ -850,10 +854,10 @@ impl SettingsPopup {
 
         let kitty_scale_focused = self.active_tab == SettingsTab::General
             && self.general_focus == GeneralFocus::KittyTextScale;
-        let kitty_scale = Paragraph::new(format!("{} ▼", self.kitty_text_max_scale))
+        let kitty_scale = Paragraph::new(format!("{} ▼", self.kitty_heading_downscale.label()))
             .block(
                 Block::default()
-                    .title(" Kitty max heading scale ")
+                    .title(" Chat heading size ")
                     .borders(Borders::ALL)
                     .border_style(if kitty_scale_focused {
                         Style::default().fg(Color::Cyan)
@@ -1033,16 +1037,16 @@ impl SettingsPopup {
                     self.general_hit_areas.dropdown_items = item_areas;
                 }
                 GeneralDropdown::KittyTextScale => {
-                    let dropdown_area = Self::dropdown_area_below(chunks[7], 9);
-                    let list_items: Vec<ListItem> = KITTY_TEXT_SCALE_OPTIONS
+                    let dropdown_area = Self::dropdown_area_below(chunks[8], 5);
+                    let list_items: Vec<ListItem> = KITTY_HEADING_SIZE_OPTIONS
                         .iter()
-                        .map(|scale| {
-                            let style = if *scale == self.kitty_text_max_scale {
+                        .map(|downscale| {
+                            let style = if *downscale == self.kitty_heading_downscale {
                                 Style::default().fg(Color::Black).bg(Color::Cyan)
                             } else {
                                 Style::default().fg(Color::White)
                             };
-                            ListItem::new(scale.to_string()).style(style)
+                            ListItem::new(downscale.label()).style(style)
                         })
                         .collect();
                     let list = List::new(list_items).block(
@@ -1054,7 +1058,7 @@ impl SettingsPopup {
                     f.render_widget(Clear, dropdown_area);
                     f.render_widget(list, dropdown_area);
 
-                    self.general_hit_areas.dropdown_items = (0..KITTY_TEXT_SCALE_OPTIONS.len())
+                    self.general_hit_areas.dropdown_items = (0..KITTY_HEADING_SIZE_OPTIONS.len())
                         .map(|i| Rect {
                             x: dropdown_area.x + 1,
                             y: dropdown_area.y + 1 + i as u16,
@@ -3359,8 +3363,8 @@ impl SettingsPopup {
                 }
             }
             Some(GeneralDropdown::KittyTextScale) => {
-                if let Some(scale) = KITTY_TEXT_SCALE_OPTIONS.get(idx).copied() {
-                    self.kitty_text_max_scale = scale;
+                if let Some(downscale) = KITTY_HEADING_SIZE_OPTIONS.get(idx).copied() {
+                    self.kitty_heading_downscale = downscale;
                 }
             }
             None => {}
@@ -3374,7 +3378,7 @@ impl SettingsPopup {
             Some(GeneralDropdown::Theme) => crate::theme::theme_keys().len(),
             Some(GeneralDropdown::UserAlignment) => ALIGNMENT_OPTIONS.len(),
             Some(GeneralDropdown::AiAlignment) => ALIGNMENT_OPTIONS.len(),
-            Some(GeneralDropdown::KittyTextScale) => KITTY_TEXT_SCALE_OPTIONS.len(),
+            Some(GeneralDropdown::KittyTextScale) => KITTY_HEADING_SIZE_OPTIONS.len(),
             None => 0,
         }
     }
@@ -3393,9 +3397,9 @@ impl SettingsPopup {
                 .iter()
                 .position(|a| *a == self.ai_alignment)
                 .unwrap_or(0),
-            Some(GeneralDropdown::KittyTextScale) => KITTY_TEXT_SCALE_OPTIONS
+            Some(GeneralDropdown::KittyTextScale) => KITTY_HEADING_SIZE_OPTIONS
                 .iter()
-                .position(|scale| *scale == self.kitty_text_max_scale)
+                .position(|downscale| *downscale == self.kitty_heading_downscale)
                 .unwrap_or(0),
             None => 0,
         }
@@ -4019,7 +4023,7 @@ mod tests {
             show_chat_scrollbar: true,
             collapse_thinking: true,
             kitty_enhanced_text: false,
-            kitty_text_max_scale: 3,
+            kitty_heading_downscale: HeadingDownscale::None,
             web_search_enabled: false,
             quit_confirmation: true,
             local_enabled: false,

@@ -5,7 +5,7 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::config::app_config::MarkdownMode;
+use crate::config::app_config::{HeadingDownscale, MarkdownMode};
 use crate::ui::components::terminal_capabilities::TerminalCapabilities;
 
 #[derive(Debug, Clone)]
@@ -35,7 +35,50 @@ pub struct RenderedImage {
 pub struct RenderedHeading {
     pub start_line: usize,
     pub text: String,
-    pub scale: u8,
+    pub tier: KittyHeadingTier,
+    pub style: Style,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KittyHeadingTier {
+    H1,
+    H2,
+    H3,
+}
+
+impl KittyHeadingTier {
+    pub fn rendered_width(self, text: &str) -> usize {
+        let text_width = UnicodeWidthStr::width(text).max(1);
+        match self {
+            KittyHeadingTier::H1 => text_width.saturating_mul(2),
+            KittyHeadingTier::H2 => (text_width.saturating_mul(10) + 5) / 6,
+            KittyHeadingTier::H3 => (text_width.saturating_mul(3) + 1) / 2,
+        }
+    }
+
+    pub const fn chunk_column_limit(self) -> usize {
+        match self {
+            KittyHeadingTier::H1 => 128,
+            KittyHeadingTier::H2 => 6,
+            KittyHeadingTier::H3 => 4,
+        }
+    }
+
+    pub fn osc_sequence(self, text: &str, columns: usize) -> String {
+        match self {
+            KittyHeadingTier::H1 => {
+                format!("\x1b]66;s=2:w={columns};{text}\x1b\\")
+            }
+            KittyHeadingTier::H2 => {
+                let width = (columns.saturating_mul(5) + 5) / 6;
+                format!("\x1b]66;s=2:n=5:d=6:w={width};{text}\x1b\\")
+            }
+            KittyHeadingTier::H3 => {
+                let width = (columns.saturating_mul(3) + 3) / 4;
+                format!("\x1b]66;s=2:n=3:d=4:w={width};{text}\x1b\\")
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -43,7 +86,7 @@ pub struct RenderOptions {
     pub mode: MarkdownMode,
     pub width: usize,
     pub kitty_enhanced_text: bool,
-    pub kitty_text_max_scale: u8,
+    pub kitty_heading_downscale: HeadingDownscale,
     pub image_protocol_enabled: bool,
     pub terminal_capabilities: TerminalCapabilities,
 }
@@ -504,29 +547,27 @@ fn render_heading(
     opts: RenderOptions,
 ) -> Option<RenderedHeading> {
     let text = text.trim();
-    let text_width = UnicodeWidthStr::width(text).max(1);
-    let fitting_scale = (opts.width / text_width).clamp(1, 7) as u8;
-    let scale = heading_scale(level, opts.kitty_text_max_scale)
-        .clamp(1, 7)
-        .min(fitting_scale);
     let fallback = heading_style(level);
-    if opts.kitty_enhanced_text
-        && opts.terminal_capabilities.kitty_text_sizing
-        && opts.mode == MarkdownMode::Full
-        && scale > 1
-    {
-        lines.push(Line::from(Span::styled(text.to_string(), fallback)));
-        for _ in 1..scale {
-            lines.push(Line::from(""));
-        }
-        return Some(RenderedHeading {
-            start_line: 0,
-            text: text.to_string(),
-            scale,
-        });
-    }
     lines.push(Line::from(Span::styled(text.to_string(), fallback)));
-    None
+    let Some(tier) = enhanced_heading_tier(level, opts.kitty_heading_downscale) else {
+        return None;
+    };
+    if !(opts.kitty_enhanced_text
+        && opts.terminal_capabilities.kitty_text_sizing
+        && opts.mode == MarkdownMode::Full)
+    {
+        return None;
+    }
+    if tier.rendered_width(text) > opts.width.max(1) {
+        return None;
+    }
+    lines.push(Line::from(""));
+    Some(RenderedHeading {
+        start_line: 0,
+        text: text.to_string(),
+        tier,
+        style: heading_overlay_style(level),
+    })
 }
 
 fn parse_inline_runs(text: &str, base_style: Style) -> Vec<StyledRun> {
@@ -799,14 +840,14 @@ fn split_table_row(line: &str) -> Vec<String> {
         .collect()
 }
 
-fn heading_scale(level: usize, max_scale: u8) -> u8 {
-    match level {
-        1 => max_scale,
-        2 => max_scale.saturating_sub(1).max(1),
-        3 => max_scale.saturating_sub(2).max(1),
-        4 => 1,
-        5 => 1,
-        _ => 1,
+fn enhanced_heading_tier(level: usize, downscale: HeadingDownscale) -> Option<KittyHeadingTier> {
+    match (level, downscale) {
+        (1, HeadingDownscale::None) => Some(KittyHeadingTier::H1),
+        (1, HeadingDownscale::One) | (2, HeadingDownscale::None) => Some(KittyHeadingTier::H2),
+        (1, HeadingDownscale::Two)
+        | (2, HeadingDownscale::One | HeadingDownscale::Two)
+        | (3, _) => Some(KittyHeadingTier::H3),
+        _ => None,
     }
 }
 
@@ -833,6 +874,24 @@ fn heading_style(level: usize) -> Style {
             .add_modifier(Modifier::BOLD),
         _ => Style::default()
             .fg(theme.muted)
+            .add_modifier(Modifier::BOLD),
+    }
+}
+
+fn heading_overlay_style(level: usize) -> Style {
+    let theme = crate::theme::active_theme();
+    match level {
+        1 => Style::default()
+            .fg(theme.warning)
+            .bg(theme.background)
+            .add_modifier(Modifier::BOLD),
+        2 => Style::default()
+            .fg(theme.info)
+            .bg(theme.background)
+            .add_modifier(Modifier::BOLD),
+        _ => Style::default()
+            .fg(theme.success)
+            .bg(theme.background)
             .add_modifier(Modifier::BOLD),
     }
 }

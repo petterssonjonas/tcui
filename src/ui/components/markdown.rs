@@ -1,4 +1,4 @@
-use crate::config::app_config::MarkdownMode;
+use crate::config::app_config::{HeadingDownscale, MarkdownMode};
 use crate::ui::components::markdown_model::{render_markdown, RenderOptions, RenderedMarkdown};
 use crate::ui::components::terminal_capabilities::TerminalCapabilities;
 
@@ -19,7 +19,7 @@ impl MarkdownRenderer {
         mode: MarkdownMode,
         width: usize,
         kitty_enhanced_text: bool,
-        kitty_text_max_scale: u8,
+        kitty_heading_downscale: HeadingDownscale,
         image_protocol_enabled: bool,
     ) -> RenderedMarkdown {
         render_markdown(
@@ -28,7 +28,7 @@ impl MarkdownRenderer {
                 mode,
                 width,
                 kitty_enhanced_text,
-                kitty_text_max_scale,
+                kitty_heading_downscale,
                 image_protocol_enabled,
                 terminal_capabilities: self.terminal_capabilities,
             },
@@ -65,7 +65,7 @@ mod tests {
             MarkdownMode::Full,
             80,
             false,
-            3,
+            HeadingDownscale::None,
             false,
         );
 
@@ -79,7 +79,7 @@ mod tests {
             MarkdownMode::Full,
             80,
             false,
-            3,
+            HeadingDownscale::None,
             true,
         );
 
@@ -90,8 +90,14 @@ mod tests {
     #[test]
     fn markdown_renderer_tracks_skill_mentions_when_markdown_is_off() {
         // Given / When
-        let output =
-            test_renderer().render("Use @caveman here.", MarkdownMode::Off, 80, false, 3, false);
+        let output = test_renderer().render(
+            "Use @caveman here.",
+            MarkdownMode::Off,
+            80,
+            false,
+            HeadingDownscale::None,
+            false,
+        );
 
         // Then
         assert_eq!(output.link_targets.len(), 1);
@@ -108,7 +114,7 @@ mod tests {
             MarkdownMode::Full,
             80,
             false,
-            3,
+            HeadingDownscale::None,
             false,
         );
 
@@ -137,11 +143,21 @@ mod tests {
             kitty_text_sizing: true,
             tmux_passthrough: false,
         });
-        let rendered = renderer.render("# Heading", MarkdownMode::Full, 40, true, 2, false);
+        let rendered = renderer.render(
+            "# Heading",
+            MarkdownMode::Full,
+            40,
+            true,
+            HeadingDownscale::None,
+            false,
+        );
 
         // Then
         assert_eq!(rendered.kitty_headings.len(), 1);
         assert_eq!(rendered.kitty_headings[0].text, "Heading");
-        assert_eq!(rendered.kitty_headings[0].scale, 2);
+        assert_eq!(
+            rendered.kitty_headings[0].tier,
+            crate::ui::components::markdown_model::KittyHeadingTier::H1
+        );
     }
 }

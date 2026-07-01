@@ -1,11 +1,16 @@
 #![allow(dead_code)]
-use crate::config::app_config::{MarkdownMode, TextAlignment};
+use crate::config::app_config::{HeadingDownscale, MarkdownMode, TextAlignment};
 use crate::ui::components::image_block::{is_local_image_source, ImageBlockState};
 use crate::ui::components::markdown::MarkdownRenderer;
-use crate::ui::components::markdown_model::{LinkTarget, RenderedImage};
-use crate::ui::components::terminal_capabilities::KittyTextOverlay;
+use crate::ui::components::markdown_model::{KittyHeadingTier, LinkTarget, RenderedImage};
 use crate::ui::settings_tab::ModelInfo;
-use ratatui::{layout::Rect, prelude::*, widgets::*, Frame};
+use ratatui::{
+    layout::{Rect, Size},
+    prelude::*,
+    widgets::*,
+    Frame,
+};
+use ratatui_image::sliced::SignedPosition;
 use unicode_width::UnicodeWidthStr;
 
 pub struct ChatTab<'a> {
@@ -16,7 +21,7 @@ pub struct ChatTab<'a> {
     pub collapse_thinking: bool,
     pub show_chat_scrollbar: bool,
     pub kitty_enhanced_text: bool,
-    pub kitty_text_max_scale: u8,
+    pub kitty_heading_downscale: HeadingDownscale,
     pub image_protocol: &'a str,
     pub terminal_capabilities: crate::ui::components::terminal_capabilities::TerminalCapabilities,
     pub frame_tick: u64,
@@ -32,7 +37,7 @@ pub struct ChatTabProps<'a> {
     pub collapse_thinking: bool,
     pub show_chat_scrollbar: bool,
     pub kitty_enhanced_text: bool,
-    pub kitty_text_max_scale: u8,
+    pub kitty_heading_downscale: HeadingDownscale,
     pub image_protocol: &'a str,
     pub terminal_capabilities: crate::ui::components::terminal_capabilities::TerminalCapabilities,
     pub frame_tick: u64,
@@ -53,7 +58,8 @@ struct RenderedMessages {
 struct RenderedKittyHeading {
     line: usize,
     text: String,
-    scale: u8,
+    tier: KittyHeadingTier,
+    style: Style,
     alignment: Alignment,
 }
 
@@ -67,7 +73,7 @@ impl<'a> ChatTab<'a> {
             collapse_thinking: props.collapse_thinking,
             show_chat_scrollbar: props.show_chat_scrollbar,
             kitty_enhanced_text: props.kitty_enhanced_text,
-            kitty_text_max_scale: props.kitty_text_max_scale,
+            kitty_heading_downscale: props.kitty_heading_downscale,
             image_protocol: props.image_protocol,
             terminal_capabilities: props.terminal_capabilities,
             frame_tick: props.frame_tick,
@@ -415,7 +421,6 @@ impl<'a> ChatTab<'a> {
     }
 
     fn render_messages(&mut self, f: &mut Frame, area: Rect) {
-        self.state.kitty_text_overlays.clear();
         if area.height == 0 {
             self.state.thinking_hit_areas.clear();
             self.state.link_hit_areas.clear();
@@ -494,28 +499,7 @@ impl<'a> ChatTab<'a> {
             .scroll((scroll_offset as u16, 0));
 
         f.render_widget(list, viewport);
-        for heading in &rendered.kitty_headings {
-            if heading.line < scroll_offset
-                || heading.line >= scroll_offset + viewport.height as usize
-            {
-                continue;
-            }
-            let width =
-                UnicodeWidthStr::width(heading.text.as_str()) as u16 * u16::from(heading.scale);
-            let x = viewport.x
-                + match heading.alignment {
-                    Alignment::Left => 0,
-                    Alignment::Center => viewport.width.saturating_sub(width) / 2,
-                    Alignment::Right => viewport.width.saturating_sub(width),
-                };
-            let y = viewport.y + (heading.line - scroll_offset) as u16;
-            self.state.kitty_text_overlays.push(KittyTextOverlay {
-                x,
-                y,
-                text: heading.text.clone(),
-                scale: heading.scale,
-            });
-        }
+        self.render_kitty_headings(f, viewport, scroll_offset, &rendered.kitty_headings);
         self.render_images(f, viewport, scroll_offset, &rendered.images);
         if show_scrollbar {
             let track = Rect::new(viewport.right(), viewport.y, 1, viewport.height);
@@ -614,7 +598,7 @@ impl<'a> ChatTab<'a> {
                             self.markdown_mode,
                             content_width,
                             false,
-                            self.kitty_text_max_scale,
+                            self.kitty_heading_downscale,
                             false,
                         );
                         for mut target in rendered.link_targets {
@@ -646,14 +630,15 @@ impl<'a> ChatTab<'a> {
                 self.markdown_mode,
                 content_width,
                 self.kitty_enhanced_text,
-                self.kitty_text_max_scale,
+                self.kitty_heading_downscale,
                 self.image_protocol != "off",
             );
             for heading in rendered.kitty_headings {
                 kitty_headings.push(RenderedKittyHeading {
                     line: heading.start_line + lines.len(),
                     text: heading.text,
-                    scale: heading.scale,
+                    tier: heading.tier,
+                    style: heading.style,
                     alignment: alignment.as_ratatui(),
                 });
             }
@@ -710,12 +695,6 @@ impl<'a> ChatTab<'a> {
             if !is_local_image_source(&image.source) {
                 continue;
             }
-            let image_area = Rect::new(
-                area.x,
-                area.y + image.start_line.saturating_sub(scroll_offset) as u16,
-                area.width,
-                image.height.min(area.height as usize) as u16,
-            );
             if !self.state.image_states.contains_key(&image.source) {
                 if let Some(state) = ImageBlockState::from_source(
                     &image.source,
@@ -730,7 +709,52 @@ impl<'a> ChatTab<'a> {
             let Some(state) = self.state.image_states.get_mut(&image.source) else {
                 continue;
             };
-            state.render(f, image_area);
+            let relative_top = image.start_line as i16 - scroll_offset as i16;
+            state.render_sliced(
+                f,
+                area,
+                Size::new(area.width, image.height.min(u16::MAX as usize) as u16),
+                SignedPosition::from((0, relative_top)),
+            );
+        }
+    }
+
+    fn render_kitty_headings(
+        &self,
+        f: &mut Frame,
+        viewport: Rect,
+        scroll_offset: usize,
+        headings: &[RenderedKittyHeading],
+    ) {
+        for heading in headings {
+            if heading.line < scroll_offset {
+                continue;
+            }
+            let visible_row = heading.line - scroll_offset;
+            if visible_row + 1 >= viewport.height as usize {
+                continue;
+            }
+            let width = heading.tier.rendered_width(&heading.text);
+            let Some(width) = u16::try_from(width)
+                .ok()
+                .filter(|width| *width <= viewport.width)
+            else {
+                continue;
+            };
+            let x = viewport.x
+                + match heading.alignment {
+                    Alignment::Left => 0,
+                    Alignment::Center => viewport.width.saturating_sub(width) / 2,
+                    Alignment::Right => viewport.width.saturating_sub(width),
+                };
+            crate::ui::components::terminal_capabilities::render_kitty_heading(
+                f.buffer_mut(),
+                Rect::new(x, viewport.y + visible_row as u16, width, 2),
+                &heading.text,
+                heading.tier,
+                heading.style,
+                self.terminal_capabilities,
+            );
         }
     }
 
@@ -1037,7 +1061,7 @@ mod tests {
                 collapse_thinking: true,
                 show_chat_scrollbar: true,
                 kitty_enhanced_text: false,
-                kitty_text_max_scale: 3,
+                kitty_heading_downscale: HeadingDownscale::None,
                 image_protocol: "off",
                 terminal_capabilities: TerminalCapabilities {
                     terminal: TerminalKind::Unknown,
@@ -1103,7 +1127,7 @@ mod tests {
                 collapse_thinking: true,
                 show_chat_scrollbar: true,
                 kitty_enhanced_text: false,
-                kitty_text_max_scale: 3,
+                kitty_heading_downscale: HeadingDownscale::None,
                 image_protocol: "off",
                 terminal_capabilities: TerminalCapabilities {
                     terminal: TerminalKind::Unknown,
@@ -1149,7 +1173,7 @@ mod tests {
                 collapse_thinking: true,
                 show_chat_scrollbar: false,
                 kitty_enhanced_text: false,
-                kitty_text_max_scale: 3,
+                kitty_heading_downscale: HeadingDownscale::None,
                 image_protocol: "off",
                 terminal_capabilities: TerminalCapabilities {
                     terminal: TerminalKind::Unknown,
@@ -1181,7 +1205,7 @@ mod tests {
     }
 
     #[test]
-    fn kitty_heading_is_not_embedded_in_ratatui_cells() {
+    fn kitty_heading_is_anchored_in_ratatui_cells() {
         // Given
         let mut ui = crate::ui::UI::new();
         ui.tabs[0].messages.push(crate::app::message::Message::new(
@@ -1199,7 +1223,7 @@ mod tests {
                 collapse_thinking: true,
                 show_chat_scrollbar: false,
                 kitty_enhanced_text: true,
-                kitty_text_max_scale: 2,
+                kitty_heading_downscale: HeadingDownscale::None,
                 image_protocol: "off",
                 terminal_capabilities: TerminalCapabilities {
                     terminal: TerminalKind::Kitty,
@@ -1219,15 +1243,80 @@ mod tests {
         terminal
             .draw(|frame| chat.render_messages(frame, Rect::new(0, 0, 40, 6)))
             .expect("render kitty heading");
+        if let Some(path) = std::env::var_os("TCUI_KITTY_HEADING_CAPTURE") {
+            let buffer = terminal.backend().buffer();
+            let mut capture = String::new();
+            for y in 0..buffer.area.height {
+                let mut skipped = 0usize;
+                for x in 0..buffer.area.width {
+                    if skipped > 0 {
+                        skipped -= 1;
+                        continue;
+                    }
+                    let symbol = buffer[(x, y)].symbol();
+                    capture.push_str(symbol);
+                    skipped = unicode_width::UnicodeWidthStr::width(symbol).saturating_sub(1);
+                }
+                if y + 1 < buffer.area.height {
+                    capture.push('\n');
+                }
+            }
+            std::fs::write(path, capture).expect("write kitty heading capture");
+        }
 
         // Then
+        assert!(terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .any(|cell| cell.symbol().contains("\u{1b}]66;")));
+    }
+
+    #[test]
+    fn kitty_heading_falls_back_when_second_row_is_clipped() {
+        let mut ui = crate::ui::UI::new();
+        ui.tabs[0].messages.push(crate::app::message::Message::new(
+            1,
+            "assistant".to_string(),
+            "# Heading".to_string(),
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(40, 1)).expect("test terminal");
+        let mut chat = ChatTab::new(
+            &mut ui.tabs[0],
+            ChatTabProps {
+                user_alignment: TextAlignment::Left,
+                ai_alignment: TextAlignment::Left,
+                markdown_mode: MarkdownMode::Full,
+                collapse_thinking: true,
+                show_chat_scrollbar: false,
+                kitty_enhanced_text: true,
+                kitty_heading_downscale: HeadingDownscale::None,
+                image_protocol: "off",
+                terminal_capabilities: TerminalCapabilities {
+                    terminal: TerminalKind::Kitty,
+                    multiplexer: None,
+                    kitty_graphics: true,
+                    kitty_text_sizing: true,
+                    tmux_passthrough: false,
+                },
+                frame_tick: 0,
+                providers: &[],
+                models: &[],
+                reasoning_options: &[],
+            },
+        );
+
+        terminal
+            .draw(|frame| chat.render_messages(frame, Rect::new(0, 0, 40, 1)))
+            .expect("render clipped heading");
+
         assert!(!terminal
             .backend()
             .buffer()
             .content
             .iter()
             .any(|cell| cell.symbol().contains("\u{1b}]66;")));
-        assert_eq!(chat.state.kitty_text_overlays.len(), 1);
     }
 
     #[test]
@@ -1258,7 +1347,7 @@ mod tests {
                 collapse_thinking: true,
                 show_chat_scrollbar: true,
                 kitty_enhanced_text: false,
-                kitty_text_max_scale: 3,
+                kitty_heading_downscale: HeadingDownscale::None,
                 image_protocol: "off",
                 terminal_capabilities: TerminalCapabilities {
                     terminal: TerminalKind::Unknown,
@@ -1349,7 +1438,7 @@ mod tests {
                 collapse_thinking: true,
                 show_chat_scrollbar: true,
                 kitty_enhanced_text: false,
-                kitty_text_max_scale: 3,
+                kitty_heading_downscale: HeadingDownscale::None,
                 image_protocol: "off",
                 terminal_capabilities: TerminalCapabilities {
                     terminal: TerminalKind::Unknown,

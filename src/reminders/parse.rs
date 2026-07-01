@@ -60,12 +60,13 @@ fn parse_datetime(input: &str) -> Result<chrono::DateTime<Local>, ReminderError>
     let naive = NaiveDateTime::parse_from_str(input, "%Y-%m-%d %H:%M:%S")
         .or_else(|_| NaiveDateTime::parse_from_str(input, "%Y-%m-%d %H:%M"))
         .map_err(|_| {
-            ReminderError::Invalid("use `at YYYY-MM-DD HH:MM` or `at YYYY-MM-DD HH:MM:SS`".to_string())
+            ReminderError::Invalid(
+                "use `at YYYY-MM-DD HH:MM` or `at YYYY-MM-DD HH:MM:SS`".to_string(),
+            )
         })?;
-    Local
-        .from_local_datetime(&naive)
-        .single()
-        .ok_or_else(|| ReminderError::Invalid("ambiguous or invalid local reminder time".to_string()))
+    Local.from_local_datetime(&naive).single().ok_or_else(|| {
+        ReminderError::Invalid("ambiguous or invalid local reminder time".to_string())
+    })
 }
 
 fn parse_time(input: &str) -> Result<NaiveTime, ReminderError> {
@@ -151,7 +152,11 @@ pub(super) fn describe_schedule(schedule: &ReminderSchedule) -> String {
         ReminderSchedule::At(datetime) => datetime.format("at %Y-%m-%d %H:%M:%S").to_string(),
         ReminderSchedule::Daily(time) => time.format("daily %H:%M:%S").to_string(),
         ReminderSchedule::Weekly(weekday, time) => {
-            format!("weekly {} {}", weekday_label(*weekday), time.format("%H:%M:%S"))
+            format!(
+                "weekly {} {}",
+                weekday_label(*weekday),
+                time.format("%H:%M:%S")
+            )
         }
         ReminderSchedule::Calendar(expression) => format!("calendar {expression}"),
     }

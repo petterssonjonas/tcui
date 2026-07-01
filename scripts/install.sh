@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo="${TCUI_REPO:-petterssonjonas/TermChatUI}"
+repo="${TCUI_REPO:-petterssonjonas/tcui}"
 version="${TCUI_VERSION:-latest}"
 bin_dir="${TCUI_BIN_DIR:-$HOME/.local/bin}"
 target="x86_64-unknown-linux-gnu"

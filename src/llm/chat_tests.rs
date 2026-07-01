@@ -51,13 +51,15 @@ fn openai_stream_events_strips_title_from_answer() {
 #[test]
 fn openai_stream_events_capture_usage_when_present() {
     let mut filter = TitleTagFilter::default();
-    let data =
-        r#"{"choices":[{"delta":{"content":"answer"}}],"usage":{"total_tokens":2048}}"#;
+    let data = r#"{"choices":[{"delta":{"content":"answer"}}],"usage":{"total_tokens":2048}}"#;
 
     let chunk = openai_stream_events(data, &mut filter).unwrap();
 
     assert_eq!(chunk.total_tokens, Some(2048));
-    assert_eq!(chunk.events, vec![ChatStreamEvent::Answer("answer".to_string())]);
+    assert_eq!(
+        chunk.events,
+        vec![ChatStreamEvent::Answer("answer".to_string())]
+    );
 }
 
 #[test]

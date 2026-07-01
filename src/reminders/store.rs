@@ -76,7 +76,9 @@ mod tests {
         std::env::set_var("XDG_DATA_HOME", &temp);
         let record = ReminderRecord::new_test(
             "r1",
-            crate::reminders::ReminderSchedule::Daily(NaiveTime::from_hms_opt(9, 0, 0).expect("time")),
+            crate::reminders::ReminderSchedule::Daily(
+                NaiveTime::from_hms_opt(9, 0, 0).expect("time"),
+            ),
             "Drink water",
             Local::now(),
         );
@@ -94,18 +96,23 @@ mod tests {
     #[test]
     fn reminder_store_lists_records_in_created_order() {
         let _guard = env_lock().lock().expect("env lock poisoned");
-        let temp = std::env::temp_dir().join(format!("tcui-reminders-list-{}", rand::random::<u64>()));
+        let temp =
+            std::env::temp_dir().join(format!("tcui-reminders-list-{}", rand::random::<u64>()));
         std::fs::create_dir_all(&temp).expect("temp xdg data");
         std::env::set_var("XDG_DATA_HOME", &temp);
         let first = ReminderRecord::new_test(
             "a1",
-            crate::reminders::ReminderSchedule::Daily(NaiveTime::from_hms_opt(9, 0, 0).expect("time")),
+            crate::reminders::ReminderSchedule::Daily(
+                NaiveTime::from_hms_opt(9, 0, 0).expect("time"),
+            ),
             "First",
             Local::now() - chrono::TimeDelta::minutes(5),
         );
         let second = ReminderRecord::new_test(
             "b2",
-            crate::reminders::ReminderSchedule::Daily(NaiveTime::from_hms_opt(10, 0, 0).expect("time")),
+            crate::reminders::ReminderSchedule::Daily(
+                NaiveTime::from_hms_opt(10, 0, 0).expect("time"),
+            ),
             "Second",
             Local::now(),
         );
@@ -114,7 +121,13 @@ mod tests {
         upsert(first).expect("save first reminder");
 
         let listed = list().expect("list reminders");
-        assert_eq!(listed.iter().map(|record| record.id.as_str()).collect::<Vec<_>>(), ["a1", "b2"]);
+        assert_eq!(
+            listed
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a1", "b2"]
+        );
         std::fs::remove_dir_all(temp).expect("cleanup temp xdg data");
         std::env::remove_var("XDG_DATA_HOME");
     }

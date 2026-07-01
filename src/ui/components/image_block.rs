@@ -1,16 +1,24 @@
 use std::path::{Path, PathBuf};
 
-use ratatui::{layout::Rect, Frame};
+use image::DynamicImage;
+use ratatui::{
+    layout::{Rect, Size},
+    Frame,
+};
 use ratatui_image::{
     picker::{Picker, ProtocolType},
     protocol::StatefulProtocol,
+    sliced::{SignedPosition, SlicedImage, SlicedProtocol},
     Resize, StatefulImage,
 };
 
 use crate::ui::components::terminal_capabilities::TerminalCapabilities;
 
 pub struct ImageBlockState {
-    state: StatefulProtocol,
+    image: DynamicImage,
+    picker: Picker,
+    stateful: Option<StatefulProtocol>,
+    sliced: Option<(Size, SlicedProtocol)>,
 }
 
 impl ImageBlockState {
@@ -25,13 +33,54 @@ impl ImageBlockState {
         let path = resolve_local_path(source)?;
         let image = image::ImageReader::open(path).ok()?.decode().ok()?;
         let picker = picker_for(image_protocol, caps)?;
-        let state = picker.new_resize_protocol(image);
-        Some(Self { state })
+        Some(Self {
+            image,
+            picker,
+            stateful: None,
+            sliced: None,
+        })
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
+        if self.stateful.is_none() {
+            self.stateful = Some(self.picker.new_resize_protocol(self.image.clone()));
+        }
+        let Some(stateful) = self.stateful.as_mut() else {
+            return;
+        };
         let widget = StatefulImage::new().resize(Resize::Fit(None));
-        f.render_stateful_widget(widget, area, &mut self.state);
+        f.render_stateful_widget(widget, area, stateful);
+    }
+
+    pub fn render_sliced(
+        &mut self,
+        f: &mut Frame,
+        area: Rect,
+        size: Size,
+        position: SignedPosition,
+    ) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let needs_rebuild = self
+            .sliced
+            .as_ref()
+            .map(|(cached_size, _)| *cached_size != size)
+            .unwrap_or(true);
+        if needs_rebuild {
+            self.sliced = SlicedProtocol::new_with_resize(
+                &self.picker,
+                self.image.clone(),
+                size,
+                Resize::Fit(None),
+            )
+            .ok()
+            .map(|protocol| (size, protocol));
+        }
+        let Some((_, protocol)) = self.sliced.as_ref() else {
+            return;
+        };
+        f.render_widget(SlicedImage::new(protocol, position), area);
     }
 }
 
@@ -82,8 +131,13 @@ mod tests {
     use super::{picker_for, resolve_local_path, ImageBlockState};
     use crate::ui::components::terminal_capabilities::{TerminalCapabilities, TerminalKind};
     use image::{DynamicImage, Rgba, RgbaImage};
-    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+    use ratatui::{
+        backend::TestBackend,
+        layout::{Rect, Size},
+        Terminal,
+    };
     use ratatui_image::picker::ProtocolType;
+    use ratatui_image::sliced::SignedPosition;
 
     #[test]
     fn kitty_protocol_remains_selectable() {
@@ -131,6 +185,40 @@ mod tests {
             .content
             .iter()
             .any(|cell| cell.symbol().contains("\u{1b}_G")));
+        std::fs::remove_file(path).expect("remove test png");
+    }
+
+    #[test]
+    fn sliced_render_handles_top_clipping() {
+        let path =
+            std::env::temp_dir().join(format!("tcui-sliced-image-{}.png", rand::random::<u64>()));
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 4, Rgba([255, 0, 0, 255])))
+            .save(&path)
+            .expect("save test png");
+        let caps = TerminalCapabilities {
+            terminal: TerminalKind::Kitty,
+            multiplexer: None,
+            kitty_graphics: true,
+            kitty_text_sizing: true,
+            tmux_passthrough: false,
+        };
+        let mut state =
+            ImageBlockState::from_source(path.to_str().expect("utf-8 path"), "kitty", caps)
+                .expect("image state");
+        let mut terminal = Terminal::new(TestBackend::new(10, 4)).expect("test terminal");
+
+        terminal
+            .draw(|frame| {
+                state.render_sliced(
+                    frame,
+                    Rect::new(0, 0, 10, 4),
+                    Size::new(10, 6),
+                    SignedPosition::from((0, -2)),
+                );
+            })
+            .expect("render sliced image");
+
+        assert!(state.sliced.is_some());
         std::fs::remove_file(path).expect("remove test png");
     }
 

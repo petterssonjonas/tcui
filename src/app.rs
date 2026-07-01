@@ -54,7 +54,7 @@ impl TuiApp {
         ui.show_chat_scrollbar = config_snapshot.show_chat_scrollbar;
         ui.collapse_thinking = config_snapshot.collapse_thinking;
         ui.kitty_enhanced_text = config_snapshot.kitty_enhanced_text;
-        ui.kitty_text_max_scale = config_snapshot.kitty_text_max_scale.clamp(1, 7);
+        ui.kitty_heading_downscale = config_snapshot.kitty_heading_downscale;
         ui.image_protocol = config_snapshot.image_protocol.clone();
         ui.web_search_enabled = config_snapshot.web_search.enabled;
         ui.db_providers = Self::provider_entries_with_local(&config_snapshot, None);
@@ -117,6 +117,21 @@ impl TuiApp {
         app.sync_message_media(app.ui.active_tab);
         app.queue_connection_check_for_active_tab();
         app
+    }
+
+    pub fn queue_update_check(&self) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let action_tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            if let Ok(Some(release)) = crate::updater::available_release().await {
+                let _ = action_tx.send(Action::ShowToast(format!(
+                    "Update {} available. Run `tcui upgrade` to update.",
+                    release.version
+                )));
+            }
+        });
     }
 
     fn load_system_prompt() -> String {
@@ -407,7 +422,6 @@ impl TuiApp {
             terminal.draw(|f| {
                 self.ui.render(f);
             })?;
-            self.write_terminal_overlays(terminal)?;
             return Ok(());
         }
 
@@ -418,7 +432,6 @@ impl TuiApp {
             terminal.draw(|f| {
                 self.ui.render(f);
             })?;
-            self.write_terminal_overlays(terminal)?;
 
             tokio::select! {
                 _ = tick.tick() => {}
@@ -463,20 +476,6 @@ impl TuiApp {
             }
         }
         Ok(())
-    }
-
-    fn write_terminal_overlays(
-        &self,
-        terminal: &mut ratatui::Terminal<crate::Backend>,
-    ) -> std::io::Result<()> {
-        let Some(tab) = self.ui.tabs.get(self.ui.active_tab) else {
-            return Ok(());
-        };
-        crate::ui::components::terminal_capabilities::write_kitty_text_overlays(
-            terminal.backend_mut(),
-            &tab.kitty_text_overlays,
-            self.ui.terminal_capabilities,
-        )
     }
 
     pub async fn dispatch(&mut self, action: Action) -> color_eyre::Result<()> {
@@ -543,7 +542,7 @@ impl TuiApp {
                     self.ui.show_chat_scrollbar = settings.show_chat_scrollbar;
                     self.ui.collapse_thinking = settings.collapse_thinking;
                     self.ui.kitty_enhanced_text = settings.kitty_enhanced_text;
-                    self.ui.kitty_text_max_scale = settings.kitty_text_max_scale;
+                    self.ui.kitty_heading_downscale = settings.kitty_heading_downscale;
                     self.ui.web_search_enabled = settings.web_search_enabled;
                     for tab in &mut self.ui.tabs {
                         tab.thinking_fold_overrides.clear();
@@ -564,7 +563,7 @@ impl TuiApp {
                         self.ui.show_chat_scrollbar = settings.show_chat_scrollbar;
                         self.ui.collapse_thinking = settings.collapse_thinking;
                         self.ui.kitty_enhanced_text = settings.kitty_enhanced_text;
-                        self.ui.kitty_text_max_scale = settings.kitty_text_max_scale;
+                        self.ui.kitty_heading_downscale = settings.kitty_heading_downscale;
                         self.ui.web_search_enabled = settings.web_search_enabled;
                         for tab in &mut self.ui.tabs {
                             tab.thinking_fold_overrides.clear();
@@ -678,6 +677,10 @@ impl TuiApp {
             }
             Action::UpdateStatus(status) => {
                 self.ui.update_status(status);
+                Ok(())
+            }
+            Action::ShowToast(message) => {
+                self.ui.show_toast(message);
                 Ok(())
             }
             Action::SetConnectionState(status, message) => {
@@ -3596,7 +3599,7 @@ impl TuiApp {
                 show_chat_scrollbar: config.show_chat_scrollbar,
                 collapse_thinking: config.collapse_thinking,
                 kitty_enhanced_text: config.kitty_enhanced_text,
-                kitty_text_max_scale: config.kitty_text_max_scale.clamp(1, 7),
+                kitty_heading_downscale: config.kitty_heading_downscale,
                 web_search_enabled: config.web_search.enabled,
                 quit_confirmation: config.quit_confirmation,
                 local_enabled: config.local_inference.enabled,
@@ -3665,7 +3668,7 @@ impl TuiApp {
         config.show_chat_scrollbar = settings.show_chat_scrollbar;
         config.collapse_thinking = settings.collapse_thinking;
         config.kitty_enhanced_text = settings.kitty_enhanced_text;
-        config.kitty_text_max_scale = settings.kitty_text_max_scale.clamp(1, 7);
+        config.kitty_heading_downscale = settings.kitty_heading_downscale;
         config.quit_confirmation = settings.quit_confirmation;
         config.web_search.enabled = settings.web_search_enabled;
         config.mcp_servers = settings.mcp_servers.clone();

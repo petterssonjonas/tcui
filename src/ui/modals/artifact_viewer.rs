@@ -1,6 +1,6 @@
 use ratatui::{prelude::*, widgets::*, Frame};
 
-use crate::config::app_config::MarkdownMode;
+use crate::config::app_config::{HeadingDownscale, MarkdownMode};
 use crate::ui::artifact_sidebar::{ArtifactEntry, ArtifactHandle, ArtifactKind};
 use crate::ui::components::{
     image_block::ImageBlockState, markdown::MarkdownRenderer,
@@ -24,7 +24,7 @@ pub struct ArtifactViewerState {
 pub struct ArtifactViewerProps<'a> {
     pub markdown_mode: MarkdownMode,
     pub kitty_enhanced_text: bool,
-    pub kitty_text_max_scale: u8,
+    pub kitty_heading_downscale: HeadingDownscale,
     pub image_protocol: &'a str,
     pub terminal_capabilities: TerminalCapabilities,
 }
@@ -148,8 +148,8 @@ impl ArtifactViewerState {
                     content,
                     props.markdown_mode,
                     layout[1].width.saturating_sub(2) as usize,
-                    props.kitty_enhanced_text,
-                    props.kitty_text_max_scale,
+                    false,
+                    props.kitty_heading_downscale,
                     !props.image_protocol.eq_ignore_ascii_case("off"),
                 );
                 f.render_widget(

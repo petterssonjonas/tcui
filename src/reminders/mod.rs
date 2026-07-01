@@ -56,7 +56,8 @@ impl ReminderRecord {
             id: id.to_string(),
             display_schedule: parse::describe_schedule(&schedule),
             recurring: schedule.is_recurring(),
-            message: crate::storage::Storage::encrypt_shared_text(message).expect("encrypt reminder"),
+            message: crate::storage::Storage::encrypt_shared_text(message)
+                .expect("encrypt reminder"),
             unit: format!("tcui-reminder-{id}"),
             created_at: created_at.to_rfc3339(),
         }
@@ -151,7 +152,11 @@ fn list_reminders() -> Result<String, ReminderError> {
     let mut lines = vec!["Scheduled reminders:".to_string()];
     for reminder in reminders {
         let message = reminder.message_text()?;
-        let cadence = if reminder.recurring { "recurring" } else { "one-shot" };
+        let cadence = if reminder.recurring {
+            "recurring"
+        } else {
+            "one-shot"
+        };
         lines.push(format!(
             "- {} [{}] {}: {}",
             reminder.id, cadence, reminder.display_schedule, message
@@ -167,7 +172,9 @@ fn forget_reminder(id: &str) -> Result<String, ReminderError> {
         ));
     }
     let Some(record) = store::get(id)? else {
-        return Err(ReminderError::Invalid(format!("reminder `{id}` was not found")));
+        return Err(ReminderError::Invalid(format!(
+            "reminder `{id}` was not found"
+        )));
     };
     systemd::cancel(&record.unit)?;
     store::remove(id)?;
@@ -217,7 +224,8 @@ mod tests {
     #[test]
     fn list_and_forget_commands_work_against_store() {
         let _guard = env_lock().lock().expect("env lock poisoned");
-        let temp = std::env::temp_dir().join(format!("tcui-reminder-host-{}", rand::random::<u64>()));
+        let temp =
+            std::env::temp_dir().join(format!("tcui-reminder-host-{}", rand::random::<u64>()));
         std::fs::create_dir_all(&temp).expect("temp xdg data");
         std::env::set_var("XDG_DATA_HOME", &temp);
         std::env::set_var("TCUI_REMINDER_SYSTEMCTL", "true");
@@ -233,9 +241,13 @@ mod tests {
         assert!(listed.contains("abc123"));
         assert!(listed.contains("Drink water"));
 
-        let forgotten = handle_request(&AppConfig::default(), "forget abc123").expect("forget reminder");
+        let forgotten =
+            handle_request(&AppConfig::default(), "forget abc123").expect("forget reminder");
         assert_eq!(forgotten, "Forgot reminder abc123.");
-        assert_eq!(handle_request(&AppConfig::default(), "list").expect("list reminders"), "No reminders scheduled.");
+        assert_eq!(
+            handle_request(&AppConfig::default(), "list").expect("list reminders"),
+            "No reminders scheduled."
+        );
 
         std::env::remove_var("TCUI_REMINDER_SYSTEMCTL");
         std::fs::remove_dir_all(temp).expect("cleanup temp xdg data");

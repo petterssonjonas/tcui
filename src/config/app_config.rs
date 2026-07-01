@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 use color_eyre::Result;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::PathBuf;
 
 use crate::config::{McpServerConfig, WebSearchConfig};
@@ -121,6 +121,59 @@ impl MarkdownMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeadingDownscale {
+    #[default]
+    None,
+    One,
+    Two,
+}
+
+impl HeadingDownscale {
+    pub fn label(self) -> &'static str {
+        match self {
+            HeadingDownscale::None => "Original",
+            HeadingDownscale::One => "Down one level",
+            HeadingDownscale::Two => "Down two levels",
+        }
+    }
+
+    const fn from_legacy_scale(scale: u8) -> Self {
+        match scale {
+            0 | 1 => HeadingDownscale::Two,
+            2 => HeadingDownscale::One,
+            _ => HeadingDownscale::None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for HeadingDownscale {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum HeadingDownscaleValue {
+            Name(String),
+            Scale(u8),
+        }
+
+        match HeadingDownscaleValue::deserialize(deserializer)? {
+            HeadingDownscaleValue::Name(name) => match name.trim().to_ascii_lowercase().as_str() {
+                "none" | "original" => Ok(HeadingDownscale::None),
+                "one" | "down_one_level" | "down-one-level" => Ok(HeadingDownscale::One),
+                "two" | "down_two_levels" | "down-two-levels" => Ok(HeadingDownscale::Two),
+                other => Err(serde::de::Error::custom(format!(
+                    "unknown heading downscale: {other}"
+                ))),
+            },
+            HeadingDownscaleValue::Scale(scale) => Ok(HeadingDownscale::from_legacy_scale(scale)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalServerType {
@@ -205,7 +258,8 @@ pub struct AppConfig {
     pub show_chat_scrollbar: bool,
     pub collapse_thinking: bool,
     pub kitty_enhanced_text: bool,
-    pub kitty_text_max_scale: u8,
+    #[serde(default, alias = "kitty_text_max_scale")]
+    pub kitty_heading_downscale: HeadingDownscale,
     pub quit_confirmation: bool,
     pub use_env_keys: bool,
     pub disabled_providers: Vec<String>,
@@ -411,7 +465,7 @@ impl Default for AppConfig {
             show_chat_scrollbar: true,
             collapse_thinking: true,
             kitty_enhanced_text: true,
-            kitty_text_max_scale: 3,
+            kitty_heading_downscale: HeadingDownscale::None,
             quit_confirmation: true,
             use_env_keys: false,
             disabled_providers: Vec::new(),
@@ -705,5 +759,32 @@ default_provider = "OpenAI"
         assert_eq!(found, repo_path);
 
         std::fs::remove_dir_all(&root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn legacy_kitty_text_scale_migrates_to_heading_downscale() {
+        let config: AppConfig = toml::from_str(
+            r#"
+theme = "system"
+default_model = "gpt-4o"
+default_provider = "OpenAI"
+kitty_text_max_scale = 2
+"#,
+        )
+        .expect("parse legacy config");
+
+        assert_eq!(config.kitty_heading_downscale, HeadingDownscale::One);
+
+        let clipped: AppConfig = toml::from_str(
+            r#"
+theme = "system"
+default_model = "gpt-4o"
+default_provider = "OpenAI"
+kitty_text_max_scale = 1
+"#,
+        )
+        .expect("parse legacy clipped config");
+
+        assert_eq!(clipped.kitty_heading_downscale, HeadingDownscale::Two);
     }
 }

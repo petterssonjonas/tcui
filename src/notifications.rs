@@ -104,7 +104,10 @@ async fn send_ntfy(url: &str, title: &str, body: &str) -> reqwest::Result<()> {
 async fn send_bell() -> std::io::Result<()> {
     for (program, args) in [
         ("canberra-gtk-play", vec!["-i", "bell"]),
-        ("paplay", vec!["/usr/share/sounds/freedesktop/stereo/bell.oga"]),
+        (
+            "paplay",
+            vec!["/usr/share/sounds/freedesktop/stereo/bell.oga"],
+        ),
     ] {
         let status = tokio::process::Command::new(program)
             .args(&args)

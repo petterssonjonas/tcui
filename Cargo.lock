@@ -3430,6 +3430,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "tui-logger",
+ "unicode-segmentation",
  "unicode-width",
  "walkdir",
 ]

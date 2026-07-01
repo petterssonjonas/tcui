@@ -35,6 +35,7 @@ mod storage;
 mod test_support;
 mod theme;
 mod ui;
+mod updater;
 
 use app::TuiApp;
 use config::AppConfig;
@@ -48,12 +49,15 @@ pub type TerminalType = Terminal<Backend>;
 #[derive(Debug, Parser)]
 #[command(name = "tcui")]
 struct Cli {
+    #[arg(long, default_value_t = false)]
+    upgrade: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    Upgrade,
     #[command(hide = true)]
     ReminderDispatch {
         id: String,
@@ -102,8 +106,17 @@ fn restore_terminal() {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    if let Some(command) = Cli::parse().command {
+    let cli = Cli::parse();
+    if cli.upgrade {
+        println!("{}", updater::upgrade_to_latest().await?);
+        return Ok(());
+    }
+    if let Some(command) = cli.command {
         match command {
+            Command::Upgrade => {
+                println!("{}", updater::upgrade_to_latest().await?);
+                return Ok(());
+            }
             Command::ReminderDispatch { id } => {
                 return reminders::dispatch(&AppConfig::load()?, &id).await;
             }
@@ -141,6 +154,7 @@ async fn main() -> Result<()> {
         Arc::new(LlmClient::new()),
         vault,
     );
+    app.queue_update_check();
 
     app.run(&mut terminal).await?;
 

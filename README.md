@@ -1,6 +1,6 @@
-# TermChatUI
+# TCUI
 
-TermChatUI is a terminal chat client for local and hosted LLM providers. It aims to feel like a ChatGPT-style workspace inside a terminal: provider/model selection, conversations, settings, markdown rendering, and terminal-native interaction.
+TCUI is a terminal chat client for local and hosted LLM providers. It aims to feel like a ChatGPT-style workspace inside a terminal: provider/model selection, conversations, settings, markdown rendering, and terminal-native interaction.
 
 ## Run
 
@@ -21,12 +21,22 @@ Release assets include:
 - `tcui-x86_64-unknown-linux-gnu.tar.gz`
 - `.deb`
 - `.rpm`
-- npm package
 
 Linux install script:
 
 ```bash
-curl -fsSL https://github.com/petterssonjonas/TermChatUI/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/petterssonjonas/tcui/releases/latest/download/install.sh | bash
 ```
 
 The installer verifies the release `SHA256SUMS` file before installing the binary.
+
+Upgrade in place without touching your config:
+
+```bash
+tcui --upgrade
+```
+
+## License
+
+TCUI is licensed under GPL-3.0-only. Bundled `potion-base-8M` model assets remain under their
+upstream MIT license; the release artifacts ship that license alongside the binary packages.

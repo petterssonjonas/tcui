@@ -16,9 +16,10 @@ pub mod settings_tab;
 pub mod sidebar;
 pub mod status_bar;
 pub mod tab_bar;
+pub mod toast;
 pub mod top_bar;
 
-use crate::config::app_config::{MarkdownMode, TextAlignment};
+use crate::config::app_config::{HeadingDownscale, MarkdownMode, TextAlignment};
 use crate::ui::components::terminal_capabilities::TerminalCapabilities;
 use artifact_sidebar::{ArtifactEntry, ArtifactSidebar, ArtifactSidebarState};
 use modals::artifact_viewer::ArtifactViewerState;
@@ -28,6 +29,7 @@ use modals::save_file::SaveFileDialog;
 use settings_tab::SettingsPopup;
 use sidebar::Sidebar;
 use status_bar::{ConnectionStatus, StatusBar, StatusBarAreas};
+use toast::Toast;
 use top_bar::TopBar;
 
 #[derive(Debug, Clone)]
@@ -42,6 +44,7 @@ pub enum Action {
     NewConversation(usize),
     UpdateModel(String),
     UpdateStatus(String),
+    ShowToast(String),
     SetTitle(String),
     SwitchTab(usize),
     AddTab(crate::app::tab::Tab),
@@ -69,6 +72,7 @@ pub struct UI {
     pub chat_area: Option<Rect>,
     pub connection_status: ConnectionStatus,
     pub connection_message: Option<String>,
+    pub toast: Option<Toast>,
     pub modal_areas: Option<ModalAreas>,
     pub settings_tab_areas: Option<Vec<Rect>>,
     pub status_bar_areas: Option<StatusBarAreas>,
@@ -82,7 +86,7 @@ pub struct UI {
     pub show_chat_scrollbar: bool,
     pub collapse_thinking: bool,
     pub kitty_enhanced_text: bool,
-    pub kitty_text_max_scale: u8,
+    pub kitty_heading_downscale: HeadingDownscale,
     pub image_protocol: String,
     pub terminal_capabilities: TerminalCapabilities,
     pub web_search_enabled: bool,
@@ -131,7 +135,6 @@ pub struct ChatTabState {
     pub chat_scrollbar_area: Option<Rect>,
     pub chat_scrollbar_thumb: Option<Rect>,
     pub thinking_hit_areas: Vec<(usize, Rect)>,
-    pub kitty_text_overlays: Vec<crate::ui::components::terminal_capabilities::KittyTextOverlay>,
     pub link_hit_areas: Vec<(Rect, String)>,
     pub thinking_fold_overrides: HashSet<usize>,
     pub scroll_to_message: Option<usize>,
@@ -204,7 +207,6 @@ impl UI {
                 chat_scrollbar_area: None,
                 chat_scrollbar_thumb: None,
                 thinking_hit_areas: vec![],
-                kitty_text_overlays: vec![],
                 link_hit_areas: vec![],
                 thinking_fold_overrides: HashSet::new(),
                 scroll_to_message: None,
@@ -229,6 +231,7 @@ impl UI {
             chat_area: None,
             connection_status: ConnectionStatus::Checking,
             connection_message: None,
+            toast: None,
             modal_areas: None,
             settings_tab_areas: None,
             status_bar_areas: None,
@@ -242,7 +245,7 @@ impl UI {
             show_chat_scrollbar: true,
             collapse_thinking: true,
             kitty_enhanced_text: true,
-            kitty_text_max_scale: 3,
+            kitty_heading_downscale: HeadingDownscale::None,
             image_protocol: "auto".to_string(),
             terminal_capabilities: TerminalCapabilities::detect(),
             web_search_enabled: false,
@@ -388,7 +391,7 @@ impl UI {
                         collapse_thinking: self.collapse_thinking,
                         show_chat_scrollbar: self.show_chat_scrollbar,
                         kitty_enhanced_text: self.kitty_enhanced_text,
-                        kitty_text_max_scale: self.kitty_text_max_scale,
+                        kitty_heading_downscale: self.kitty_heading_downscale,
                         image_protocol: &self.image_protocol,
                         terminal_capabilities: self.terminal_capabilities,
                         frame_tick: self.frame_tick,
@@ -439,7 +442,7 @@ impl UI {
                     collapse_thinking: self.collapse_thinking,
                     show_chat_scrollbar: self.show_chat_scrollbar,
                     kitty_enhanced_text: self.kitty_enhanced_text,
-                    kitty_text_max_scale: self.kitty_text_max_scale,
+                    kitty_heading_downscale: self.kitty_heading_downscale,
                     image_protocol: &self.image_protocol,
                     terminal_capabilities: self.terminal_capabilities,
                     frame_tick: self.frame_tick,
@@ -473,7 +476,7 @@ impl UI {
                 modals::artifact_viewer::ArtifactViewerProps {
                     markdown_mode: self.markdown_mode,
                     kitty_enhanced_text: self.kitty_enhanced_text,
-                    kitty_text_max_scale: self.kitty_text_max_scale,
+                    kitty_heading_downscale: self.kitty_heading_downscale,
                     image_protocol: &self.image_protocol,
                     terminal_capabilities: self.terminal_capabilities,
                 },
@@ -483,6 +486,8 @@ impl UI {
         if let Some(ref popup) = self.list_popup {
             popup.render(f, area);
         }
+
+        toast::render(f, area, &mut self.toast, self.frame_tick);
 
         // Modal overlay (rendered on top of everything)
         if let Some(modal) = self.active_modal {
@@ -525,7 +530,6 @@ impl UI {
             chat_scrollbar_area: None,
             chat_scrollbar_thumb: None,
             thinking_hit_areas: vec![],
-            kitty_text_overlays: vec![],
             link_hit_areas: vec![],
             thinking_fold_overrides: HashSet::new(),
             scroll_to_message: None,
@@ -622,15 +626,37 @@ impl UI {
         self.connection_status = ConnectionStatus::Failed;
         self.connection_message = Some(status);
     }
+
+    pub fn show_toast(&mut self, message: String) {
+        let trimmed = message.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        self.toast = Some(Toast::new(trimmed.to_string(), self.frame_tick));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::UI;
+    use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
     fn artifact_sidebar_starts_collapsed() {
         let ui = UI::new();
         assert!(!ui.artifact_sidebar_open);
+    }
+
+    #[test]
+    fn toast_renders_notice_message() {
+        let mut ui = UI::new();
+        ui.show_toast("Update 0.7.0 available".to_string());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+
+        terminal.draw(|frame| ui.render(frame)).expect("render ui");
+
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("Notice"));
+        assert!(screen.contains("Update 0.7.0 available"));
     }
 }
