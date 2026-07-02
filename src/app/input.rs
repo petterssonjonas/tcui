@@ -1,0 +1,192 @@
+use ratatui::layout::Rect;
+
+use super::TuiApp;
+
+impl TuiApp {
+    pub(crate) fn current_input_anchor(&self) -> Option<Rect> {
+        self.ui
+            .tabs
+            .get(self.ui.active_tab)
+            .and_then(|tab| tab.input_area)
+    }
+
+    pub(crate) fn insert_input_text(&mut self, text: &str) {
+        if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
+            let cursor = tab.input_cursor.min(tab.input_content.chars().count());
+            let byte = char_to_byte_index(&tab.input_content, cursor);
+            let needs_space = cursor > 0
+                && !tab.input_content[..byte].ends_with(char::is_whitespace)
+                && !text.starts_with(char::is_whitespace);
+            if needs_space {
+                tab.input_content.insert(byte, ' ');
+                tab.input_cursor += 1;
+            }
+            let insert_at = char_to_byte_index(&tab.input_content, tab.input_cursor);
+            tab.input_content.insert_str(insert_at, text);
+            tab.input_cursor += text.chars().count();
+        }
+        self.refresh_input_popup();
+    }
+
+    pub(crate) fn insert_input_char(&mut self, character: char) {
+        if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
+            tab.input_history_index = None;
+            let cursor = tab.input_cursor.min(tab.input_content.chars().count());
+            let byte = char_to_byte_index(&tab.input_content, cursor);
+            tab.input_content.insert(byte, character);
+            tab.input_cursor = cursor + 1;
+        }
+        self.refresh_input_popup();
+    }
+
+    pub(crate) fn backspace_input_char(&mut self) {
+        if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
+            tab.input_history_index = None;
+            let cursor = tab.input_cursor.min(tab.input_content.chars().count());
+            if cursor == 0 {
+                return;
+            }
+            let start = char_to_byte_index(&tab.input_content, cursor - 1);
+            let end = char_to_byte_index(&tab.input_content, cursor);
+            tab.input_content.replace_range(start..end, "");
+            tab.input_cursor = cursor - 1;
+        }
+        self.refresh_input_popup();
+    }
+
+    pub(crate) fn delete_input_char(&mut self) {
+        if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
+            tab.input_history_index = None;
+            let cursor = tab.input_cursor.min(tab.input_content.chars().count());
+            if cursor >= tab.input_content.chars().count() {
+                return;
+            }
+            let start = char_to_byte_index(&tab.input_content, cursor);
+            let end = char_to_byte_index(&tab.input_content, cursor + 1);
+            tab.input_content.replace_range(start..end, "");
+        }
+        self.refresh_input_popup();
+    }
+
+    pub(crate) fn move_input_cursor_left(&mut self) {
+        if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
+            tab.input_cursor = tab.input_cursor.saturating_sub(1);
+        }
+        self.refresh_input_popup();
+    }
+
+    pub(crate) fn move_input_cursor_right(&mut self) {
+        if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
+            let len = tab.input_content.chars().count();
+            tab.input_cursor = (tab.input_cursor + 1).min(len);
+        }
+        self.refresh_input_popup();
+    }
+
+    pub(crate) fn move_input_cursor_home(&mut self) {
+        if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
+            tab.input_cursor = 0;
+        }
+        self.refresh_input_popup();
+    }
+
+    pub(crate) fn move_input_cursor_end(&mut self) {
+        if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
+            tab.input_cursor = tab.input_content.chars().count();
+        }
+        self.refresh_input_popup();
+    }
+
+    pub(crate) fn set_input_cursor_from_click(&mut self, position: ratatui::layout::Position) {
+        let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) else {
+            return;
+        };
+        let Some(area) = tab.input_text_area else {
+            return;
+        };
+        if !area.contains(position) {
+            return;
+        }
+        let layout = crate::ui::chat_tab::input_layout(
+            &tab.input_content,
+            tab.input_cursor,
+            tab.input_scroll,
+            area.width as usize,
+            area.height as usize,
+            true,
+        );
+        let relative_x = position.x.saturating_sub(area.x).saturating_sub(1) as usize;
+        let relative_y = position.y.saturating_sub(area.y) as usize;
+        let line_index =
+            (layout.scroll + relative_y).min(layout.line_ranges.len().saturating_sub(1));
+        let (start, end) = layout
+            .line_ranges
+            .get(line_index)
+            .copied()
+            .unwrap_or((0, 0));
+        tab.input_cursor = (start + relative_x).min(end);
+        self.refresh_input_popup();
+    }
+
+    pub(crate) fn replace_input_content(&mut self, content: String) {
+        if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
+            tab.input_content = content;
+            tab.input_cursor = tab.input_content.chars().count();
+            tab.input_scroll = 0;
+            tab.input_history_index = None;
+            tab.input_history_draft = None;
+        }
+        self.refresh_input_popup();
+    }
+
+    pub(crate) fn browse_input_history(&mut self, forward: bool) {
+        let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) else {
+            return;
+        };
+        let history: Vec<String> = tab
+            .messages
+            .iter()
+            .filter(|message| message.role == "user")
+            .map(|message| message.content.clone())
+            .collect();
+        if history.is_empty() {
+            return;
+        }
+
+        if tab.input_history_index.is_none() {
+            tab.input_history_draft = Some(tab.input_content.clone());
+        }
+
+        let next_index = match (tab.input_history_index, forward) {
+            (None, false) => Some(history.len().saturating_sub(1)),
+            (None, true) => None,
+            (Some(index), false) => Some(index.saturating_sub(1)),
+            (Some(index), true) if index + 1 < history.len() => Some(index + 1),
+            (Some(_), true) => None,
+        };
+
+        match next_index {
+            Some(index) => {
+                tab.input_history_index = Some(index);
+                tab.input_content = history[index].clone();
+            }
+            None => {
+                tab.input_history_index = None;
+                tab.input_content = tab.input_history_draft.clone().unwrap_or_default();
+            }
+        }
+        tab.input_cursor = tab.input_content.chars().count();
+        tab.input_scroll = 0;
+        self.refresh_input_popup();
+    }
+}
+
+pub(crate) fn char_to_byte_index(text: &str, char_idx: usize) -> usize {
+    if char_idx == 0 {
+        return 0;
+    }
+    text.char_indices()
+        .nth(char_idx)
+        .map(|(idx, _)| idx)
+        .unwrap_or(text.len())
+}
