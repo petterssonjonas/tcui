@@ -699,4 +699,48 @@ kitty_text_max_scale = 1
 
         assert_eq!(clipped.kitty_heading_downscale, HeadingDownscale::Two);
     }
+
+    #[test]
+    fn default_config_matches_expected_defaults() {
+        let config = AppConfig::default();
+
+        assert_eq!(config.theme, "system");
+        assert_eq!(config.default_model, "gpt-4o");
+        assert_eq!(config.default_provider, "openai");
+        assert_eq!(config.markdown_mode, MarkdownMode::Full);
+        assert!(config.quit_confirmation);
+        assert!(config.collapse_thinking);
+        assert!(!config.use_env_keys);
+        assert_eq!(config.image_protocol, "auto");
+        assert!(!config.providers.is_empty());
+    }
+
+    #[test]
+    fn provider_entries_returns_name_endpoint_env_backend_auth() {
+        let config = AppConfig::default();
+        let entries = config.provider_entries();
+
+        assert!(!entries.is_empty());
+        let openai = entries
+            .iter()
+            .find(|(name, _, _, _, _)| name == "OpenAI")
+            .expect("OpenAI provider");
+        assert_eq!(openai.1, "https://api.openai.com/v1");
+        assert_eq!(openai.2, "OPENAI_API_KEY");
+        assert_eq!(openai.3, "openai");
+        assert_eq!(openai.4, "api_key");
+    }
+
+    #[test]
+    fn provider_config_finds_by_name_case_insensitive() {
+        let config = AppConfig::default();
+
+        let openai = config.provider_config("openai").expect("find openai");
+        assert_eq!(openai.name, "OpenAI");
+
+        let anthropic = config.provider_config("ANTHROPIC").expect("find anthropic");
+        assert_eq!(anthropic.name, "Anthropic");
+
+        assert!(config.provider_config("nonexistent").is_none());
+    }
 }

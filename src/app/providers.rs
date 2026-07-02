@@ -171,3 +171,83 @@ impl TuiApp {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+
+    #[test]
+    fn provider_entries_with_local_includes_local_when_enabled() {
+        let mut config = AppConfig::default();
+        config.local_inference.enabled = true;
+        config.local_inference.host = "localhost".to_string();
+        config.local_inference.port = 11434;
+        config.local_inference.selected_model = "llama3.1".to_string();
+
+        let entries = TuiApp::provider_entries_with_local(&config, None);
+
+        assert!(entries
+            .iter()
+            .any(|(name, _, _, _, _)| name == crate::config::LOCAL_PROVIDER_NAME));
+    }
+
+    #[test]
+    fn provider_entries_with_local_omits_local_when_disabled() {
+        let mut config = AppConfig::default();
+        config.local_inference.enabled = false;
+
+        let entries = TuiApp::provider_entries_with_local(&config, None);
+
+        assert!(!entries
+            .iter()
+            .any(|(name, _, _, _, _)| name == crate::config::LOCAL_PROVIDER_NAME));
+    }
+
+    #[test]
+    fn filter_visible_providers_excludes_disabled() {
+        let providers = vec![
+            (
+                "OpenAI".to_string(),
+                "".to_string(),
+                "".to_string(),
+                "".to_string(),
+                "".to_string(),
+            ),
+            (
+                "Anthropic".to_string(),
+                "".to_string(),
+                "".to_string(),
+                "".to_string(),
+                "".to_string(),
+            ),
+        ];
+        let mut disabled = HashSet::new();
+        disabled.insert("OpenAI".to_string());
+
+        let visible = TuiApp::filter_visible_providers(&providers, &disabled);
+
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].0, "Anthropic");
+    }
+
+    #[test]
+    fn model_disable_key_uses_colon_separator() {
+        assert_eq!(
+            TuiApp::model_disable_key("OpenAI", "gpt-4o"),
+            "OpenAI:gpt-4o"
+        );
+    }
+
+    #[test]
+    fn reasoning_options_for_gpt5_models() {
+        let options = TuiApp::reasoning_options_for("OpenAI", "gpt-5-chess");
+        assert_eq!(options, vec!["none", "low", "medium", "high", "xhigh"]);
+    }
+
+    #[test]
+    fn reasoning_options_empty_for_non_gpt5() {
+        let options = TuiApp::reasoning_options_for("OpenAI", "gpt-4o");
+        assert!(options.is_empty());
+    }
+}

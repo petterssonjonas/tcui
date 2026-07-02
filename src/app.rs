@@ -26,8 +26,6 @@ pub use tab::Tab;
 
 pub(crate) use artifacts::local_media_sources;
 pub(crate) use input::char_to_byte_index;
-#[cfg(test)]
-pub(crate) use ratatui::layout::Rect;
 
 use crate::{config::AppConfig, llm::LlmClient, obsidian::Vault, storage::Storage};
 

@@ -796,3 +796,91 @@ fn arrow_up_and_down_browse_previous_user_prompts() {
         assert_eq!(app.ui.tabs[0].input_content, "draft");
     });
 }
+
+#[test]
+fn insert_input_char_adds_character_at_cursor() {
+    with_test_app("input-char", |app| {
+        app.ui.tabs[0].input_content = "hel".to_string();
+        app.ui.tabs[0].input_cursor = 3;
+
+        app.insert_input_char('l');
+
+        assert_eq!(app.ui.tabs[0].input_content, "hell");
+        assert_eq!(app.ui.tabs[0].input_cursor, 4);
+    });
+}
+
+#[test]
+fn insert_input_char_at_start_prepends() {
+    with_test_app("input-start", |app| {
+        app.ui.tabs[0].input_content = "world".to_string();
+        app.ui.tabs[0].input_cursor = 0;
+
+        app.insert_input_char('h');
+
+        assert_eq!(app.ui.tabs[0].input_content, "hworld");
+        assert_eq!(app.ui.tabs[0].input_cursor, 1);
+    });
+}
+
+#[test]
+fn backspace_input_char_removes_previous_character() {
+    with_test_app("input-backspace", |app| {
+        app.ui.tabs[0].input_content = "hello".to_string();
+        app.ui.tabs[0].input_cursor = 5;
+
+        app.backspace_input_char();
+
+        assert_eq!(app.ui.tabs[0].input_content, "hell");
+        assert_eq!(app.ui.tabs[0].input_cursor, 4);
+    });
+}
+
+#[test]
+fn backspace_at_start_does_nothing() {
+    with_test_app("input-backspace-start", |app| {
+        app.ui.tabs[0].input_content = "hello".to_string();
+        app.ui.tabs[0].input_cursor = 0;
+
+        app.backspace_input_char();
+
+        assert_eq!(app.ui.tabs[0].input_content, "hello");
+        assert_eq!(app.ui.tabs[0].input_cursor, 0);
+    });
+}
+
+#[test]
+fn delete_input_char_removes_next_character() {
+    with_test_app("input-delete", |app| {
+        app.ui.tabs[0].input_content = "hello".to_string();
+        app.ui.tabs[0].input_cursor = 1;
+
+        app.delete_input_char();
+
+        assert_eq!(app.ui.tabs[0].input_content, "hllo");
+        assert_eq!(app.ui.tabs[0].input_cursor, 1);
+    });
+}
+
+#[test]
+fn move_input_cursor_respects_content_bounds() {
+    with_test_app("input-cursor", |app| {
+        app.ui.tabs[0].input_content = "hi".to_string();
+        app.ui.tabs[0].input_cursor = 1;
+
+        app.move_input_cursor_left();
+        assert_eq!(app.ui.tabs[0].input_cursor, 0);
+
+        app.move_input_cursor_left();
+        assert_eq!(app.ui.tabs[0].input_cursor, 0);
+
+        app.move_input_cursor_right();
+        assert_eq!(app.ui.tabs[0].input_cursor, 1);
+
+        app.move_input_cursor_right();
+        assert_eq!(app.ui.tabs[0].input_cursor, 2);
+
+        app.move_input_cursor_right();
+        assert_eq!(app.ui.tabs[0].input_cursor, 2);
+    });
+}

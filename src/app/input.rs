@@ -190,3 +190,31 @@ pub(crate) fn char_to_byte_index(text: &str, char_idx: usize) -> usize {
         .map(|(idx, _)| idx)
         .unwrap_or(text.len())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::char_to_byte_index;
+
+    #[test]
+    fn char_to_byte_index_at_start_is_zero() {
+        assert_eq!(char_to_byte_index("hello", 0), 0);
+    }
+
+    #[test]
+    fn char_to_byte_index_counts_ascii_chars() {
+        assert_eq!(char_to_byte_index("hello", 3), 3);
+    }
+
+    #[test]
+    fn char_to_byte_index_counts_multibyte_chars() {
+        let text = "héllo"; // é is two bytes
+        assert_eq!(char_to_byte_index(text, 1), 1); // before é
+        assert_eq!(char_to_byte_index(text, 2), 3); // after é
+        assert_eq!(char_to_byte_index(text, 5), text.len());
+    }
+
+    #[test]
+    fn char_to_byte_index_past_end_returns_len() {
+        assert_eq!(char_to_byte_index("hi", 10), 2);
+    }
+}

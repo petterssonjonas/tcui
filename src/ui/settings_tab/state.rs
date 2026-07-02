@@ -405,3 +405,105 @@ impl PresetKeyPopupState {
         !self.api_key.trim().is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::settings_tab::{SettingsPopup, SettingsTab};
+
+    fn empty_init() -> SettingsPopupInit {
+        SettingsPopupInit {
+            default_provider: String::new(),
+            default_model: String::new(),
+            small_model: String::new(),
+            use_env_keys: false,
+            saved_keys: Vec::new(),
+            theme: "system".to_string(),
+            user_alignment: TextAlignment::Left,
+            ai_alignment: TextAlignment::Left,
+            markdown_mode: MarkdownMode::Full,
+            artifact_save_dir: String::new(),
+            available_models: Vec::new(),
+            db_providers: Vec::new(),
+            show_selector: true,
+            show_chat_scrollbar: true,
+            collapse_thinking: true,
+            kitty_enhanced_text: true,
+            kitty_heading_downscale: HeadingDownscale::None,
+            web_search_enabled: false,
+            quit_confirmation: true,
+            local_enabled: false,
+            local_host: "127.0.0.1".to_string(),
+            local_port: "11434".to_string(),
+            local_server_type: LocalServerType::Auto,
+            local_selected_model: String::new(),
+            local_model_directory: String::new(),
+            local_health_interval_seconds: "15".to_string(),
+            local_connect_timeout_ms: "2500".to_string(),
+            local_request_timeout_ms: "120000".to_string(),
+            local_api_token_env: String::new(),
+            detected_local_server: None,
+            providers_tab_list: Vec::new(),
+            models_provider: String::new(),
+            models_available_models: Vec::new(),
+            mcp_servers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn settings_popup_starts_on_general_tab() {
+        let popup = SettingsPopup::new(empty_init());
+        assert_eq!(popup.active_tab, SettingsTab::General);
+        assert_eq!(popup.general_focus, GeneralFocus::Theme);
+    }
+
+    #[test]
+    fn provider_form_can_submit_only_when_all_fields_present() {
+        let mut form = ProviderFormState::new_add();
+        assert!(!form.can_submit());
+
+        form.name = "Test".to_string();
+        assert!(!form.can_submit());
+
+        form.endpoint = "https://api.test.com".to_string();
+        assert!(!form.can_submit());
+
+        form.backend_type = "openai".to_string();
+        assert!(!form.can_submit());
+
+        form.api_key = "sk-123".to_string();
+        assert!(form.can_submit());
+    }
+
+    #[test]
+    fn provider_form_can_submit_rejects_whitespace_only() {
+        let mut form = ProviderFormState::new_add();
+        form.name = "   ".to_string();
+        form.endpoint = "  ".to_string();
+        form.backend_type = "  ".to_string();
+        form.api_key = "  ".to_string();
+        assert!(!form.can_submit());
+    }
+
+    #[test]
+    fn edit_providers_popup_focus_none_when_empty() {
+        let popup = EditProvidersPopupState::new(false);
+        assert_eq!(popup.focus, None);
+    }
+
+    #[test]
+    fn edit_providers_popup_focus_first_when_providers_exist() {
+        let popup = EditProvidersPopupState::new(true);
+        assert_eq!(popup.focus, Some(EditProvidersFocus::ProviderName(0)));
+    }
+
+    #[test]
+    fn preset_key_popup_can_submit_requires_api_key() {
+        let popup = PresetKeyPopupState::new("Test".to_string(), "".to_string(), "".to_string());
+        assert!(!popup.can_submit());
+
+        let popup =
+            PresetKeyPopupState::new("Test".to_string(), "".to_string(), "sk-123".to_string());
+        assert!(popup.can_submit());
+    }
+}
