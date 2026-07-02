@@ -2,6 +2,8 @@
 
 TCUI is a terminal chat client for local and hosted LLM providers. It aims to feel like a ChatGPT-style workspace inside a terminal: provider/model selection, conversations, settings, markdown rendering, and terminal-native interaction.
 
+TCUI is functional but still a work in progress and not yet ready for a general release. To try it, clone the repo and run `cargo run`. Feedback is welcome.
+
 ## Run
 
 ```bash
@@ -20,6 +22,7 @@ Release assets include:
 
 - `tcui-x86_64-unknown-linux-gnu.tar.gz`
 - `.deb`
+- `arm64 .deb`
 - `.rpm`
 
 Linux install script:
@@ -29,6 +32,8 @@ curl -fsSL https://github.com/petterssonjonas/tcui/releases/latest/download/inst
 ```
 
 The installer verifies the release `SHA256SUMS` file before installing the binary.
+
+When a release is published, the GitHub release workflow builds the release packages and uploads them alongside the install script and checksums.
 
 Upgrade in place without touching your config:
 
