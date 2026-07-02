@@ -9,6 +9,9 @@ use crate::storage::crypto::{
 };
 use crate::storage::paths::TcuiDataPaths;
 
+pub type ProviderRow = (String, String, String, String, String);
+pub type ModelRow = (String, Option<f64>, Option<f64>, Option<u32>);
+
 pub struct Storage {
     conn: Connection,
     chat_store: ChatStore,
@@ -189,7 +192,7 @@ impl Storage {
         Ok(map)
     }
 
-    pub fn get_providers(&self) -> Result<Vec<(String, String, String, String, String)>> {
+    pub fn get_providers(&self) -> Result<Vec<ProviderRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT name, endpoint, env_var, backend_type, auth_type FROM providers ORDER BY name",
         )?;
@@ -202,11 +205,7 @@ impl Storage {
                 row.get::<_, String>(4)?,
             ))
         })?;
-        rows.filter_map(|r| r.ok())
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|r| Ok(r))
-            .collect()
+        rows.filter_map(|r| r.ok()).map(Ok).collect()
     }
 
     pub fn get_provider_endpoint(&self, name: &str) -> Result<Option<String>> {
@@ -233,11 +232,7 @@ impl Storage {
         }
     }
 
-    pub fn save_models(
-        &self,
-        provider: &str,
-        models: &[(String, Option<f64>, Option<f64>, Option<u32>)],
-    ) -> Result<()> {
+    pub fn save_models(&self, provider: &str, models: &[ModelRow]) -> Result<()> {
         if models.is_empty() {
             return Ok(());
         }
@@ -256,10 +251,7 @@ impl Storage {
         Ok(())
     }
 
-    pub fn get_models(
-        &self,
-        provider: &str,
-    ) -> Result<Vec<(String, Option<f64>, Option<f64>, Option<u32>)>> {
+    pub fn get_models(&self, provider: &str) -> Result<Vec<ModelRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT model_id, input_price, output_price, context_window FROM models WHERE provider = ?1 ORDER BY model_id"
         )?;
@@ -271,11 +263,7 @@ impl Storage {
                 row.get::<_, Option<u32>>(3)?,
             ))
         })?;
-        rows.filter_map(|r| r.ok())
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|r| Ok(r))
-            .collect()
+        rows.filter_map(|r| r.ok()).map(Ok).collect()
     }
 
     pub fn get_provider_models_fetched_at(&self, provider: &str) -> Result<Option<String>> {

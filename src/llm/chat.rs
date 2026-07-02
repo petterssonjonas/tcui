@@ -333,7 +333,7 @@ where
 
     let buffer = std::str::from_utf8(&bytes)?;
     if !buffer.trim().is_empty() {
-        handle_sse_event(&buffer, &mut on_data)?;
+        handle_sse_event(buffer, &mut on_data)?;
     }
     Ok(())
 }

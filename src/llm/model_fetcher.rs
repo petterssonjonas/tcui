@@ -183,7 +183,7 @@ pub async fn refresh_provider_models(
         models = provider_model_fallback(name);
     }
     if !models.is_empty() {
-        let db_models: Vec<(String, Option<f64>, Option<f64>, Option<u32>)> = models
+        let db_models: Vec<crate::storage::db::ModelRow> = models
             .into_iter()
             .map(|m| (m.id, m.input_price, m.output_price, m.context_window))
             .collect();
@@ -226,7 +226,7 @@ pub async fn refresh_all_models(storage: &crate::storage::Storage) {
             continue;
         }
 
-        let db_models: Vec<(String, Option<f64>, Option<f64>, Option<u32>)> = models
+        let db_models: Vec<crate::storage::db::ModelRow> = models
             .into_iter()
             .map(|m| (m.id, m.input_price, m.output_price, m.context_window))
             .collect();

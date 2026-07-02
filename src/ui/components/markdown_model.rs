@@ -51,8 +51,8 @@ impl KittyHeadingTier {
         let text_width = UnicodeWidthStr::width(text).max(1);
         match self {
             KittyHeadingTier::H1 => text_width.saturating_mul(2),
-            KittyHeadingTier::H2 => (text_width.saturating_mul(10) + 5) / 6,
-            KittyHeadingTier::H3 => (text_width.saturating_mul(3) + 1) / 2,
+            KittyHeadingTier::H2 => text_width.saturating_mul(10).div_ceil(6),
+            KittyHeadingTier::H3 => text_width.saturating_mul(3).div_ceil(2),
         }
     }
 
@@ -70,11 +70,11 @@ impl KittyHeadingTier {
                 format!("\x1b]66;s=2:w={columns};{text}\x1b\\")
             }
             KittyHeadingTier::H2 => {
-                let width = (columns.saturating_mul(5) + 5) / 6;
+                let width = columns.saturating_mul(5).div_ceil(6);
                 format!("\x1b]66;s=2:n=5:d=6:w={width};{text}\x1b\\")
             }
             KittyHeadingTier::H3 => {
-                let width = (columns.saturating_mul(3) + 3) / 4;
+                let width = columns.saturating_mul(3).div_ceil(4);
                 format!("\x1b]66;s=2:n=3:d=4:w={width};{text}\x1b\\")
             }
         }
@@ -549,9 +549,7 @@ fn render_heading(
     let text = text.trim();
     let fallback = heading_style(level);
     lines.push(Line::from(Span::styled(text.to_string(), fallback)));
-    let Some(tier) = enhanced_heading_tier(level, opts.kitty_heading_downscale) else {
-        return None;
-    };
+    let tier = enhanced_heading_tier(level, opts.kitty_heading_downscale)?;
     if !(opts.kitty_enhanced_text
         && opts.terminal_capabilities.kitty_text_sizing
         && opts.mode == MarkdownMode::Full)

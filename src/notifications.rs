@@ -60,7 +60,7 @@ fn ntfy_url(config: &AppConfig) -> Option<String> {
     let base = scheme_host.trim_end_matches('/');
     let topic = ntfy.topic.trim().trim_matches('/');
     let topic = if topic.is_empty() { "tcui" } else { topic };
-    Some(format!("{base}:{}{}", ntfy.port, format!("/{topic}")))
+    Some(format!("{base}:{ntfy_port}/{topic}", ntfy_port = ntfy.port))
 }
 
 async fn notify_text(

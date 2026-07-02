@@ -57,10 +57,10 @@ impl SafetyLayer {
         let lines: Vec<DiffLine> = diff
             .lines()
             .map(|line| {
-                let (sign, text) = if line.starts_with('+') {
-                    ("+".to_string(), line[1..].to_string())
-                } else if line.starts_with('-') {
-                    ("-".to_string(), line[1..].to_string())
+                let (sign, text) = if let Some(rest) = line.strip_prefix('+') {
+                    ("+".to_string(), rest.to_string())
+                } else if let Some(rest) = line.strip_prefix('-') {
+                    ("-".to_string(), rest.to_string())
                 } else {
                     (" ".to_string(), line.to_string())
                 };

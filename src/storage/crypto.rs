@@ -260,21 +260,23 @@ fn decrypt_bytes(
         })
 }
 
-fn parse_optional_envelope(stored: &str) -> Result<Option<(Vec<u8>, Vec<u8>)>, StorageCryptoError> {
+type Envelope = (Vec<u8>, Vec<u8>);
+
+fn parse_optional_envelope(stored: &str) -> Result<Option<Envelope>, StorageCryptoError> {
     let Some(encoded) = stored.strip_prefix(ENVELOPE_PREFIX) else {
         return Ok(None);
     };
     Ok(Some(parse_envelope(encoded)?))
 }
 
-fn parse_required_envelope(stored: &str) -> Result<(Vec<u8>, Vec<u8>), StorageCryptoError> {
+fn parse_required_envelope(stored: &str) -> Result<Envelope, StorageCryptoError> {
     let encoded = stored
         .strip_prefix(ENVELOPE_PREFIX)
         .ok_or(StorageCryptoError::InvalidEnvelope)?;
     parse_envelope(encoded)
 }
 
-fn parse_envelope(encoded: &str) -> Result<(Vec<u8>, Vec<u8>), StorageCryptoError> {
+fn parse_envelope(encoded: &str) -> Result<Envelope, StorageCryptoError> {
     let mut parts = encoded.splitn(2, ':');
     let nonce = parts.next().ok_or(StorageCryptoError::MissingNonce)?;
     let ciphertext = parts.next().ok_or(StorageCryptoError::MissingCiphertext)?;
@@ -337,7 +339,7 @@ fn sync_parent(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         let directory = OpenOptions::new().read(true).open(path)?;
-        return directory.sync_all();
+        directory.sync_all()
     }
 
     #[cfg(not(unix))]

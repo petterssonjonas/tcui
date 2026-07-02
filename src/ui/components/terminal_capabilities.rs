@@ -67,8 +67,10 @@ impl TerminalCapabilities {
 }
 
 pub fn initialize_terminal_profile() {
-    let mut options = QueryStdioOptions::default();
-    options.text_sizing_protocol = true;
+    let options = QueryStdioOptions {
+        text_sizing_protocol: true,
+        ..Default::default()
+    };
     let picker =
         Picker::from_query_stdio_with_options(options).unwrap_or_else(|_| Picker::halfblocks());
     let _ = TERMINAL_PICKER.set(picker);

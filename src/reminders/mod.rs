@@ -91,9 +91,7 @@ pub(crate) enum ReminderError {
 }
 
 pub(crate) fn maybe_handle_request(config: &AppConfig, request: &str) -> Option<String> {
-    let Some(command) = extract_request(request) else {
-        return None;
-    };
+    let command = extract_request(request)?;
     Some(match handle_request(config, &command) {
         Ok(response) => response,
         Err(error) => format!("Reminder scheduling failed: {error}"),
