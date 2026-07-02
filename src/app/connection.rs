@@ -144,3 +144,54 @@ impl TuiApp {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn probe_with(
+        status_label: &str,
+        selected_model_loaded: Option<bool>,
+    ) -> crate::llm::local::LocalProbe {
+        crate::llm::local::LocalProbe {
+            server_type: crate::config::LocalServerType::Ollama,
+            capabilities: crate::llm::local::LocalCapabilities::default(),
+            models: Vec::new(),
+            selected_model_loaded,
+            status_label: status_label.to_string(),
+        }
+    }
+
+    #[test]
+    fn local_probe_state_reports_connected_when_model_loaded() {
+        let probe = probe_with("Ollama", Some(true));
+        let (status, message) = TuiApp::local_probe_state(&probe);
+        assert_eq!(
+            status,
+            crate::ui::status_bar::ConnectionStatus::LocalConnected
+        );
+        assert_eq!(message, Some("Connected to Ollama".to_string()));
+    }
+
+    #[test]
+    fn local_probe_state_reports_unloaded_for_ollama_when_not_loaded() {
+        let probe = probe_with("Ollama", Some(false));
+        let (status, message) = TuiApp::local_probe_state(&probe);
+        assert_eq!(
+            status,
+            crate::ui::status_bar::ConnectionStatus::LocalModelUnloaded
+        );
+        assert_eq!(message, Some("Local model unloaded".to_string()));
+    }
+
+    #[test]
+    fn local_probe_state_connected_when_loaded_state_unknown() {
+        let probe = probe_with("LM Studio", None);
+        let (status, message) = TuiApp::local_probe_state(&probe);
+        assert_eq!(
+            status,
+            crate::ui::status_bar::ConnectionStatus::LocalConnected
+        );
+        assert_eq!(message, Some("Connected to LM Studio".to_string()));
+    }
+}

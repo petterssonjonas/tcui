@@ -77,3 +77,35 @@ pub(crate) fn shell_escape(path: &std::path::Path) -> String {
     let value = path.display().to_string();
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_escape_wraps_path_in_single_quotes() {
+        assert_eq!(
+            shell_escape(std::path::Path::new("/tmp/file.txt")),
+            "'/tmp/file.txt'"
+        );
+    }
+
+    #[test]
+    fn shell_escape_escapes_embedded_single_quotes() {
+        assert_eq!(
+            shell_escape(std::path::Path::new("/tmp/file's.txt")),
+            "'/tmp/file'\"'\"'s.txt'"
+        );
+    }
+
+    #[test]
+    fn command_exists_finds_known_commands() {
+        assert!(command_exists("cargo"));
+        assert!(command_exists("sh"));
+    }
+
+    #[test]
+    fn command_exists_returns_false_for_nonsense() {
+        assert!(!command_exists("definitely-not-a-real-command-12345"));
+    }
+}

@@ -57,3 +57,45 @@ impl SettingsPopup {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn backend_label_maps_known_backends() {
+        assert_eq!(SettingsPopup::backend_label("openai"), "OpenAI");
+        assert_eq!(SettingsPopup::backend_label("anthropic"), "Anthropic");
+        assert_eq!(SettingsPopup::backend_label("gemini"), "Gemini");
+        assert_eq!(SettingsPopup::backend_label("ollama"), "Ollama");
+        assert_eq!(
+            SettingsPopup::backend_label("openai-responses"),
+            "OpenAI Responses"
+        );
+    }
+
+    #[test]
+    fn backend_label_passes_through_unknown() {
+        assert_eq!(SettingsPopup::backend_label("custom"), "custom");
+    }
+
+    #[test]
+    fn dropdown_area_below_is_positioned_under_anchor() {
+        let anchor = Rect::new(10, 5, 20, 3);
+        let area = SettingsPopup::dropdown_area_below(anchor, 4);
+        assert_eq!(area, Rect::new(10, 8, 20, 4));
+    }
+
+    #[test]
+    fn centered_rect_fits_inside_parent() {
+        let parent = Rect::new(0, 0, 100, 100);
+        let rect = SettingsPopup::centered_rect(60, 50, parent);
+        assert!(rect.x >= parent.x);
+        assert!(rect.y >= parent.y);
+        assert!(rect.x + rect.width <= parent.x + parent.width);
+        assert!(rect.y + rect.height <= parent.y + parent.height);
+        assert!(rect.width >= 50);
+        assert!(rect.height >= 40);
+    }
+}
