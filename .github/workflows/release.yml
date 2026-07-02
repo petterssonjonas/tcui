@@ -28,9 +28,11 @@ jobs:
           )" >> "$GITHUB_OUTPUT"
       - run: rustup toolchain install stable --profile minimal
       - run: rustup default stable
+      - run: rustup target add aarch64-unknown-linux-gnu
       - run: cargo build --release
       - run: cargo install cargo-deb cargo-generate-rpm
       - run: cargo deb --no-build --output target/release/tcui_${{ steps.meta.outputs.version }}_amd64.deb
+      - run: cargo deb --target aarch64-unknown-linux-gnu --output target/release/tcui_${{ steps.meta.outputs.version }}_arm64.deb
       - run: cargo generate-rpm --output target/release/tcui-${{ steps.meta.outputs.version }}-1.x86_64.rpm
       - run: tar -C target/release -czf target/release/tcui-x86_64-unknown-linux-gnu.tar.gz tcui
       - run: git archive --format=tar.gz --output target/release/tcui-${{ steps.meta.outputs.version }}-source.tar.gz HEAD
@@ -43,6 +45,7 @@ jobs:
             tcui-x86_64-unknown-linux-gnu.tar.gz \
             tcui-${{ steps.meta.outputs.version }}-source.tar.gz \
             tcui_${{ steps.meta.outputs.version }}_amd64.deb \
+            tcui_${{ steps.meta.outputs.version }}_arm64.deb \
             tcui-${{ steps.meta.outputs.version }}-1.x86_64.rpm \
             install.sh \
             LICENSE \
@@ -55,6 +58,7 @@ jobs:
             target/release/tcui-x86_64-unknown-linux-gnu.tar.gz \
             target/release/tcui-${{ steps.meta.outputs.version }}-source.tar.gz \
             target/release/tcui_${{ steps.meta.outputs.version }}_amd64.deb \
+            target/release/tcui_${{ steps.meta.outputs.version }}_arm64.deb \
             target/release/tcui-${{ steps.meta.outputs.version }}-1.x86_64.rpm \
             target/release/install.sh \
             target/release/LICENSE \
