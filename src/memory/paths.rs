@@ -1,5 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 
+use crate::storage::paths::{ensure_directory, TcuiDataPaths};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -20,34 +21,45 @@ pub(crate) struct ConfinedPath {
 
 #[derive(Debug, Clone)]
 pub(crate) struct MemoryPaths {
+    vault: PathBuf,
+    legacy_memories: PathBuf,
     memories: PathBuf,
+    trash: PathBuf,
 }
 
 impl MemoryPaths {
     pub(crate) fn new(vault: &Path) -> Result<Self, PathError> {
         let vault = std::fs::canonicalize(vault)?;
-        let memories = vault.join("memories");
-        std::fs::create_dir_all(&memories)?;
-        let memories = std::fs::canonicalize(memories)?;
-        if !memories.starts_with(&vault) {
+        let legacy_memories = vault.join("memories");
+        std::fs::create_dir_all(&legacy_memories)?;
+        let legacy_memories = std::fs::canonicalize(legacy_memories)?;
+        if !legacy_memories.starts_with(&vault) {
             return Err(PathError::Escape);
         }
-        Ok(Self { memories })
+        let storage = TcuiDataPaths::discover();
+        ensure_directory(&storage.memories_dir)?;
+        ensure_directory(&storage.memories_trash_dir)?;
+        Ok(Self {
+            vault,
+            legacy_memories,
+            memories: storage.memories_dir,
+            trash: storage.memories_trash_dir,
+        })
+    }
+
+    pub(crate) fn vault(&self) -> &Path {
+        &self.vault
     }
 
     pub(crate) fn root(&self) -> &Path {
         &self.memories
     }
 
-    pub(crate) fn write_target(&self, path: &Path) -> Result<ConfinedPath, PathError> {
-        self.resolve(path, false)
+    pub(crate) fn legacy_root(&self) -> &Path {
+        &self.legacy_memories
     }
 
-    pub(crate) fn existing_target(&self, path: &Path) -> Result<ConfinedPath, PathError> {
-        self.resolve(path, true)
-    }
-
-    fn resolve(&self, path: &Path, must_exist: bool) -> Result<ConfinedPath, PathError> {
+    pub(crate) fn logical_path(&self, path: &Path) -> Result<PathBuf, PathError> {
         if path.is_absolute() {
             return Err(PathError::Invalid);
         }
@@ -61,8 +73,7 @@ impl MemoryPaths {
             return Err(PathError::Invalid);
         }
 
-        let absolute = self.memories.join(relative);
-        let mut cursor = self.memories.clone();
+        let mut cursor = self.legacy_memories.clone();
         for component in relative.components() {
             let Component::Normal(part) = component else {
                 return Err(PathError::Invalid);
@@ -75,17 +86,25 @@ impl MemoryPaths {
                 Err(error) => return Err(error.into()),
             }
         }
+        Ok(relative.to_path_buf())
+    }
 
-        if must_exist {
-            let canonical = std::fs::canonicalize(&absolute)?;
-            if !canonical.starts_with(&self.memories) {
-                return Err(PathError::Escape);
-            }
+    pub(crate) fn legacy_target(&self, path: &Path) -> Result<ConfinedPath, PathError> {
+        let relative = self.logical_path(path)?;
+        let absolute = self.legacy_memories.join(&relative);
+        let canonical = std::fs::canonicalize(&absolute)?;
+        if !canonical.starts_with(&self.legacy_memories) {
+            return Err(PathError::Escape);
         }
-        Ok(ConfinedPath {
-            relative: relative.to_path_buf(),
-            absolute,
-        })
+        Ok(ConfinedPath { relative, absolute })
+    }
+
+    pub(crate) fn active_document_path(&self, id: u64) -> PathBuf {
+        self.memories.join(format!("{id:016x}.tcui-memory"))
+    }
+
+    pub(crate) fn trash_document_path(&self, id: u64) -> PathBuf {
+        self.trash.join(format!("{id:016x}.tcui-memory"))
     }
 }
 
@@ -105,16 +124,16 @@ mod tests {
 
         // When / Then
         assert!(paths
-            .write_target(std::path::Path::new("/tmp/outside.md"))
+            .logical_path(std::path::Path::new("/tmp/outside.md"))
             .is_err());
         assert!(paths
-            .write_target(std::path::Path::new("../outside.md"))
+            .logical_path(std::path::Path::new("../outside.md"))
             .is_err());
         assert!(paths
-            .write_target(std::path::Path::new("note.txt"))
+            .logical_path(std::path::Path::new("note.txt"))
             .is_err());
         assert!(paths
-            .write_target(std::path::Path::new("nested/note.md"))
+            .logical_path(std::path::Path::new("nested/note.md"))
             .is_ok());
         fs::remove_dir_all(root).expect("temporary vault cleanup");
     }
@@ -134,7 +153,7 @@ mod tests {
         let paths = MemoryPaths::new(&root).expect("memory paths");
 
         // When
-        let result = paths.write_target(std::path::Path::new("escaped/note.md"));
+        let result = paths.logical_path(std::path::Path::new("escaped/note.md"));
 
         // Then
         fs::remove_dir_all(&root).expect("root cleanup");

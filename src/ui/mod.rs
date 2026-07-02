@@ -23,6 +23,7 @@ use crate::config::app_config::{HeadingDownscale, MarkdownMode, TextAlignment};
 use crate::ui::components::terminal_capabilities::TerminalCapabilities;
 use artifact_sidebar::{ArtifactEntry, ArtifactSidebar, ArtifactSidebarState};
 use modals::artifact_viewer::ArtifactViewerState;
+use modals::export_dialog::ExportDialog;
 use modals::list_popup::ListPopup;
 use modals::quit_confirm::QuitConfirmModal;
 use modals::save_file::SaveFileDialog;
@@ -66,6 +67,7 @@ pub struct UI {
     pub show_settings: bool,
     pub settings_popup: Option<SettingsPopup>,
     pub save_file_dialog: Option<SaveFileDialog>,
+    pub export_dialog: Option<ExportDialog>,
     pub artifact_viewer: Option<ArtifactViewerState>,
     pub list_popup: Option<ListPopup>,
     pub last_area: Option<Rect>,
@@ -78,6 +80,8 @@ pub struct UI {
     pub status_bar_areas: Option<StatusBarAreas>,
     pub artifact_sidebar_state: ArtifactSidebarState,
     pub vault_artifacts: Vec<ArtifactEntry>,
+    pub saved_artifacts: Vec<ArtifactEntry>,
+    pub memory_artifacts: Vec<ArtifactEntry>,
     pub mcps: Vec<String>,
     pub user_alignment: TextAlignment,
     pub ai_alignment: TextAlignment,
@@ -118,6 +122,8 @@ pub struct ChatTabState {
     pub input_content: String,
     pub input_cursor: usize,
     pub input_scroll: usize,
+    pub input_history_index: Option<usize>,
+    pub input_history_draft: Option<String>,
     pub scroll_offset: usize,
     pub streaming: bool,
     pub pending_diff: Option<Diff>,
@@ -149,6 +155,8 @@ pub struct ConversationEntry {
     pub id: i64,
     pub title: String,
     pub created_at: String,
+    pub updated_at_ms: i64,
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +198,8 @@ impl UI {
                 input_content: String::new(),
                 input_cursor: 0,
                 input_scroll: 0,
+                input_history_index: None,
+                input_history_draft: None,
                 scroll_offset: 0,
                 streaming: false,
                 pending_diff: None,
@@ -225,6 +235,7 @@ impl UI {
             show_settings: false,
             settings_popup: None,
             save_file_dialog: None,
+            export_dialog: None,
             artifact_viewer: None,
             list_popup: None,
             last_area: None,
@@ -237,6 +248,8 @@ impl UI {
             status_bar_areas: None,
             artifact_sidebar_state: ArtifactSidebarState::default(),
             vault_artifacts: vec![],
+            saved_artifacts: vec![],
+            memory_artifacts: vec![],
             mcps: vec![],
             user_alignment: TextAlignment::Right,
             ai_alignment: TextAlignment::Left,
@@ -287,7 +300,11 @@ impl UI {
         );
         top_bar.render(f, main_layout[0]);
 
-        let left_width = if self.sidebar_open { 24 } else { 0 };
+        let left_width = if self.sidebar_open {
+            sidebar::SIDEBAR_WIDTH
+        } else {
+            0
+        };
         let show_artifact_sidebar =
             self.artifact_sidebar_open && main_layout[1].width.saturating_sub(left_width) >= 72;
         let max_artifact_width = main_layout[1]
@@ -328,14 +345,7 @@ impl UI {
         // Sidebar
         if self.sidebar_open {
             let active_tab = &self.tabs[self.active_tab];
-            let show_new_chat =
-                active_tab.messages.is_empty() && active_tab.generated_title.is_none();
-            let sidebar = Sidebar::new(
-                &active_tab.conversations,
-                active_tab.active_conversation,
-                show_new_chat,
-                show_new_chat,
-            );
+            let sidebar = Sidebar::new(&active_tab.conversations, active_tab.active_conversation);
             sidebar.render(f, content_layout[0]);
         }
 
@@ -343,6 +353,8 @@ impl UI {
             if artifact_width > 0 {
                 let mut artifact_sidebar = ArtifactSidebar::new(
                     &tab_state.temporary_artifacts,
+                    &self.saved_artifacts,
+                    &self.memory_artifacts,
                     &self.vault_artifacts,
                     !self.vault_artifacts.is_empty(),
                     &mut self.artifact_sidebar_state,
@@ -469,6 +481,10 @@ impl UI {
             dialog.render(f, area);
         }
 
+        if let Some(ref mut dialog) = self.export_dialog {
+            dialog.render(f, area);
+        }
+
         if let (Some(viewer), Some(chat_area)) = (&mut self.artifact_viewer, self.chat_area) {
             viewer.render(
                 f,
@@ -513,6 +529,8 @@ impl UI {
             input_content: String::new(),
             input_cursor: 0,
             input_scroll: 0,
+            input_history_index: None,
+            input_history_draft: None,
             scroll_offset: 0,
             streaming: false,
             pending_diff: None,
@@ -548,6 +566,8 @@ impl UI {
                 id: tab.active_conversation,
                 title,
                 created_at: String::new(),
+                updated_at_ms: 0,
+                pinned: false,
             });
         }
     }
@@ -570,11 +590,11 @@ impl UI {
 
     pub fn add_generated_file(&mut self, tab_id: usize, file: crate::app::GeneratedFile) {
         if let Some(tab) = self.tabs.get_mut(tab_id) {
-            tab.temporary_artifacts.push(ArtifactEntry::temp_markdown(
-                file.id,
-                file.name,
-                file.content,
-            ));
+            let artifact = match file.saved_path {
+                Some(path) => ArtifactEntry::saved_markdown(path, file.content),
+                None => ArtifactEntry::temp_markdown(file.id, file.name, file.content),
+            };
+            tab.temporary_artifacts.push(artifact);
         }
     }
 

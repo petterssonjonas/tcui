@@ -57,6 +57,13 @@ pub(crate) async fn prepare(
     for skill in skills {
         let result = match skill.name.as_str() {
             "websearch" => prepare_local_search(config, user_request, base_request).await,
+            "research" => {
+                prepared.context.push_str(&format!(
+                    "\n\nSelected skill @research:\n{}",
+                    truncate_chars(&skill.source, MAX_SKILL_CHARS)
+                ));
+                prepare_local_search(config, user_request, base_request).await
+            }
             "exa" | "tavily" | "firecrawl" | "gnome" | "obsidian" => {
                 prepare_mcp(config, user_request, base_request, &skill).await
             }
@@ -101,7 +108,12 @@ async fn prepare_local_search(
     .await;
     let query = match planned {
         Ok(query) if !query.trim().is_empty() => query.trim().trim_matches(['"', '\'']).to_string(),
-        Ok(_) | Err(_) => user_request.replace("@websearch", "").trim().to_string(),
+        Ok(_) | Err(_) => user_request
+            .replace("@websearch", "")
+            .replace("@research", "")
+            .replace("@save", "")
+            .trim()
+            .to_string(),
     };
     let context = crate::search::maybe_search(config, &query, true)
         .await?

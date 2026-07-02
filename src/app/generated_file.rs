@@ -1,4 +1,8 @@
-use std::path::Path;
+use std::{
+    fs::OpenOptions,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedFile {
@@ -6,36 +10,10 @@ pub struct GeneratedFile {
     pub conversation_id: i64,
     pub name: String,
     pub content: String,
+    pub saved_path: Option<PathBuf>,
 }
 
 impl GeneratedFile {
-    pub fn maybe_from_response(
-        id: u64,
-        conversation_id: i64,
-        prompt: &str,
-        answer: &str,
-    ) -> Option<Self> {
-        if !requests_markdown_file(prompt) {
-            return None;
-        }
-
-        let content = extract_markdown_body(answer).unwrap_or_else(|| answer.trim().to_string());
-        if content.is_empty() {
-            return None;
-        }
-
-        let name = requested_filename(prompt)
-            .or_else(|| heading_filename(&content))
-            .unwrap_or_else(|| fallback_filename(prompt));
-
-        Some(Self {
-            id,
-            conversation_id,
-            name,
-            content,
-        })
-    }
-
     pub fn from_skill_response(
         id: u64,
         conversation_id: i64,
@@ -48,7 +26,7 @@ impl GeneratedFile {
         {
             return None;
         }
-        let content = extract_markdown_body(answer).unwrap_or_else(|| answer.trim().to_string());
+        let content = complete_markdown_body(answer);
         if content.is_empty() {
             return None;
         }
@@ -60,24 +38,22 @@ impl GeneratedFile {
             conversation_id,
             name,
             content,
+            saved_path: None,
         })
     }
-}
 
-fn requests_markdown_file(prompt: &str) -> bool {
-    let lower = prompt.to_ascii_lowercase();
-    [
-        ".md file",
-        "markdown file",
-        "markdown document",
-        "write it to .md",
-        "write it to a .md",
-        "write this to .md",
-        "save it as .md",
-        "save this as .md",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
+    pub fn save_to(mut self, base_dir: &Path) -> std::io::Result<Self> {
+        std::fs::create_dir_all(base_dir)?;
+        let path = available_path(base_dir, &self.name)?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        output.write_all(self.content.as_bytes())?;
+        output.sync_all()?;
+        self.saved_path = Some(path);
+        Ok(self)
+    }
 }
 
 fn requested_filename(prompt: &str) -> Option<String> {
@@ -109,20 +85,55 @@ fn requested_filename(prompt: &str) -> Option<String> {
     })
 }
 
-fn extract_markdown_body(answer: &str) -> Option<String> {
-    let markdown_start = answer
-        .find("```markdown\n")
-        .map(|idx| idx + "```markdown\n".len());
-    let generic_start = answer.find("```\n").map(|idx| idx + "```\n".len());
-    let start = markdown_start.or(generic_start)?;
-    let rest = &answer[start..];
-    let end = rest.find("\n```")?;
-    let body = rest[..end].trim();
-    if body.is_empty() {
-        None
-    } else {
-        Some(body.to_string())
+fn complete_markdown_body(answer: &str) -> String {
+    let trimmed = answer.trim();
+    for opening in ["```markdown\n", "```md\n", "```\n"] {
+        if let Some(body) = trimmed
+            .strip_prefix(opening)
+            .and_then(|body| body.strip_suffix("\n```"))
+        {
+            return body.trim().to_string();
+        }
     }
+    trimmed.to_string()
+}
+
+fn available_path(base_dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let requested = base_dir.join(name);
+    if !requested.exists() {
+        return Ok(requested);
+    }
+    let path = Path::new(name);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("artifact");
+    let extension = path.extension().and_then(|value| value.to_str());
+    for suffix in 2..=u32::MAX {
+        let candidate = match extension {
+            Some(extension) => base_dir.join(format!("{stem}-{suffix}.{extension}")),
+            None => base_dir.join(format!("{stem}-{suffix}")),
+        };
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "artifact directory has no available filename",
+    ))
+}
+
+pub(crate) fn expand_user_path(path: &Path, home: Option<&Path>) -> PathBuf {
+    if path == Path::new("~") {
+        return home
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.to_path_buf());
+    }
+    path.strip_prefix("~/")
+        .ok()
+        .and_then(|relative| home.map(|home| home.join(relative)))
+        .unwrap_or_else(|| path.to_path_buf())
 }
 
 fn heading_filename(content: &str) -> Option<String> {
@@ -180,24 +191,15 @@ fn sanitize_slug(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::GeneratedFile;
+    use std::path::Path;
 
     #[test]
-    fn creates_markdown_file_from_prompt_and_response() {
-        let file = GeneratedFile::maybe_from_response(
-            1,
-            42,
-            "give me this specific information and write it to a report.md file",
-            "```markdown\n# Report\n\nHello\n```",
-        )
-        .expect("expected markdown artifact");
+    fn regular_markdown_responses_are_not_artifacts() {
+        // Given / When
+        let file =
+            GeneratedFile::from_skill_response(1, 42, "Show me a Markdown demo", "# Demo\n\nText");
 
-        assert_eq!(file.name, "report.md");
-        assert_eq!(file.content, "# Report\n\nHello");
-    }
-
-    #[test]
-    fn ignores_regular_prompts() {
-        let file = GeneratedFile::maybe_from_response(1, 42, "just answer normally", "# Hello");
+        // Then
         assert!(file.is_none());
     }
 
@@ -227,5 +229,51 @@ mod tests {
 
         // Then
         assert_eq!(file.name, "release.md");
+    }
+
+    #[test]
+    fn save_skill_preserves_the_complete_markdown_response() {
+        // Given
+        let answer = "# Headers\n\nText\n\n```\ncode\n```\n\n# Lists\n\n- one\n- two";
+
+        // When
+        let file = GeneratedFile::from_skill_response(4, 42, "@save this demo", answer)
+            .expect("expected @save artifact");
+
+        // Then
+        assert_eq!(file.content, answer);
+    }
+
+    #[test]
+    fn save_skill_writes_the_artifact_to_the_configured_directory() {
+        // Given
+        let root =
+            std::env::temp_dir().join(format!("tcui-save-artifact-{}", rand::random::<u64>()));
+        let file =
+            GeneratedFile::from_skill_response(5, 42, "@save report.md", "# Report\n\nComplete.")
+                .expect("expected @save artifact");
+
+        // When
+        let saved = file.save_to(&root).expect("save artifact");
+
+        // Then
+        let path = saved.saved_path.expect("saved path");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read saved artifact"),
+            "# Report\n\nComplete."
+        );
+        std::fs::remove_dir_all(root).expect("cleanup artifact directory");
+    }
+
+    #[test]
+    fn user_paths_expand_a_leading_tilde() {
+        // Given
+        let home = Path::new("/home/example");
+
+        // When
+        let expanded = super::expand_user_path(Path::new("~/artifacts/demo.md"), Some(home));
+
+        // Then
+        assert_eq!(expanded, home.join("artifacts/demo.md"));
     }
 }

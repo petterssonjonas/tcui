@@ -112,6 +112,9 @@ impl SkillCatalog {
                 continue;
             }
             let metadata = read_metadata(&canonical_skill, fallback_name)?;
+            if memory_skill_name_is_disabled(&metadata.name) {
+                continue;
+            }
             if names.insert(metadata.name.clone()) {
                 self.skills.push(SkillMeta {
                     name: metadata.name,
@@ -121,6 +124,18 @@ impl SkillCatalog {
             }
         }
         Ok(())
+    }
+}
+
+fn memory_skill_name_is_disabled(name: &str) -> bool {
+    #[cfg(feature = "memory")]
+    {
+        let _ = name;
+        false
+    }
+    #[cfg(not(feature = "memory"))]
+    {
+        matches!(name, "remember" | "memory" | "memorize")
     }
 }
 
@@ -140,13 +155,14 @@ mod tests {
 
         // When
         let loaded = catalog
-            .load_mentions("Use @websearch and @save.")
+            .load_mentions("Use @websearch, @research, and @save.")
             .expect("built-in loading");
 
         // Then
-        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.len(), 3);
         assert_eq!(loaded[0].name, "websearch");
-        assert_eq!(loaded[1].name, "save");
+        assert_eq!(loaded[1].name, "research");
+        assert_eq!(loaded[2].name, "save");
         assert!(loaded
             .iter()
             .all(|skill| skill.origin == SkillOrigin::Builtin));
@@ -162,7 +178,7 @@ mod tests {
 
         // When
         let loaded = catalog
-            .load_mentions("@remember concise answers. @memory search preferences")
+            .load_mentions("@remember concise answers. @memory search preferences @memorize status")
             .expect("memory skill loading");
 
         // Then
@@ -171,8 +187,24 @@ mod tests {
                 .iter()
                 .map(|skill| skill.name.as_str())
                 .collect::<Vec<_>>(),
-            ["remember", "memory"]
+            ["remember", "memory", "memorize"]
         );
+    }
+
+    #[cfg(not(feature = "memory"))]
+    #[test]
+    fn catalog_omits_memory_builtins_when_feature_is_disabled() {
+        let catalog =
+            SkillCatalog::discover_from(Path::new("skills"), None).expect("catalog discovery");
+
+        let loaded = catalog
+            .load_mentions("@remember concise answers. @memory search preferences @memorize status")
+            .expect("catalog loading");
+
+        assert!(loaded.is_empty());
+        assert!(catalog.find("remember").is_none());
+        assert!(catalog.find("memory").is_none());
+        assert!(catalog.find("memorize").is_none());
     }
 
     #[test]

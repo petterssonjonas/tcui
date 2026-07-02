@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use super::embedding::{DIMENSIONS, MODEL_ID};
 
-const SCHEMA_VERSION: &str = "1";
+const SCHEMA_VERSION: &str = "2";
 static SQLITE_VEC_REGISTRATION: OnceLock<i32> = OnceLock::new();
 
 #[derive(Debug, Error)]
@@ -82,8 +82,6 @@ impl MemoryIndex {
              CREATE TABLE memory_files(
                 id INTEGER PRIMARY KEY,
                 rel_path TEXT UNIQUE NOT NULL,
-                title TEXT NOT NULL,
-                frontmatter_raw TEXT,
                 modified_ns INTEGER NOT NULL,
                 size_bytes INTEGER NOT NULL,
                 content_fingerprint INTEGER NOT NULL
@@ -185,8 +183,8 @@ mod tests {
         transaction
             .execute(
                 "INSERT INTO memory_files(
-                    rel_path, title, modified_ns, size_bytes, content_fingerprint
-                 ) VALUES ('benchmark.md', 'Benchmark', 0, 0, 0)",
+                    rel_path, modified_ns, size_bytes, content_fingerprint
+                 ) VALUES ('benchmark.tcui-memory', 0, 0, 0)",
                 [],
             )
             .expect("benchmark file");

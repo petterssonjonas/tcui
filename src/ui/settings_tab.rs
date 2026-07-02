@@ -2394,10 +2394,19 @@ impl SettingsPopup {
             ("/quit, /exit, /q", "Quit via chat"),
             ("/theme", "Choose and apply a theme"),
             ("/skills", "Show installed skills"),
+            #[cfg(feature = "memory")]
+            ("memory-mcp", "Expose memory tools over stdio MCP"),
             ("/mcp", "Show MCP servers"),
             ("/vault <query>", "Search the configured vault"),
             ("/web, /web on, /web off", "Toggle local web search"),
             ("@obsidian", "Search, read, or update the configured vault"),
+            #[cfg(feature = "memory")]
+            ("@remember", "Save one durable fact or preference"),
+            #[cfg(feature = "memory")]
+            (
+                "@memory / @memorize",
+                "Search, read, write, or forget memory",
+            ),
             ("@websearch", "Use local web search"),
             ("@save", "Create a sidebar markdown artifact"),
         ];
@@ -4145,6 +4154,29 @@ mod tests {
         // Then
         assert!(rendered.contains("/vault <query>"));
         assert!(!rendered.contains("/local"));
+    }
+
+    #[cfg(feature = "memory")]
+    #[test]
+    fn keybindings_help_exposes_memory_routes_when_enabled() {
+        let mut popup = popup_with_mcps(0);
+        popup.active_tab = SettingsTab::Keybindings;
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).expect("test terminal");
+
+        terminal
+            .draw(|frame| popup.render(frame))
+            .expect("render keybindings");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(rendered.contains("@remember"));
+        assert!(rendered.contains("@memory / @memorize"));
+        assert!(rendered.contains("memory-mcp"));
     }
 
     #[test]

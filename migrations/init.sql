@@ -17,26 +17,6 @@ CREATE TABLE IF NOT EXISTS tabs (
     tab_order INTEGER
 );
 
-CREATE TABLE IF NOT EXISTS conversations (
-    id INTEGER PRIMARY KEY,
-    tab_id INTEGER NOT NULL,
-    title TEXT
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY,
-    conversation_id INTEGER NOT NULL,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    thinking_content TEXT,
-    tool_calls TEXT,
-    tool_result TEXT,
-    tool_source TEXT,
-    images TEXT,
-    diff_data TEXT,
-    token_count INTEGER
-);
-
 CREATE TABLE IF NOT EXISTS file_backups (
     id INTEGER PRIMARY KEY,
     original_path TEXT NOT NULL,

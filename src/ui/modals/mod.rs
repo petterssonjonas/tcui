@@ -1,5 +1,6 @@
 pub mod artifact_viewer;
 pub mod confirm_diff;
+pub mod export_dialog;
 pub mod help;
 pub mod list_popup;
 pub mod mcp_config;

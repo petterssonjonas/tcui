@@ -113,7 +113,8 @@ impl TuiApp {
         };
         let mut app = app;
         app.refresh_visible_selectors();
-        app.refresh_vault_artifacts();
+        app.initialize_chat_state();
+        app.refresh_artifact_sidebar_catalogs();
         app.sync_message_media(app.ui.active_tab);
         app.queue_connection_check_for_active_tab();
         app
@@ -264,6 +265,110 @@ impl TuiApp {
     ) {
         self.ui.connection_status = status;
         self.ui.connection_message = message;
+    }
+
+    fn initialize_chat_state(&mut self) {
+        for tab_id in 0..self.ui.tabs.len() {
+            if self.ensure_tab_has_active_conversation(tab_id).is_err() {
+                self.ui.show_toast("Chat history unavailable.".to_string());
+            }
+        }
+        if self.storage.created_default_key() {
+            self.ui.show_toast(format!(
+                "Back up {}; encrypted chats, memories, and saved provider keys cannot be recovered without it.",
+                Storage::chat_key_path().display()
+            ));
+        }
+    }
+
+    fn refresh_tab_conversations(&mut self, tab_id: usize) -> color_eyre::Result<()> {
+        let (conversations, skipped) = self
+            .storage
+            .get_conversations_with_warnings(tab_id as i64)?;
+        if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
+            tab.conversations = conversations
+                .into_iter()
+                .map(|conversation| crate::ui::ConversationEntry {
+                    id: conversation.id,
+                    title: conversation.title,
+                    created_at: conversation.created_at,
+                    updated_at_ms: conversation.updated_at_ms,
+                    pinned: conversation.pinned,
+                })
+                .collect();
+        }
+        if skipped > 0 {
+            self.ui
+                .show_toast("Some chat history could not be loaded.".to_string());
+        }
+        Ok(())
+    }
+
+    fn ensure_tab_has_active_conversation(&mut self, tab_id: usize) -> color_eyre::Result<()> {
+        self.refresh_tab_conversations(tab_id)?;
+        let active_id = self.ui.tabs.get(tab_id).and_then(|tab| {
+            tab.conversations
+                .iter()
+                .find(|conversation| conversation.id == tab.active_conversation)
+                .map(|conversation| conversation.id)
+                .or_else(|| {
+                    tab.conversations
+                        .first()
+                        .map(|conversation| conversation.id)
+                })
+        });
+        match active_id {
+            Some(conversation_id) => self.load_conversation_into_tab(tab_id, conversation_id),
+            None => self.new_conversation(tab_id),
+        }
+    }
+
+    fn reset_tab_runtime_state(tab: &mut crate::ui::ChatTabState) {
+        tab.messages.clear();
+        tab.thinking_fold_overrides.clear();
+        tab.thinking_hit_areas.clear();
+        tab.temporary_artifacts.clear();
+        tab.scroll_offset = 0;
+        tab.scroll_to_message = None;
+        tab.input_content.clear();
+        tab.input_cursor = 0;
+        tab.input_scroll = 0;
+        tab.input_history_index = None;
+        tab.input_history_draft = None;
+    }
+
+    fn load_conversation_into_tab(
+        &mut self,
+        tab_id: usize,
+        conv_id: i64,
+    ) -> color_eyre::Result<()> {
+        let messages = self.storage.get_messages(conv_id)?;
+        let title = self.ui.tabs.get(tab_id).and_then(|tab| {
+            tab.conversations
+                .iter()
+                .find(|conversation| conversation.id == conv_id)
+                .map(|conversation| conversation.title.clone())
+        });
+        if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
+            Self::reset_tab_runtime_state(tab);
+            tab.active_conversation = conv_id;
+            tab.generated_title = title.filter(|value| value != "New Chat");
+            tab.messages = messages;
+        }
+        self.sync_message_media(tab_id);
+        Ok(())
+    }
+
+    fn persist_active_conversation(&self, tab_id: usize) -> color_eyre::Result<()> {
+        let Some(tab) = self.ui.tabs.get(tab_id) else {
+            return Ok(());
+        };
+        if tab.active_conversation == 0 {
+            return Ok(());
+        }
+        self.storage
+            .replace_messages(tab.active_conversation, &tab.messages)?;
+        Ok(())
     }
 
     fn queue_connection_check_for_active_tab(&self) {
@@ -579,59 +684,25 @@ impl TuiApp {
                 }
                 Ok(())
             }
-            Action::NewChat => {
-                if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
-                    let conv_id = self
-                        .storage
-                        .create_conversation(self.ui.active_tab as i64)?;
-                    tab.active_conversation = conv_id;
-                    tab.messages.clear();
-                    tab.thinking_fold_overrides.clear();
-                    tab.thinking_hit_areas.clear();
-                    tab.scroll_offset = 0;
-                    tab.scroll_to_message = None;
-                    tab.input_content.clear();
-                    tab.input_cursor = 0;
-                    tab.input_scroll = 0;
-                    tab.generated_title = None;
-                    tab.temporary_artifacts.clear();
-                }
-                Ok(())
-            }
+            Action::NewChat => self.new_conversation(self.ui.active_tab),
             Action::CloseChat => {
-                if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
-                    tab.conversations
-                        .retain(|c| c.id != tab.active_conversation);
-                    tab.temporary_artifacts.clear();
-                    if tab.conversations.is_empty() {
-                        // Create a new empty conversation
-                        let conv_id = self
-                            .storage
-                            .create_conversation(self.ui.active_tab as i64)?;
-                        tab.active_conversation = conv_id;
-                        tab.messages.clear();
-                        tab.thinking_fold_overrides.clear();
-                        tab.thinking_hit_areas.clear();
-                        tab.scroll_offset = 0;
-                        tab.scroll_to_message = None;
-                        tab.input_cursor = 0;
-                        tab.input_scroll = 0;
-                        tab.generated_title = None;
-                        tab.temporary_artifacts.clear();
-                    } else {
-                        tab.active_conversation =
-                            tab.conversations.last().map(|c| c.id).unwrap_or(0);
-                    }
-                    tab.messages.clear();
-                    tab.thinking_fold_overrides.clear();
-                    tab.thinking_hit_areas.clear();
-                    tab.scroll_offset = 0;
-                    tab.scroll_to_message = None;
-                    tab.input_content.clear();
-                    tab.input_cursor = 0;
-                    tab.input_scroll = 0;
+                let tab_id = self.ui.active_tab;
+                let active_conversation = self
+                    .ui
+                    .tabs
+                    .get(tab_id)
+                    .map(|tab| tab.active_conversation)
+                    .unwrap_or(0);
+                if active_conversation != 0 {
+                    self.storage.delete_conversation(active_conversation)?;
                 }
-                Ok(())
+                self.ensure_tab_has_active_conversation(tab_id)
+            }
+            Action::ToggleConversationPinned(conversation_id) => {
+                self.toggle_conversation_pinned(conversation_id)
+            }
+            Action::DeleteConversation(conversation_id) => {
+                self.delete_conversation_by_id(conversation_id)
             }
             Action::SendMessage(msg) => self.send_message(msg),
             Action::StreamResponse(tab_id, message_idx, content) => {
@@ -655,13 +726,28 @@ impl TuiApp {
                 }
                 Ok(())
             }
+            Action::FinalizeAssistantMessage(tab_id, message_idx, message) => {
+                if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
+                    if let Some(existing) = tab.messages.get_mut(message_idx) {
+                        *existing = message;
+                    }
+                    tab.scroll_to_message = Some(message_idx);
+                }
+                self.persist_active_conversation(tab_id)?;
+                self.refresh_tab_conversations(tab_id)?;
+                Ok(())
+            }
             Action::StopStream(tab_id) => {
                 self.ui.finish_stream(tab_id);
+                self.refresh_tab_conversations(tab_id)?;
                 Ok(())
             }
             Action::AddMessage(tab_id, msg) => {
-                let _ = self.storage.save_message(&msg);
-                self.ui.add_message(tab_id, msg);
+                let mut stored = msg;
+                if let Ok(message_id) = self.storage.save_message(&stored) {
+                    stored.id = Some(message_id);
+                }
+                self.ui.add_message(tab_id, stored);
                 self.sync_message_media(tab_id);
                 Ok(())
             }
@@ -688,7 +774,15 @@ impl TuiApp {
                 Ok(())
             }
             Action::SetTitle(title) => {
+                if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
+                    tab.generated_title = Some(title.clone());
+                    if tab.active_conversation != 0 {
+                        self.storage
+                            .update_conversation_title(tab.active_conversation, &title)?;
+                    }
+                }
                 self.ui.set_title(title);
+                self.refresh_tab_conversations(self.ui.active_tab)?;
                 Ok(())
             }
             Action::SwitchTab(idx) => {
@@ -755,8 +849,18 @@ impl TuiApp {
             Action::SaveApiKey(_provider, _key) => Ok(()),
             Action::MouseClick(_col, _row) => Ok(()),
             Action::SaveGeneratedFile => self.save_generated_file(),
+            Action::SaveExportDialog => self.save_export_dialog(),
             Action::CancelSaveDialog => {
                 self.ui.save_file_dialog = None;
+                self.ui.export_dialog = None;
+                Ok(())
+            }
+            Action::ExportConversation => {
+                self.open_conversation_export_dialog();
+                Ok(())
+            }
+            Action::ExportConversationId(conversation_id) => {
+                self.open_conversation_export_dialog_for(conversation_id);
                 Ok(())
             }
             Action::RefreshModels => {
@@ -778,6 +882,62 @@ impl TuiApp {
 
         if key.kind != crossterm::event::KeyEventKind::Press {
             return None;
+        }
+
+        if let Some(dialog) = &mut self.ui.export_dialog {
+            return match key.code {
+                KeyCode::Esc => {
+                    self.ui.export_dialog = None;
+                    None
+                }
+                KeyCode::Tab => {
+                    dialog.cycle_focus(!key.modifiers.contains(KeyModifiers::SHIFT));
+                    None
+                }
+                KeyCode::Left | KeyCode::Up => {
+                    dialog.cycle_focus(false);
+                    None
+                }
+                KeyCode::Right | KeyCode::Down => {
+                    dialog.cycle_focus(true);
+                    None
+                }
+                KeyCode::Enter => match dialog.focus {
+                    crate::ui::modals::export_dialog::ExportDialogFocus::Markdown => {
+                        dialog.format = crate::export::OutputFormat::Markdown;
+                        None
+                    }
+                    crate::ui::modals::export_dialog::ExportDialogFocus::Json => {
+                        dialog.format = crate::export::OutputFormat::Json;
+                        None
+                    }
+                    crate::ui::modals::export_dialog::ExportDialogFocus::Cancel => {
+                        self.ui.export_dialog = None;
+                        None
+                    }
+                    _ => Some(Action::SaveExportDialog),
+                },
+                KeyCode::Char(c)
+                    if dialog.focus
+                        == crate::ui::modals::export_dialog::ExportDialogFocus::Path
+                        && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) =>
+                {
+                    dialog.directory_input.push(c);
+                    None
+                }
+                KeyCode::Backspace
+                    if dialog.focus
+                        == crate::ui::modals::export_dialog::ExportDialogFocus::Path =>
+                {
+                    dialog.directory_input.pop();
+                    None
+                }
+                _ => None,
+            };
+        }
+
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('e') {
+            return Some(Action::ExportConversation);
         }
 
         if let Some(dialog) = &mut self.ui.save_file_dialog {
@@ -816,6 +976,9 @@ impl TuiApp {
                 KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.prepare_artifact_save(viewer_handle);
                     None
+                }
+                KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(Action::ExportConversation)
                 }
                 _ => None,
             };
@@ -1203,6 +1366,14 @@ impl TuiApp {
                     self.move_input_cursor_right();
                     None
                 }
+                KeyCode::Up => {
+                    self.browse_input_history(false);
+                    None
+                }
+                KeyCode::Down => {
+                    self.browse_input_history(true);
+                    None
+                }
                 KeyCode::Home => {
                     self.move_input_cursor_home();
                     None
@@ -1219,6 +1390,8 @@ impl TuiApp {
                     if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
                         let content = tab.input_content.clone();
                         if !content.is_empty() {
+                            tab.input_history_index = None;
+                            tab.input_history_draft = None;
                             tab.input_content.clear();
                             tab.input_cursor = 0;
                             tab.input_scroll = 0;
@@ -1382,12 +1555,40 @@ impl TuiApp {
                             visible,
                         );
                     }
+                    crate::ui::artifact_sidebar::ArtifactSection::Saved => {
+                        let visible = self
+                            .ui
+                            .artifact_sidebar_state
+                            .saved_body
+                            .map(crate::ui::artifact_sidebar::ArtifactSidebar::visible_rows)
+                            .unwrap_or(1);
+                        self.ui.artifact_sidebar_state.scroll(
+                            section,
+                            down,
+                            self.ui.saved_artifacts.len(),
+                            visible,
+                        );
+                    }
+                    crate::ui::artifact_sidebar::ArtifactSection::Memories => {
+                        let visible = self
+                            .ui
+                            .artifact_sidebar_state
+                            .memory_body
+                            .map(crate::ui::artifact_sidebar::ArtifactSidebar::visible_rows)
+                            .unwrap_or(1);
+                        self.ui.artifact_sidebar_state.scroll(
+                            section,
+                            down,
+                            self.ui.memory_artifacts.len(),
+                            visible,
+                        );
+                    }
                     crate::ui::artifact_sidebar::ArtifactSection::Vault => {
                         let visible = self
                             .ui
                             .artifact_sidebar_state
                             .vault_body
-                            .map(crate::ui::artifact_sidebar::ArtifactSidebar::visible_rows)
+                            .map(crate::ui::artifact_sidebar::ArtifactSidebar::visible_vault_rows)
                             .unwrap_or(1);
                         self.ui.artifact_sidebar_state.scroll(
                             section,
@@ -1453,6 +1654,37 @@ impl TuiApp {
                 return None;
             }
             return Some(Action::CancelSaveDialog);
+        }
+
+        if let Some(dialog) = &mut self.ui.export_dialog {
+            let popup_area = crate::ui::modals::export_dialog::ExportDialog::popup_area(area);
+            if popup_area.contains(pos) {
+                if dialog
+                    .hit_areas
+                    .markdown
+                    .is_some_and(|hit| hit.contains(pos))
+                {
+                    dialog.focus = crate::ui::modals::export_dialog::ExportDialogFocus::Markdown;
+                    dialog.format = crate::export::OutputFormat::Markdown;
+                    return None;
+                }
+                if dialog.hit_areas.json.is_some_and(|hit| hit.contains(pos)) {
+                    dialog.focus = crate::ui::modals::export_dialog::ExportDialogFocus::Json;
+                    dialog.format = crate::export::OutputFormat::Json;
+                    return None;
+                }
+                if dialog.hit_areas.export.is_some_and(|hit| hit.contains(pos)) {
+                    dialog.focus = crate::ui::modals::export_dialog::ExportDialogFocus::Export;
+                    return Some(Action::SaveExportDialog);
+                }
+                if dialog.hit_areas.cancel.is_some_and(|hit| hit.contains(pos)) {
+                    self.ui.export_dialog = None;
+                    return None;
+                }
+                return None;
+            }
+            self.ui.export_dialog = None;
+            return None;
         }
 
         if let Some(viewer) = &self.ui.artifact_viewer {
@@ -2228,48 +2460,48 @@ impl TuiApp {
 
         // Sidebar layout (only if open)
         if self.ui.sidebar_open {
-            let sidebar_width = 24u16;
+            let sidebar_width = crate::ui::sidebar::SIDEBAR_WIDTH;
             let sidebar_area = Rect::new(area.x, area.y + 1, sidebar_width, area.height - 2);
             let active_tab = self.ui.tabs.get(self.ui.active_tab)?;
-            let show_new_chat =
-                active_tab.messages.is_empty() && active_tab.generated_title.is_none();
             let sidebar = crate::ui::sidebar::Sidebar::new(
                 &active_tab.conversations,
                 active_tab.active_conversation,
-                show_new_chat,
-                show_new_chat,
             );
 
-            // Check "New Chat..." card
-            if let Some(card_area) = sidebar.new_chat_card_area(sidebar_area) {
-                if card_area.contains(pos) {
-                    return Some(Action::SwitchTab(self.ui.active_tab));
+            for target in sidebar.hit_targets(sidebar_area) {
+                if target.area.contains(pos) {
+                    return Some(match target.action {
+                        crate::ui::sidebar::SidebarAction::NewChat => Action::NewChat,
+                        crate::ui::sidebar::SidebarAction::LoadConversation(conversation_id) => {
+                            Action::LoadConversation(conversation_id)
+                        }
+                        crate::ui::sidebar::SidebarAction::TogglePinned(conversation_id) => {
+                            Action::ToggleConversationPinned(conversation_id)
+                        }
+                        crate::ui::sidebar::SidebarAction::ExportConversation(conversation_id) => {
+                            Action::ExportConversationId(conversation_id)
+                        }
+                        crate::ui::sidebar::SidebarAction::DeleteConversation(conversation_id) => {
+                            Action::DeleteConversation(conversation_id)
+                        }
+                    });
                 }
-            }
-
-            for (conversation_id, hit_area) in sidebar.conversation_item_areas(sidebar_area) {
-                if hit_area.contains(pos) {
-                    return Some(Action::LoadConversation(conversation_id));
-                }
-            }
-
-            // Check + New Chat button
-            let new_chat_btn = sidebar.new_chat_button_area(sidebar_area);
-            if new_chat_btn.contains(pos) {
-                return Some(Action::NewChat);
-            }
-
-            // Check Settings button
-            let settings_btn = sidebar.settings_area(sidebar_area);
-            if settings_btn.contains(pos) {
-                return Some(Action::ShowSettings);
             }
         }
 
         if let Some(action) = self.ui.artifact_sidebar_state.action_at(pos) {
             match action {
+                crate::ui::artifact_sidebar::ArtifactSidebarAction::ToggleSection(section) => {
+                    self.ui.artifact_sidebar_state.toggle(section);
+                }
+                crate::ui::artifact_sidebar::ArtifactSidebarAction::ToggleVaultDir(path) => {
+                    self.ui.artifact_sidebar_state.toggle_vault_dir(&path);
+                }
                 crate::ui::artifact_sidebar::ArtifactSidebarAction::Open(handle) => {
                     self.open_artifact(handle);
+                }
+                crate::ui::artifact_sidebar::ArtifactSidebarAction::Edit(handle) => {
+                    self.edit_artifact(handle);
                 }
                 crate::ui::artifact_sidebar::ArtifactSidebarAction::Save(handle) => {
                     self.prepare_artifact_save(handle);
@@ -2325,25 +2557,22 @@ impl TuiApp {
         }
         let role = "user".to_string();
 
-        let msg = Message::new(conversation_id, role, content.clone());
-        let _ = self.storage.save_message(&msg);
-
-        let msg_clone = msg.clone();
-        self.ui.add_message(self.ui.active_tab, msg_clone);
+        let mut msg = Message::new(conversation_id, role, content.clone());
+        if let Ok(message_id) = self.storage.save_message(&msg) {
+            msg.id = Some(message_id);
+        }
+        self.ui.add_message(self.ui.active_tab, msg.clone());
 
         // On first message, create a conversation entry and generate title
         if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
             if tab.messages.len() == 1 && tab.generated_title.is_none() {
                 let title = Self::generate_title(&content);
                 tab.generated_title = Some(title.clone());
-                // Add to sidebar conversations
-                tab.conversations.push(crate::ui::ConversationEntry {
-                    id: tab.active_conversation,
-                    title: title.clone(),
-                    created_at: String::new(),
-                });
+                self.storage
+                    .update_conversation_title(tab.active_conversation, &title)?;
             }
         }
+        self.refresh_tab_conversations(self.ui.active_tab)?;
 
         let tab_id = self.ui.active_tab;
         let Some(tab_state) = self.ui.tabs.get(tab_id) else {
@@ -2360,8 +2589,10 @@ impl TuiApp {
             .map(|config| config.clone())
             .unwrap_or_default();
         if let Some(response) = crate::reminders::maybe_handle_request(&config_snapshot, &content) {
-            let assistant = Message::new(conversation_id, "assistant".to_string(), response);
-            let _ = self.storage.save_message(&assistant);
+            let mut assistant = Message::new(conversation_id, "assistant".to_string(), response);
+            if let Ok(message_id) = self.storage.save_message(&assistant) {
+                assistant.id = Some(message_id);
+            }
             self.ui.add_message(tab_id, assistant);
             return Ok(());
         }
@@ -2615,20 +2846,38 @@ impl TuiApp {
             match result {
                 Ok(response) if !visible_answer.is_empty() || !response.thinking.is_empty() => {
                     let file_id = rand::random();
-                    let generated_file = crate::app::GeneratedFile::maybe_from_response(
+                    let mut generated_file = crate::app::GeneratedFile::from_skill_response(
                         file_id,
                         conversation_id,
                         &user_request,
                         &visible_answer,
-                    )
-                    .or_else(|| {
-                        crate::app::GeneratedFile::from_skill_response(
-                            file_id,
-                            conversation_id,
-                            &user_request,
-                            &visible_answer,
-                        )
-                    });
+                    );
+                    if let Some(file) = generated_file.take() {
+                        let configured = config_snapshot
+                            .artifact_save_dir
+                            .as_deref()
+                            .map(std::path::Path::new)
+                            .map(|path| {
+                                crate::app::generated_file::expand_user_path(
+                                    path,
+                                    dirs::home_dir().as_deref(),
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                dirs::data_dir()
+                                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                                    .join("tcui/artifacts")
+                            });
+                        match file.clone().save_to(&configured) {
+                            Ok(saved) => generated_file = Some(saved),
+                            Err(error) => {
+                                generated_file = Some(file);
+                                let _ = action_tx.send(Action::UpdateStatus(format!(
+                                    "Artifact save failed: {error}"
+                                )));
+                            }
+                        }
+                    }
                     #[cfg(feature = "memory")]
                     if let Some(fact) = remembered {
                         memory_activities.push(crate::memory::MemoryActivity::Saving);
@@ -2671,20 +2920,19 @@ impl TuiApp {
                             memory_activities.clone(),
                         ));
                     }
-                    if let Ok(storage) = crate::storage::Storage::new() {
-                        let assistant_content = visible_answer.clone();
-                        let mut msg = Message::new(
-                            conversation_id,
-                            "assistant".to_string(),
-                            assistant_content,
-                        );
-                        msg.thinking_content =
-                            (!response.thinking.is_empty()).then_some(response.thinking);
-                        msg.token_count = response.total_tokens;
-                        #[cfg(feature = "memory")]
-                        let _ = crate::memory::set_activities(&mut msg, &memory_activities);
-                        let _ = storage.save_message(&msg);
-                    }
+                    let assistant_content = visible_answer.clone();
+                    let mut msg =
+                        Message::new(conversation_id, "assistant".to_string(), assistant_content);
+                    msg.thinking_content =
+                        (!response.thinking.is_empty()).then_some(response.thinking);
+                    msg.token_count = response.total_tokens;
+                    #[cfg(feature = "memory")]
+                    let _ = crate::memory::set_activities(&mut msg, &memory_activities);
+                    let _ = action_tx.send(Action::FinalizeAssistantMessage(
+                        tab_id,
+                        assistant_idx,
+                        msg,
+                    ));
                     if !terminal_has_focus.load(Ordering::Relaxed) {
                         let _ = crate::notifications::notify_finished(
                             &config_snapshot,
@@ -2732,7 +2980,10 @@ impl TuiApp {
             return Ok(());
         }
 
-        let path = std::path::PathBuf::from(trimmed_path);
+        let path = crate::app::generated_file::expand_user_path(
+            std::path::Path::new(trimmed_path),
+            dirs::home_dir().as_deref(),
+        );
         if let Some(parent) = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -2751,8 +3002,167 @@ impl TuiApp {
 
         self.ui.save_file_dialog = None;
         self.promote_temporary_artifact_if_vault_path(&dialog.artifact.handle, &path);
+        self.refresh_saved_artifacts();
         self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::CloudConnected;
         self.ui.connection_message = Some(format!("Saved {}", path.display()));
+        Ok(())
+    }
+
+    fn export_base_dir(&self) -> std::path::PathBuf {
+        self.config
+            .try_read()
+            .ok()
+            .and_then(|cfg| cfg.artifact_save_dir.clone())
+            .map(|path| {
+                crate::app::generated_file::expand_user_path(
+                    std::path::Path::new(&path),
+                    dirs::home_dir().as_deref(),
+                )
+            })
+            .or_else(dirs::download_dir)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    }
+
+    fn open_conversation_export_dialog(&mut self) {
+        let Some(tab) = self.ui.tabs.get(self.ui.active_tab) else {
+            return;
+        };
+        if tab.active_conversation == 0 {
+            return;
+        }
+        self.open_conversation_export_dialog_for(tab.active_conversation);
+    }
+
+    fn open_conversation_export_dialog_for(&mut self, conversation_id: i64) {
+        let item_name = self
+            .ui
+            .tabs
+            .get(self.ui.active_tab)
+            .and_then(|tab| {
+                tab.conversations
+                    .iter()
+                    .find(|conversation| conversation.id == conversation_id)
+                    .map(|conversation| conversation.title.clone())
+                    .or_else(|| tab.generated_title.clone())
+            })
+            .unwrap_or_else(|| "New Chat".to_string());
+        self.ui.export_dialog = Some(crate::ui::modals::export_dialog::ExportDialog::new(
+            crate::ui::modals::export_dialog::ExportTarget::Conversation(conversation_id),
+            item_name,
+            self.export_base_dir(),
+        ));
+    }
+
+    fn open_memory_export_dialog(&mut self, logical_path: std::path::PathBuf) {
+        #[cfg(feature = "memory")]
+        {
+            let item_name = self
+                .ui
+                .memory_artifacts
+                .iter()
+                .find_map(|artifact| match &artifact.handle {
+                    crate::ui::artifact_sidebar::ArtifactHandle::Memory(path)
+                        if path == &logical_path =>
+                    {
+                        Some(artifact.name.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| logical_path.display().to_string());
+            self.ui.export_dialog = Some(crate::ui::modals::export_dialog::ExportDialog::new(
+                crate::ui::modals::export_dialog::ExportTarget::Memory(logical_path),
+                item_name,
+                self.export_base_dir(),
+            ));
+        }
+        #[cfg(not(feature = "memory"))]
+        let _ = logical_path;
+    }
+
+    fn toggle_conversation_pinned(&mut self, conversation_id: i64) -> color_eyre::Result<()> {
+        let pinned = self
+            .ui
+            .tabs
+            .get(self.ui.active_tab)
+            .and_then(|tab| {
+                tab.conversations
+                    .iter()
+                    .find(|conversation| conversation.id == conversation_id)
+                    .map(|conversation| conversation.pinned)
+            })
+            .unwrap_or(false);
+        self.storage
+            .set_conversation_pinned(conversation_id, !pinned)?;
+        self.refresh_tab_conversations(self.ui.active_tab)?;
+        Ok(())
+    }
+
+    fn delete_conversation_by_id(&mut self, conversation_id: i64) -> color_eyre::Result<()> {
+        self.storage.delete_conversation(conversation_id)?;
+        let tab_id = self.ui.active_tab;
+        let deleting_active = self
+            .ui
+            .tabs
+            .get(tab_id)
+            .map(|tab| tab.active_conversation == conversation_id)
+            .unwrap_or(false);
+        if deleting_active {
+            self.ensure_tab_has_active_conversation(tab_id)?;
+        } else {
+            self.refresh_tab_conversations(tab_id)?;
+        }
+        Ok(())
+    }
+
+    fn save_export_dialog(&mut self) -> color_eyre::Result<()> {
+        let Some(dialog) = self.ui.export_dialog.clone() else {
+            return Ok(());
+        };
+        let trimmed_dir = dialog.directory_input.trim();
+        if trimmed_dir.is_empty() {
+            self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::Failed;
+            self.ui.connection_message = Some("Choose an export directory.".to_string());
+            return Ok(());
+        }
+        let destination = crate::app::generated_file::expand_user_path(
+            std::path::Path::new(trimmed_dir),
+            dirs::home_dir().as_deref(),
+        );
+        let saved = match dialog.target {
+            crate::ui::modals::export_dialog::ExportTarget::Conversation(conversation_id) => {
+                let document = self
+                    .storage
+                    .list_all_chat_documents()?
+                    .into_iter()
+                    .find(|document| document.id == conversation_id)
+                    .ok_or_else(|| color_eyre::eyre::eyre!("conversation is unavailable"))?;
+                crate::export::export_chat_document_to_dir(&document, dialog.format, &destination)?
+            }
+            #[cfg(feature = "memory")]
+            crate::ui::modals::export_dialog::ExportTarget::Memory(path) => {
+                let config = self.config.blocking_read().clone();
+                let vault = config
+                    .vault_path
+                    .as_deref()
+                    .map(std::path::Path::new)
+                    .ok_or_else(|| color_eyre::eyre::eyre!("Obsidian vault is not configured"))?;
+                let store = crate::memory::MemoryStore::open(
+                    vault,
+                    &crate::memory::MemoryStore::default_cache_path(),
+                )?;
+                let document = store
+                    .find_document_by_logical_path(&path)?
+                    .ok_or_else(|| color_eyre::eyre::eyre!("memory is unavailable"))?;
+                crate::export::export_memory_document_to_dir(
+                    &document,
+                    dialog.format,
+                    &destination,
+                )?
+            }
+        };
+        self.ui.export_dialog = None;
+        self.ui.show_toast(format!("Exported {}", saved.display()));
         Ok(())
     }
 
@@ -2774,6 +3184,57 @@ impl TuiApp {
                 })
             })
             .unwrap_or_default();
+    }
+
+    fn refresh_saved_artifacts(&mut self) {
+        let root = self.export_base_dir();
+        self.ui.saved_artifacts = std::fs::read_dir(&root)
+            .ok()
+            .into_iter()
+            .flat_map(|entries| entries.filter_map(Result::ok))
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .map(crate::ui::artifact_sidebar::ArtifactEntry::saved_file)
+            .collect();
+        self.ui
+            .saved_artifacts
+            .sort_by(|left, right| left.name.cmp(&right.name));
+    }
+
+    fn refresh_memory_artifacts(&mut self) {
+        self.ui.memory_artifacts.clear();
+        #[cfg(feature = "memory")]
+        {
+            let Some(vault) = self.vault.as_ref() else {
+                return;
+            };
+            let Ok(store) = crate::memory::MemoryStore::open(
+                &vault.root,
+                &crate::memory::MemoryStore::default_cache_path(),
+            ) else {
+                return;
+            };
+            let Ok(documents) = store.active_documents() else {
+                return;
+            };
+            self.ui.memory_artifacts = documents
+                .into_iter()
+                .map(|(path, document)| {
+                    crate::ui::artifact_sidebar::ArtifactEntry::memory_file(
+                        document.logical_path,
+                        document.title,
+                        document.markdown,
+                        path,
+                    )
+                })
+                .collect();
+        }
+    }
+
+    fn refresh_artifact_sidebar_catalogs(&mut self) {
+        self.refresh_vault_artifacts();
+        self.refresh_saved_artifacts();
+        self.refresh_memory_artifacts();
     }
 
     fn sync_message_media(&mut self, tab_id: usize) {
@@ -2817,12 +3278,27 @@ impl TuiApp {
             return;
         }
 
+        if matches!(
+            artifact.origin,
+            crate::ui::artifact_sidebar::ArtifactOrigin::Memory
+        ) {
+            if let crate::ui::artifact_sidebar::ArtifactHandle::Memory(path) = artifact.handle {
+                self.open_memory_export_dialog(path);
+            }
+            return;
+        }
+
         let base_dir = self
             .config
             .try_read()
             .ok()
             .and_then(|cfg| cfg.artifact_save_dir.clone())
-            .map(std::path::PathBuf::from)
+            .map(|path| {
+                crate::app::generated_file::expand_user_path(
+                    std::path::Path::new(&path),
+                    dirs::home_dir().as_deref(),
+                )
+            })
             .or_else(dirs::download_dir)
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -2841,7 +3317,7 @@ impl TuiApp {
         let content = artifact.content.clone().unwrap_or_default();
         vault.write_file(std::path::Path::new(&artifact.name), &content)?;
         self.remove_temporary_artifact(&artifact.handle);
-        self.refresh_vault_artifacts();
+        self.refresh_artifact_sidebar_catalogs();
         Ok(())
     }
 
@@ -2855,7 +3331,7 @@ impl TuiApp {
         };
         if saved_path.starts_with(&vault.root) {
             self.remove_temporary_artifact(handle);
-            self.refresh_vault_artifacts();
+            self.refresh_artifact_sidebar_catalogs();
         }
     }
 
@@ -2872,8 +3348,39 @@ impl TuiApp {
             Some(crate::ui::modals::artifact_viewer::ArtifactViewerState::new(artifact));
     }
 
+    fn edit_artifact(&mut self, handle: crate::ui::artifact_sidebar::ArtifactHandle) {
+        let Some(artifact) = self.find_artifact(&handle) else {
+            return;
+        };
+        let Some(path) = artifact.path.as_deref() else {
+            self.ui
+                .show_toast("Editor requires a saved file.".to_string());
+            return;
+        };
+        match launch_editor(path) {
+            Ok(()) => self
+                .ui
+                .show_toast(format!("Opened {} in editor", artifact.name)),
+            Err(error) => self.ui.show_toast(error),
+        }
+    }
+
     fn delete_artifact(&mut self, handle: crate::ui::artifact_sidebar::ArtifactHandle) {
         match &handle {
+            crate::ui::artifact_sidebar::ArtifactHandle::Saved(path) => {
+                let _ = std::fs::remove_file(path);
+                self.refresh_saved_artifacts();
+            }
+            crate::ui::artifact_sidebar::ArtifactHandle::Memory(path) => {
+                if let Some(artifact) = self.find_artifact(&handle) {
+                    if let Some(physical_path) = artifact.path {
+                        let _ = std::fs::remove_file(physical_path);
+                    } else {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+                self.refresh_memory_artifacts();
+            }
             crate::ui::artifact_sidebar::ArtifactHandle::Vault(path) => {
                 if let Some(vault) = &self.vault {
                     let full_path = vault.root.join(path);
@@ -2911,6 +3418,20 @@ impl TuiApp {
             .get(self.ui.active_tab)
             .and_then(|tab| {
                 tab.temporary_artifacts
+                    .iter()
+                    .find(|artifact| &artifact.handle == handle)
+                    .cloned()
+            })
+            .or_else(|| {
+                self.ui
+                    .saved_artifacts
+                    .iter()
+                    .find(|artifact| &artifact.handle == handle)
+                    .cloned()
+            })
+            .or_else(|| {
+                self.ui
+                    .memory_artifacts
                     .iter()
                     .find(|artifact| &artifact.handle == handle)
                     .cloned()
@@ -3049,36 +3570,13 @@ impl TuiApp {
     }
 
     fn load_conversation(&mut self, conv_id: i64) -> color_eyre::Result<()> {
-        let messages = self.storage.get_messages(conv_id)?;
-        if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
-            tab.messages.clear();
-            tab.thinking_fold_overrides.clear();
-            tab.thinking_hit_areas.clear();
-            tab.temporary_artifacts.clear();
-            tab.scroll_offset = 0;
-            tab.scroll_to_message = None;
-            tab.active_conversation = conv_id;
-            for msg in messages {
-                tab.messages.push(msg);
-            }
-        }
-        self.sync_message_media(self.ui.active_tab);
-        Ok(())
+        self.load_conversation_into_tab(self.ui.active_tab, conv_id)
     }
 
     fn new_conversation(&mut self, tab_id: usize) -> color_eyre::Result<()> {
-        if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
-            let conv_id = self.storage.create_conversation(tab_id as i64)?;
-            tab.active_conversation = conv_id;
-            tab.messages.clear();
-            tab.thinking_fold_overrides.clear();
-            tab.thinking_hit_areas.clear();
-            tab.temporary_artifacts.clear();
-            tab.scroll_offset = 0;
-            tab.scroll_to_message = None;
-            tab.generated_title = None;
-        }
-        Ok(())
+        let conv_id = self.storage.create_conversation(tab_id as i64)?;
+        self.refresh_tab_conversations(tab_id)?;
+        self.load_conversation_into_tab(tab_id, conv_id)
     }
 
     fn fetch_models_for_settings(
@@ -3251,6 +3749,7 @@ impl TuiApp {
 
     fn insert_input_char(&mut self, character: char) {
         if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
+            tab.input_history_index = None;
             let cursor = tab.input_cursor.min(tab.input_content.chars().count());
             let byte = char_to_byte_index(&tab.input_content, cursor);
             tab.input_content.insert(byte, character);
@@ -3261,6 +3760,7 @@ impl TuiApp {
 
     fn backspace_input_char(&mut self) {
         if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
+            tab.input_history_index = None;
             let cursor = tab.input_cursor.min(tab.input_content.chars().count());
             if cursor == 0 {
                 return;
@@ -3275,6 +3775,7 @@ impl TuiApp {
 
     fn delete_input_char(&mut self) {
         if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
+            tab.input_history_index = None;
             let cursor = tab.input_cursor.min(tab.input_content.chars().count());
             if cursor >= tab.input_content.chars().count() {
                 return;
@@ -3403,9 +3904,24 @@ impl TuiApp {
         if !area.contains(position) {
             return;
         }
-        let relative = position.x.saturating_sub(area.x) as usize;
-        let len = tab.input_content.chars().count();
-        tab.input_cursor = (tab.input_scroll + relative).min(len);
+        let layout = crate::ui::chat_tab::input_layout(
+            &tab.input_content,
+            tab.input_cursor,
+            tab.input_scroll,
+            area.width as usize,
+            area.height as usize,
+            true,
+        );
+        let relative_x = position.x.saturating_sub(area.x).saturating_sub(1) as usize;
+        let relative_y = position.y.saturating_sub(area.y) as usize;
+        let line_index =
+            (layout.scroll + relative_y).min(layout.line_ranges.len().saturating_sub(1));
+        let (start, end) = layout
+            .line_ranges
+            .get(line_index)
+            .copied()
+            .unwrap_or((0, 0));
+        tab.input_cursor = (start + relative_x).min(end);
         self.refresh_input_popup();
     }
 
@@ -3414,7 +3930,50 @@ impl TuiApp {
             tab.input_content = content;
             tab.input_cursor = tab.input_content.chars().count();
             tab.input_scroll = 0;
+            tab.input_history_index = None;
+            tab.input_history_draft = None;
         }
+        self.refresh_input_popup();
+    }
+
+    fn browse_input_history(&mut self, forward: bool) {
+        let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) else {
+            return;
+        };
+        let history: Vec<String> = tab
+            .messages
+            .iter()
+            .filter(|message| message.role == "user")
+            .map(|message| message.content.clone())
+            .collect();
+        if history.is_empty() {
+            return;
+        }
+
+        if tab.input_history_index.is_none() {
+            tab.input_history_draft = Some(tab.input_content.clone());
+        }
+
+        let next_index = match (tab.input_history_index, forward) {
+            (None, false) => Some(history.len().saturating_sub(1)),
+            (None, true) => None,
+            (Some(index), false) => Some(index.saturating_sub(1)),
+            (Some(index), true) if index + 1 < history.len() => Some(index + 1),
+            (Some(_), true) => None,
+        };
+
+        match next_index {
+            Some(index) => {
+                tab.input_history_index = Some(index);
+                tab.input_content = history[index].clone();
+            }
+            None => {
+                tab.input_history_index = None;
+                tab.input_content = tab.input_history_draft.clone().unwrap_or_default();
+            }
+        }
+        tab.input_cursor = tab.input_content.chars().count();
+        tab.input_scroll = 0;
         self.refresh_input_popup();
     }
 
@@ -3909,23 +4468,39 @@ fn local_media_sources(content: &str) -> Vec<String> {
                     .trim()
                     .trim_matches('<')
                     .trim_matches('>');
-                if crate::ui::components::image_block::is_local_image_source(source)
-                    && seen.insert(source.to_string())
-                {
+                if is_artifact_image(source) && seen.insert(source.to_string()) {
                     sources.push(source.to_string());
                 }
             }
             continue;
         }
 
-        if crate::ui::components::image_block::is_local_image_source(trimmed)
-            && seen.insert(trimmed.to_string())
-        {
+        if is_artifact_image(trimmed) && seen.insert(trimmed.to_string()) {
             sources.push(trimmed.to_string());
         }
     }
 
     sources
+}
+
+fn is_artifact_image(source: &str) -> bool {
+    if !crate::ui::components::image_block::is_local_image_source(source) {
+        return false;
+    }
+    let trimmed = source
+        .trim()
+        .trim_matches('<')
+        .trim_matches('>')
+        .strip_prefix("file://")
+        .unwrap_or(source.trim());
+    matches!(
+        std::path::Path::new(trimmed)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp")
+    )
 }
 
 fn char_to_byte_index(text: &str, char_idx: usize) -> usize {
@@ -3936,6 +4511,86 @@ fn char_to_byte_index(text: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(idx, _)| idx)
         .unwrap_or(text.len())
+}
+
+fn launch_editor(path: &std::path::Path) -> Result<(), String> {
+    let editor = std::env::var("EDITOR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Set $EDITOR to enable Edit.".to_string())?;
+    let path_str = shell_escape(path);
+    let command_line = format!("{editor} {path_str}");
+
+    if std::env::var_os("TMUX").is_some() {
+        std::process::Command::new("tmux")
+            .args(["split-window", "-h", &command_line])
+            .spawn()
+            .map_err(|error| format!("Failed to open editor in tmux: {error}"))?;
+        return Ok(());
+    }
+
+    let terminal =
+        preferred_terminal().ok_or_else(|| "No terminal launcher found for Edit.".to_string())?;
+    spawn_terminal_command(&terminal, &command_line)
+        .map_err(|error| format!("Failed to open editor: {error}"))?;
+    Ok(())
+}
+
+fn preferred_terminal() -> Option<String> {
+    if let Some(terminal) = std::env::var_os("TERMINAL")
+        .and_then(|value| value.into_string().ok())
+        .filter(|value| command_exists(value))
+    {
+        return Some(terminal);
+    }
+    [
+        "x-terminal-emulator",
+        "gnome-terminal",
+        "ghostty",
+        "kitty",
+        "wezterm",
+        "alacritty",
+        "foot",
+        "konsole",
+        "xfce4-terminal",
+    ]
+    .into_iter()
+    .find(|command| command_exists(command))
+    .map(ToString::to_string)
+}
+
+fn spawn_terminal_command(terminal: &str, command_line: &str) -> std::io::Result<()> {
+    let mut command = std::process::Command::new(terminal);
+    match terminal {
+        "gnome-terminal" => {
+            command.args(["--", "sh", "-lc", command_line]);
+        }
+        "wezterm" => {
+            command.args(["start", "--", "sh", "-lc", command_line]);
+        }
+        "xfce4-terminal" => {
+            command.args(["-x", "sh", "-lc", command_line]);
+        }
+        "kitty" => {
+            command.args(["sh", "-lc", command_line]);
+        }
+        _ => {
+            command.args(["-e", "sh", "-lc", command_line]);
+        }
+    }
+    command.spawn().map(|_| ())
+}
+
+fn command_exists(command: &str) -> bool {
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .any(|directory| directory.join(command).is_file())
+}
+
+fn shell_escape(path: &std::path::Path) -> String {
+    let value = path.display().to_string();
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[cfg(test)]
@@ -4065,7 +4720,91 @@ mod tests {
                     "@save ".to_string()
                 ))
             );
+            assert!(popup
+                .items
+                .iter()
+                .any(|item| item.label.starts_with("@research ")));
         });
+    }
+
+    #[test]
+    fn save_dialog_mouse_action_writes_the_artifact() {
+        with_test_app("artifact-save-click", |app| {
+            // Given
+            let output = unique_temp_dir("artifact-output").join("demo.md");
+            let artifact = crate::ui::artifact_sidebar::ArtifactEntry::temp_markdown(
+                1,
+                "demo.md".to_string(),
+                "# Demo\n\nComplete.".to_string(),
+            );
+            let mut dialog = crate::ui::modals::save_file::SaveFileDialog::new(
+                &artifact,
+                output.parent().expect("output parent").to_path_buf(),
+                "Save",
+            );
+            dialog.path_input = output.display().to_string();
+            let area = Rect::new(0, 0, 100, 30);
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30))
+                .expect("test terminal");
+            terminal
+                .draw(|frame| dialog.render(frame, area))
+                .expect("render save dialog");
+            let save = dialog.hit_areas.save.expect("save hit area");
+            app.ui.last_area = Some(area);
+            app.ui.save_file_dialog = Some(dialog);
+
+            // When
+            let action = app.handle_mouse_click(save.x, save.y);
+            assert!(matches!(action, Some(Action::SaveGeneratedFile)));
+            app.save_generated_file().expect("save generated file");
+
+            // Then
+            assert_eq!(
+                std::fs::read_to_string(&output).expect("read saved artifact"),
+                "# Demo\n\nComplete."
+            );
+            std::fs::remove_dir_all(output.parent().expect("output parent"))
+                .expect("cleanup artifact output");
+        });
+    }
+
+    #[test]
+    fn inline_at_completion_discovers_research_skill() {
+        with_test_app("research-skill-popup", |app| {
+            // Given
+            app.ui.tabs[0].input_content = "Use @res".to_string();
+            app.ui.tabs[0].input_cursor = app.ui.tabs[0].input_content.chars().count();
+
+            // When
+            app.refresh_input_popup();
+
+            // Then
+            let popup = app.ui.list_popup.as_ref().expect("skill completion popup");
+            assert!(popup
+                .items
+                .iter()
+                .any(|item| item.label.contains("@research")));
+        });
+    }
+
+    #[test]
+    fn media_capture_ignores_existing_non_image_paths() {
+        // Given
+        let root =
+            std::env::temp_dir().join(format!("tcui-media-capture-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&root).expect("create media fixture");
+        let binary = root.join("save");
+        let image = root.join("preview.png");
+        std::fs::write(&binary, []).expect("write binary fixture");
+        std::fs::write(&image, []).expect("write image fixture");
+        let content = format!("{}\n![preview]({})", binary.display(), image.display());
+
+        // When
+        let sources = local_media_sources(&content);
+
+        // Then
+        std::fs::remove_dir_all(root).expect("cleanup media fixture");
+        assert_eq!(sources, [image.display().to_string()]);
     }
 
     #[test]
@@ -4335,5 +5074,325 @@ selected_model = "llama3.1"
         let result = TuiApp::check_cloud_connection("Codex", &config, Some("token")).await;
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn startup_loads_persisted_conversation_history() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        let root = unique_temp_dir("startup-history");
+        let data_home = root.join("data-home");
+        let config_home = root.join("config-home");
+        std::fs::create_dir_all(&data_home).expect("create data dir");
+        std::fs::create_dir_all(&config_home).expect("create config dir");
+        std::env::set_var("XDG_DATA_HOME", &data_home);
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+
+        let storage = Arc::new(Storage::new().expect("create storage"));
+        let conversation_id = storage.create_conversation(0).expect("create conversation");
+        storage
+            .update_conversation_title(conversation_id, "Persisted title")
+            .expect("update title");
+        let message = Message::new(
+            conversation_id,
+            "user".to_string(),
+            "Persisted question".to_string(),
+        );
+        storage.save_message(&message).expect("save message");
+
+        let app = TuiApp::new(
+            storage,
+            Arc::new(tokio::sync::RwLock::new(AppConfig::default())),
+            Arc::new(LlmClient::new()),
+            None,
+        );
+
+        assert_eq!(app.ui.tabs[0].active_conversation, conversation_id);
+        assert_eq!(app.ui.tabs[0].conversations.len(), 1);
+        assert_eq!(app.ui.tabs[0].conversations[0].title, "Persisted title");
+        assert_eq!(
+            app.ui.tabs[0].generated_title.as_deref(),
+            Some("Persisted title")
+        );
+        assert_eq!(app.ui.tabs[0].messages.len(), 1);
+        assert_eq!(app.ui.tabs[0].messages[0].content, "Persisted question");
+
+        std::fs::remove_dir_all(&root).expect("cleanup temp dir");
+        std::env::remove_var("XDG_DATA_HOME");
+        std::env::remove_var("XDG_CONFIG_HOME");
+    }
+
+    #[test]
+    fn closing_active_chat_deletes_it_and_loads_the_next_persisted_conversation() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        let root = unique_temp_dir("close-chat");
+        let data_home = root.join("data-home");
+        let config_home = root.join("config-home");
+        std::fs::create_dir_all(&data_home).expect("create data dir");
+        std::fs::create_dir_all(&config_home).expect("create config dir");
+        std::env::set_var("XDG_DATA_HOME", &data_home);
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+
+        let storage = Arc::new(Storage::new().expect("create storage"));
+        let first = storage.create_conversation(0).expect("first conversation");
+        storage
+            .update_conversation_title(first, "First chat")
+            .expect("first title");
+        storage
+            .save_message(&Message::new(
+                first,
+                "user".to_string(),
+                "First message".to_string(),
+            ))
+            .expect("save first message");
+
+        let second = storage.create_conversation(0).expect("second conversation");
+        storage
+            .update_conversation_title(second, "Second chat")
+            .expect("second title");
+        storage
+            .save_message(&Message::new(
+                second,
+                "user".to_string(),
+                "Second message".to_string(),
+            ))
+            .expect("save second message");
+
+        let mut app = TuiApp::new(
+            Arc::clone(&storage),
+            Arc::new(tokio::sync::RwLock::new(AppConfig::default())),
+            Arc::new(LlmClient::new()),
+            None,
+        );
+        assert_eq!(app.ui.tabs[0].active_conversation, second);
+
+        tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(app.dispatch(Action::CloseChat))
+            .expect("close chat");
+
+        assert_eq!(app.ui.tabs[0].active_conversation, first);
+        assert_eq!(app.ui.tabs[0].messages.len(), 1);
+        assert_eq!(app.ui.tabs[0].messages[0].content, "First message");
+        assert_eq!(
+            storage
+                .get_conversations(0)
+                .expect("stored conversations")
+                .len(),
+            1
+        );
+
+        std::fs::remove_dir_all(&root).expect("cleanup temp dir");
+        std::env::remove_var("XDG_DATA_HOME");
+        std::env::remove_var("XDG_CONFIG_HOME");
+    }
+
+    #[test]
+    fn toggle_conversation_pinned_reorders_sidebar_catalog() {
+        with_test_app("pin-conversation", |app| {
+            let first = app
+                .storage
+                .create_conversation(0)
+                .expect("first conversation");
+            app.storage
+                .update_conversation_title(first, "First chat")
+                .expect("first title");
+            let second = app
+                .storage
+                .create_conversation(0)
+                .expect("second conversation");
+            app.storage
+                .update_conversation_title(second, "Second chat")
+                .expect("second title");
+
+            app.refresh_tab_conversations(0)
+                .expect("refresh conversations");
+            assert_eq!(app.ui.tabs[0].conversations[0].id, second);
+
+            app.toggle_conversation_pinned(first)
+                .expect("toggle pinned");
+
+            assert_eq!(app.ui.tabs[0].conversations[0].id, first);
+            assert!(app.ui.tabs[0].conversations[0].pinned);
+        });
+    }
+
+    #[test]
+    fn deleting_inactive_conversation_keeps_active_chat_loaded() {
+        with_test_app("delete-conversation", |app| {
+            let first = app
+                .storage
+                .create_conversation(0)
+                .expect("first conversation");
+            app.storage
+                .update_conversation_title(first, "First chat")
+                .expect("first title");
+            app.storage
+                .save_message(&Message::new(
+                    first,
+                    "user".to_string(),
+                    "First message".to_string(),
+                ))
+                .expect("save first message");
+
+            let second = app
+                .storage
+                .create_conversation(0)
+                .expect("second conversation");
+            app.storage
+                .update_conversation_title(second, "Second chat")
+                .expect("second title");
+            app.load_conversation_into_tab(0, second)
+                .expect("load second conversation");
+            app.refresh_tab_conversations(0)
+                .expect("refresh conversations");
+
+            app.delete_conversation_by_id(first)
+                .expect("delete first conversation");
+
+            assert_eq!(app.ui.tabs[0].active_conversation, second);
+            assert!(app.ui.tabs[0]
+                .conversations
+                .iter()
+                .all(|conversation| conversation.id != first));
+            assert!(app.ui.tabs[0]
+                .conversations
+                .iter()
+                .any(|conversation| conversation.id == second));
+        });
+    }
+
+    #[test]
+    fn export_dialog_exports_current_conversation_as_json() {
+        with_test_app("export-dialog", |app| {
+            let conversation_id = app.storage.create_conversation(0).expect("conversation");
+            app.storage
+                .update_conversation_title(conversation_id, "Export me")
+                .expect("title");
+            app.storage
+                .save_message(&Message::new(
+                    conversation_id,
+                    "user".to_string(),
+                    "Exported content".to_string(),
+                ))
+                .expect("message");
+            app.load_conversation_into_tab(0, conversation_id)
+                .expect("load conversation");
+
+            let output_dir = unique_temp_dir("export-output");
+            std::fs::create_dir_all(&output_dir).expect("output dir");
+            app.open_conversation_export_dialog();
+            let mut dialog = app.ui.export_dialog.clone().expect("export dialog");
+            dialog.directory_input = output_dir.display().to_string();
+
+            let area = Rect::new(0, 0, 100, 30);
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30))
+                .expect("test terminal");
+            terminal
+                .draw(|frame| dialog.render(frame, area))
+                .expect("render export dialog");
+            let json = dialog.hit_areas.json.expect("json hit area");
+            let export = dialog.hit_areas.export.expect("export hit area");
+            app.ui.last_area = Some(area);
+            app.ui.export_dialog = Some(dialog);
+
+            assert!(app.handle_mouse_click(json.x, json.y).is_none());
+            let action = app.handle_mouse_click(export.x, export.y);
+            assert!(matches!(action, Some(Action::SaveExportDialog)));
+            app.save_export_dialog().expect("export conversation");
+
+            let exported = std::fs::read_dir(&output_dir)
+                .expect("read output dir")
+                .map(|entry| entry.expect("dir entry").path())
+                .find(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+                .expect("exported json");
+            let content = std::fs::read_to_string(&exported).expect("read exported file");
+            assert!(content.contains("\"title\": \"Export me\""));
+            assert!(content.contains("Exported content"));
+            std::fs::remove_dir_all(&output_dir).expect("cleanup output dir");
+        });
+    }
+
+    #[test]
+    fn export_dialog_can_open_for_non_active_conversation() {
+        with_test_app("export-other-conversation", |app| {
+            let first = app
+                .storage
+                .create_conversation(0)
+                .expect("first conversation");
+            app.storage
+                .update_conversation_title(first, "First chat")
+                .expect("first title");
+            let second = app
+                .storage
+                .create_conversation(0)
+                .expect("second conversation");
+            app.storage
+                .update_conversation_title(second, "Second chat")
+                .expect("second title");
+            app.refresh_tab_conversations(0)
+                .expect("refresh conversations");
+
+            app.open_conversation_export_dialog_for(first);
+
+            let dialog = app.ui.export_dialog.clone().expect("export dialog");
+            assert!(matches!(
+                dialog.target,
+                crate::ui::modals::export_dialog::ExportTarget::Conversation(id) if id == first
+            ));
+            assert_eq!(dialog.item_name, "First chat");
+        });
+    }
+
+    #[test]
+    fn arrow_up_and_down_browse_previous_user_prompts() {
+        with_test_app("prompt-history", |app| {
+            app.ui.tabs[0]
+                .messages
+                .push(crate::app::message::Message::new(
+                    1,
+                    "user".to_string(),
+                    "first prompt".to_string(),
+                ));
+            app.ui.tabs[0]
+                .messages
+                .push(crate::app::message::Message::new(
+                    1,
+                    "assistant".to_string(),
+                    "answer".to_string(),
+                ));
+            app.ui.tabs[0]
+                .messages
+                .push(crate::app::message::Message::new(
+                    1,
+                    "user".to_string(),
+                    "second prompt".to_string(),
+                ));
+            app.ui.tabs[0].input_content = "draft".to_string();
+            app.ui.tabs[0].input_cursor = 5;
+
+            app.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Up,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            assert_eq!(app.ui.tabs[0].input_content, "second prompt");
+
+            app.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Up,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            assert_eq!(app.ui.tabs[0].input_content, "first prompt");
+
+            app.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Down,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            assert_eq!(app.ui.tabs[0].input_content, "second prompt");
+
+            app.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Down,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            assert_eq!(app.ui.tabs[0].input_content, "draft");
+        });
     }
 }
