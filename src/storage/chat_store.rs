@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use color_eyre::{eyre::eyre, Result};
 use rusqlite::Connection;
@@ -406,8 +407,27 @@ fn cleanup_paths(paths: &[PathBuf]) {
 }
 
 fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock before epoch")
-        .as_millis() as i64
+    static LAST_TIMESTAMP_MS: AtomicI64 = AtomicI64::new(0);
+
+    let observed = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before epoch")
+            .as_millis(),
+    )
+    .unwrap_or(i64::MAX);
+    let mut previous = LAST_TIMESTAMP_MS.load(Ordering::Relaxed);
+
+    loop {
+        let timestamp = observed.max(previous.saturating_add(1));
+        match LAST_TIMESTAMP_MS.compare_exchange(
+            previous,
+            timestamp,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => return timestamp,
+            Err(current) => previous = current,
+        }
+    }
 }
