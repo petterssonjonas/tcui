@@ -1,62 +1,35 @@
 #![allow(dead_code)]
 use crate::app::message::Message;
-use aes_gcm::{
-    aead::{Aead, KeyInit},
-    Aes256Gcm,
-};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 use color_eyre::Result;
 use rusqlite::{params, Connection};
-use std::path::PathBuf;
+
+use crate::storage::chat_store::{ChatDocument, ChatStore};
+use crate::storage::crypto::{
+    decrypt_shared_text_with_key, encrypt_shared_text_with_key, SharedKey,
+};
+use crate::storage::paths::TcuiDataPaths;
 
 pub struct Storage {
     conn: Connection,
-    chat_key: [u8; 32],
+    chat_store: ChatStore,
+    created_default_key: bool,
 }
 
 impl Storage {
     pub(crate) fn encrypt_shared_text(plaintext: &str) -> Result<String> {
-        if plaintext.is_empty() {
-            return Ok(String::new());
-        }
-
-        let nonce_bytes = rand::random::<[u8; 12]>();
-        let ciphertext = Self::shared_cipher()?
-            .encrypt((&nonce_bytes).into(), plaintext.as_bytes())
-            .map_err(|_| color_eyre::eyre::eyre!("failed to encrypt local secret"))?;
-        Ok(format!(
-            "enc:v1:{}:{}",
-            STANDARD.encode(nonce_bytes),
-            STANDARD.encode(ciphertext)
-        ))
+        let shared_key = SharedKey::load_or_create_default(&TcuiDataPaths::discover())?;
+        Ok(encrypt_shared_text_with_key(&shared_key.key, plaintext)?)
     }
 
     pub(crate) fn decrypt_shared_text(stored: &str) -> Result<String> {
-        let Some(encoded) = stored.strip_prefix("enc:v1:") else {
-            return Ok(stored.to_string());
-        };
-
-        let mut parts = encoded.splitn(2, ':');
-        let nonce = parts
-            .next()
-            .ok_or_else(|| color_eyre::eyre::eyre!("missing local secret nonce"))?;
-        let ciphertext = parts
-            .next()
-            .ok_or_else(|| color_eyre::eyre::eyre!("missing local secret ciphertext"))?;
-        let nonce_bytes = STANDARD.decode(nonce)?;
-        let ciphertext_bytes = STANDARD.decode(ciphertext)?;
-        let plaintext = Self::shared_cipher()?
-            .decrypt(nonce_bytes.as_slice().into(), ciphertext_bytes.as_ref())
-            .map_err(|_| color_eyre::eyre::eyre!("failed to decrypt local secret"))?;
-        Ok(String::from_utf8(plaintext)?)
+        let shared_key = SharedKey::load_or_create_default(&TcuiDataPaths::discover())?;
+        Ok(decrypt_shared_text_with_key(&shared_key.key, stored)?)
     }
 
     pub fn new() -> Result<Self> {
-        let db_path = Self::db_path()?;
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let conn = Connection::open(&db_path)?;
+        let paths = TcuiDataPaths::discover();
+        paths.ensure_layout()?;
+        let conn = Connection::open(&paths.database)?;
         let sql = include_str!("../../migrations/init.sql");
         conn.execute_batch(sql)?;
         let _ = conn.execute(
@@ -68,15 +41,54 @@ impl Storage {
             [],
         );
         let _ = conn.execute("ALTER TABLE models ADD COLUMN context_window INTEGER", []);
+        let shared_key = SharedKey::load_or_create_default(&paths)?;
+        Self::from_parts(conn, paths, shared_key.key, shared_key.created_default_key)
+    }
+
+    pub fn new_with_key(shared_key: SharedKey) -> Result<Self> {
+        let paths = TcuiDataPaths::discover();
+        paths.ensure_layout()?;
+        let conn = Connection::open(&paths.database)?;
+        let sql = include_str!("../../migrations/init.sql");
+        conn.execute_batch(sql)?;
+        let _ = conn.execute(
+            "ALTER TABLE providers ADD COLUMN backend_type TEXT NOT NULL DEFAULT 'openai'",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE providers ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'api_key'",
+            [],
+        );
+        let _ = conn.execute("ALTER TABLE models ADD COLUMN context_window INTEGER", []);
+        Self::from_parts(conn, paths, shared_key, false)
+    }
+
+    fn from_parts(
+        mut conn: Connection,
+        paths: TcuiDataPaths,
+        shared_key: SharedKey,
+        created_default_key: bool,
+    ) -> Result<Self> {
+        let chat_store = ChatStore::new(paths.clone(), shared_key.clone());
+        chat_store.archive_legacy_chats(&mut conn)?;
         let storage = Self {
             conn,
-            chat_key: Self::load_or_create_chat_key()?,
+            chat_store,
+            created_default_key,
         };
         storage.seed_providers()?;
         if let Ok(config) = crate::config::AppConfig::load() {
             let _ = storage.sync_providers(&config.providers);
         }
         Ok(storage)
+    }
+
+    pub fn created_default_key(&self) -> bool {
+        self.created_default_key
+    }
+
+    pub fn chat_key_path() -> std::path::PathBuf {
+        TcuiDataPaths::discover().chat_key
     }
 
     fn seed_providers(&self) -> Result<()> {
@@ -91,229 +103,51 @@ impl Storage {
         Ok(())
     }
 
-    fn db_path() -> Result<PathBuf> {
-        let dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-        Ok(dir.join("tcui").join("tcui.db"))
-    }
-
-    fn chat_key_path() -> Result<PathBuf> {
-        let dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-        Ok(dir.join("tcui").join("chat.key"))
-    }
-
-    fn shared_cipher() -> Result<Aes256Gcm> {
-        let key = Self::load_or_create_chat_key()?;
-        Aes256Gcm::new_from_slice(&key)
-            .map_err(|_| color_eyre::eyre::eyre!("invalid chat encryption key"))
-    }
-
-    fn load_or_create_chat_key() -> Result<[u8; 32]> {
-        let key_path = Self::chat_key_path()?;
-        if let Some(parent) = key_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        if key_path.exists() {
-            let encoded = std::fs::read_to_string(&key_path)?;
-            let decoded = STANDARD.decode(encoded.trim())?;
-            let key: [u8; 32] = decoded
-                .try_into()
-                .map_err(|_| color_eyre::eyre::eyre!("invalid chat encryption key length"))?;
-            return Ok(key);
-        }
-
-        let key = rand::random::<[u8; 32]>();
-        std::fs::write(&key_path, STANDARD.encode(key))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&key_path)?.permissions();
-            perms.set_mode(0o600);
-            std::fs::set_permissions(&key_path, perms)?;
-        }
-        Ok(key)
-    }
-
-    fn cipher(&self) -> Result<Aes256Gcm> {
-        Aes256Gcm::new_from_slice(&self.chat_key)
-            .map_err(|_| color_eyre::eyre::eyre!("invalid chat encryption key"))
-    }
-
-    fn encrypt_text(&self, plaintext: &str) -> Result<String> {
-        if plaintext.is_empty() {
-            return Ok(String::new());
-        }
-
-        let nonce_bytes = rand::random::<[u8; 12]>();
-        let ciphertext = self
-            .cipher()?
-            .encrypt((&nonce_bytes).into(), plaintext.as_bytes())
-            .map_err(|_| color_eyre::eyre::eyre!("failed to encrypt chat message"))?;
-        Ok(format!(
-            "enc:v1:{}:{}",
-            STANDARD.encode(nonce_bytes),
-            STANDARD.encode(ciphertext)
-        ))
-    }
-
-    fn decrypt_text(&self, stored: &str) -> Result<String> {
-        let Some(encoded) = stored.strip_prefix("enc:v1:") else {
-            return Ok(stored.to_string());
-        };
-
-        let mut parts = encoded.splitn(2, ':');
-        let nonce = parts
-            .next()
-            .ok_or_else(|| color_eyre::eyre::eyre!("missing message nonce"))?;
-        let ciphertext = parts
-            .next()
-            .ok_or_else(|| color_eyre::eyre::eyre!("missing message ciphertext"))?;
-        let nonce_bytes = STANDARD.decode(nonce)?;
-        let ciphertext_bytes = STANDARD.decode(ciphertext)?;
-        let plaintext = self
-            .cipher()?
-            .decrypt(nonce_bytes.as_slice().into(), ciphertext_bytes.as_ref())
-            .map_err(|_| color_eyre::eyre::eyre!("failed to decrypt chat message"))?;
-        Ok(String::from_utf8(plaintext)?)
-    }
-
-    fn encrypt_optional(&self, value: &Option<String>) -> Result<Option<String>> {
-        value
-            .as_deref()
-            .map(|text| self.encrypt_text(text))
-            .transpose()
-    }
-
-    fn decrypt_optional(&self, value: Option<String>) -> Result<Option<String>> {
-        value.map(|text| self.decrypt_text(&text)).transpose()
-    }
-
     pub fn save_message(&self, msg: &Message) -> Result<i64> {
-        let content = self.encrypt_text(&msg.content)?;
-        let thinking_content = self.encrypt_optional(&msg.thinking_content)?;
-        let tool_calls = self.encrypt_optional(&msg.tool_calls)?;
-        let tool_result = self.encrypt_optional(&msg.tool_result)?;
-        let tool_source = self.encrypt_optional(&msg.tool_source)?;
-        let images = self.encrypt_optional(&msg.images)?;
-        let diff_data = self.encrypt_optional(&msg.diff_data)?;
-
-        self.conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, thinking_content, tool_calls, tool_result, tool_source, images, diff_data, token_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                msg.conversation_id,
-                msg.role,
-                content,
-                thinking_content,
-                tool_calls,
-                tool_result,
-                tool_source,
-                images,
-                diff_data,
-                msg.token_count,
-            ],
-        )?;
-        Ok(self.conn.last_insert_rowid())
+        self.chat_store.save_message(msg)
     }
 
     pub fn get_messages(&self, conversation_id: i64) -> Result<Vec<Message>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, conversation_id, role, content, thinking_content, tool_calls, tool_result, tool_source, images, diff_data, token_count
-             FROM messages WHERE conversation_id = ?1"
-        )?;
+        self.chat_store.get_messages(conversation_id)
+    }
 
-        let rows = stmt.query_map([conversation_id], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                row.get::<_, Option<String>>(9)?,
-                row.get::<_, Option<i64>>(10)?,
-            ))
-        })?;
-
-        let mut messages = Vec::new();
-        for row in rows {
-            let (
-                id,
-                conversation_id,
-                role,
-                content,
-                thinking_content,
-                tool_calls,
-                tool_result,
-                tool_source,
-                images,
-                diff_data,
-                token_count,
-            ) = row?;
-            messages.push(Message {
-                id: Some(id),
-                conversation_id,
-                role,
-                content: self.decrypt_text(&content)?,
-                thinking_content: self.decrypt_optional(thinking_content)?,
-                tool_calls: self.decrypt_optional(tool_calls)?,
-                tool_result: self.decrypt_optional(tool_result)?,
-                tool_source: self.decrypt_optional(tool_source)?,
-                images: self.decrypt_optional(images)?,
-                diff_data: self.decrypt_optional(diff_data)?,
-                token_count,
-            });
-        }
-
-        Ok(messages)
+    pub fn replace_messages(&self, conversation_id: i64, messages: &[Message]) -> Result<()> {
+        self.chat_store.replace_messages(conversation_id, messages)
     }
 
     pub fn create_conversation(&self, tab_id: i64) -> Result<i64> {
-        self.conn.execute(
-            "INSERT INTO conversations (tab_id) VALUES (?1)",
-            params![tab_id],
-        )?;
-        Ok(self.conn.last_insert_rowid())
+        self.chat_store.create_conversation(tab_id)
     }
 
     pub fn get_conversations(&self, tab_id: i64) -> Result<Vec<ConversationEntry>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, title FROM conversations WHERE tab_id = ?1")?;
+        self.chat_store.get_conversations(tab_id)
+    }
 
-        let entries = stmt
-            .query_map([tab_id], |row| {
-                Ok(ConversationEntry {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    created_at: String::new(),
-                })
-            })?
-            .filter_map(|r| r.ok())
-            .collect();
+    pub fn get_conversations_with_warnings(
+        &self,
+        tab_id: i64,
+    ) -> Result<(Vec<ConversationEntry>, usize)> {
+        self.chat_store.get_conversations_with_warnings(tab_id)
+    }
 
-        Ok(entries)
+    pub fn list_all_chat_documents(&self) -> Result<Vec<ChatDocument>> {
+        self.chat_store.list_all_documents()
+    }
+
+    pub fn decrypt_chat_file(&self, path: &std::path::Path) -> Result<ChatDocument> {
+        self.chat_store.decrypt_document_file(path)
     }
 
     pub fn update_conversation_title(&self, conv_id: i64, title: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE conversations SET title = ?1 WHERE id = ?2",
-            params![title, conv_id],
-        )?;
-        Ok(())
+        self.chat_store.update_conversation_title(conv_id, title)
+    }
+
+    pub fn set_conversation_pinned(&self, conv_id: i64, pinned: bool) -> Result<()> {
+        self.chat_store.set_conversation_pinned(conv_id, pinned)
     }
 
     pub fn delete_conversation(&self, conv_id: i64) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM messages WHERE conversation_id = ?1",
-            params![conv_id],
-        )?;
-        self.conn
-            .execute("DELETE FROM conversations WHERE id = ?1", params![conv_id])?;
-        Ok(())
+        self.chat_store.delete_conversation(conv_id)
     }
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
@@ -543,11 +377,16 @@ pub struct ConversationEntry {
     pub id: i64,
     pub title: String,
     pub created_at: String,
+    pub updated_at_ms: i64,
+    pub pinned: bool,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::chat_store::ChatDocument;
+    use crate::storage::crypto::{read_encrypted_document, SharedKey};
+    use std::path::PathBuf;
     use std::sync::Mutex;
 
     fn env_lock() -> &'static Mutex<()> {
@@ -578,30 +417,191 @@ mod tests {
             "hello world".to_string(),
         );
         message.thinking_content = Some("private chain".to_string());
-        storage.save_message(&message).expect("save message");
+        let message_id = storage.save_message(&message).expect("save message");
 
-        let raw_content: String = storage
-            .conn
-            .query_row("SELECT content FROM messages LIMIT 1", [], |row| row.get(0))
-            .expect("read raw content");
+        let raw_content = std::fs::read_to_string(chat_path(&data_home, conversation_id))
+            .expect("read chat file");
         assert!(
             raw_content.starts_with("enc:v1:"),
-            "expected encrypted message content"
+            "expected encrypted chat document"
         );
         assert!(
             !raw_content.contains("hello world"),
             "plaintext leaked into storage"
+        );
+        assert!(
+            !raw_content.contains("private chain"),
+            "thinking content leaked into storage"
         );
 
         let messages = storage
             .get_messages(conversation_id)
             .expect("load decrypted messages");
         assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, Some(message_id));
         assert_eq!(messages[0].content, "hello world");
         assert_eq!(
             messages[0].thinking_content.as_deref(),
             Some("private chain")
         );
+
+        std::fs::remove_dir_all(&root).expect("cleanup temp dir");
+        std::env::remove_var("XDG_DATA_HOME");
+    }
+
+    #[test]
+    fn chat_delete_moves_encrypted_document_to_trash() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        let root = unique_temp_dir("storage-delete-chat");
+        let data_home = root.join("data-home");
+        std::fs::create_dir_all(&data_home).expect("create data dir");
+        std::env::set_var("XDG_DATA_HOME", &data_home);
+
+        let storage = Storage::new().expect("create storage");
+        let conversation_id = storage.create_conversation(0).expect("create conversation");
+        storage
+            .save_message(&Message::new(
+                conversation_id,
+                "user".to_string(),
+                "hello world".to_string(),
+            ))
+            .expect("save message");
+        storage
+            .delete_conversation(conversation_id)
+            .expect("delete conversation");
+
+        assert!(!chat_path(&data_home, conversation_id).exists());
+        assert!(trash_chat_path(&data_home, conversation_id).exists());
+        assert!(storage
+            .get_conversations(0)
+            .expect("list conversations")
+            .is_empty());
+
+        std::fs::remove_dir_all(&root).expect("cleanup temp dir");
+        std::env::remove_var("XDG_DATA_HOME");
+    }
+
+    #[test]
+    fn pinned_chats_sort_ahead_of_recent_unpinned_chats() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        let root = unique_temp_dir("storage-pinned-sort");
+        let data_home = root.join("data-home");
+        std::fs::create_dir_all(&data_home).expect("create data dir");
+        std::env::set_var("XDG_DATA_HOME", &data_home);
+
+        let storage = Storage::new().expect("create storage");
+        let first = storage
+            .create_conversation(0)
+            .expect("create first conversation");
+        storage
+            .update_conversation_title(first, "Pinned first")
+            .expect("update first title");
+        let second = storage
+            .create_conversation(0)
+            .expect("create second conversation");
+        storage
+            .update_conversation_title(second, "Newest second")
+            .expect("update second title");
+        storage
+            .set_conversation_pinned(first, true)
+            .expect("pin first conversation");
+
+        let conversations = storage.get_conversations(0).expect("list conversations");
+        assert_eq!(conversations.len(), 2);
+        assert_eq!(conversations[0].id, first);
+        assert!(conversations[0].pinned);
+        assert_eq!(conversations[1].id, second);
+        assert!(!conversations[1].pinned);
+
+        std::fs::remove_dir_all(&root).expect("cleanup temp dir");
+        std::env::remove_var("XDG_DATA_HOME");
+    }
+
+    #[test]
+    fn legacy_sqlite_chats_are_archived_to_encrypted_trash() {
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        let root = unique_temp_dir("storage-legacy-archive");
+        let data_home = root.join("data-home");
+        std::fs::create_dir_all(&data_home).expect("create data dir");
+        std::env::set_var("XDG_DATA_HOME", &data_home);
+
+        let encrypted_content =
+            Storage::encrypt_shared_text("hello from sqlite").expect("encrypt legacy content");
+        let encrypted_thinking =
+            Storage::encrypt_shared_text("sqlite thinking").expect("encrypt thinking");
+        let database_path = data_home.join("tcui").join("tcui.db");
+        if let Some(parent) = database_path.parent() {
+            std::fs::create_dir_all(parent).expect("create db parent");
+        }
+        let connection = Connection::open(&database_path).expect("open sqlite db");
+        connection
+            .execute_batch(
+                "CREATE TABLE conversations (
+                    id INTEGER PRIMARY KEY,
+                    tab_id INTEGER NOT NULL,
+                    title TEXT
+                );
+                CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY,
+                    conversation_id INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    thinking_content TEXT,
+                    tool_calls TEXT,
+                    tool_result TEXT,
+                    tool_source TEXT,
+                    images TEXT,
+                    diff_data TEXT,
+                    token_count INTEGER
+                );",
+            )
+            .expect("create legacy tables");
+        connection
+            .execute(
+                "INSERT INTO conversations (id, tab_id, title) VALUES (?1, ?2, ?3)",
+                params![42_i64, 7_i64, "Legacy chat"],
+            )
+            .expect("insert legacy conversation");
+        connection
+            .execute(
+                "INSERT INTO messages (id, conversation_id, role, content, thinking_content, tool_calls, tool_result, tool_source, images, diff_data, token_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, NULL, NULL, NULL)",
+                params![9_i64, 42_i64, "user", encrypted_content, encrypted_thinking],
+            )
+            .expect("insert legacy message");
+        drop(connection);
+
+        let storage = Storage::new().expect("create storage");
+        assert!(storage
+            .get_conversations(7)
+            .expect("list active conversations")
+            .is_empty());
+
+        let archived_path = trash_chat_path(&data_home, 42);
+        assert!(archived_path.exists(), "legacy chat should be archived");
+        let key = SharedKey::load_or_create_default(&TcuiDataPaths::discover())
+            .expect("load shared key")
+            .key;
+        let archived: ChatDocument =
+            read_encrypted_document(&archived_path, &key, "chat").expect("read archived chat");
+        assert_eq!(archived.id, 42);
+        assert_eq!(archived.title, "Legacy chat");
+        assert_eq!(archived.messages.len(), 1);
+        assert_eq!(archived.messages[0].content, "hello from sqlite");
+        assert_eq!(
+            archived.messages[0].thinking_content.as_deref(),
+            Some("sqlite thinking")
+        );
+
+        let reopened = Connection::open(&database_path).expect("reopen sqlite db");
+        let conversation_count: i64 = reopened
+            .query_row("SELECT COUNT(*) FROM conversations", [], |row| row.get(0))
+            .expect("count conversations");
+        let message_count: i64 = reopened
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .expect("count messages");
+        assert_eq!(conversation_count, 0);
+        assert_eq!(message_count, 0);
 
         std::fs::remove_dir_all(&root).expect("cleanup temp dir");
         std::env::remove_var("XDG_DATA_HOME");
@@ -645,5 +645,20 @@ mod tests {
         );
         std::fs::remove_dir_all(root).expect("cleanup temp dir");
         std::env::remove_var("XDG_DATA_HOME");
+    }
+
+    fn chat_path(data_home: &PathBuf, conversation_id: i64) -> PathBuf {
+        data_home
+            .join("tcui")
+            .join("chats")
+            .join(format!("{:016x}.tcui-chat", conversation_id as u64))
+    }
+
+    fn trash_chat_path(data_home: &PathBuf, conversation_id: i64) -> PathBuf {
+        data_home
+            .join("tcui")
+            .join("chats")
+            .join(".trash")
+            .join(format!("{:016x}.tcui-chat", conversation_id as u64))
     }
 }

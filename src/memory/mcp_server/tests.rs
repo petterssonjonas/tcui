@@ -1,20 +1,33 @@
 use std::fs;
+use std::path::Path;
 
 use rmcp::{model::CallToolRequestParams, ServiceExt};
 
 use super::{MemoryMcp, MemoryStore};
+use crate::memory::WriteOutcome;
 
 #[tokio::test]
 async fn stdio_protocol_lists_and_calls_memory_tools() {
     // Given
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let vault = std::env::temp_dir().join(format!("tcui-memory-mcp-{}", rand::random::<u64>()));
+    let data_home = vault.join("data-home");
+    fs::create_dir_all(&data_home).expect("data home");
+    std::env::set_var("XDG_DATA_HOME", &data_home);
     fs::create_dir_all(vault.join("memories")).expect("temporary vault");
-    fs::write(
-        vault.join("memories/fact.md"),
-        "# Fact\n\nRust is preferred.\n",
-    )
-    .expect("memory note");
     let store = MemoryStore::open(&vault, &vault.join("memory.sqlite3")).expect("memory store");
+    let WriteOutcome::Saved { .. } = store
+        .write(
+            Path::new("fact.md"),
+            "# Fact\n\nRust is preferred.\n",
+            false,
+        )
+        .expect("memory note")
+    else {
+        panic!("memory should be saved");
+    };
     let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
     let server = tokio::spawn(async move {
         MemoryMcp::new(store)
@@ -51,4 +64,5 @@ async fn stdio_protocol_lists_and_calls_memory_tools() {
     client.cancel().await.expect("cancel client");
     server.await.expect("server task").expect("memory server");
     fs::remove_dir_all(vault).expect("temporary vault cleanup");
+    std::env::remove_var("XDG_DATA_HOME");
 }

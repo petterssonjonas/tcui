@@ -1,9 +1,9 @@
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use super::markdown::parse_memory;
-use super::store::{MemoryError, MemoryStore};
+use super::store::{
+    is_memory_document_path, normalize_markdown, now_ms, MemoryDocument, MemoryError, MemoryStore,
+};
 use super::sync::fingerprint;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -22,38 +22,52 @@ impl MemoryStore {
         if markdown.trim().is_empty() {
             return Err(MemoryError::Invalid("memory Markdown is empty".to_string()));
         }
-        let target = self.paths.write_target(path)?;
-        if target.absolute.exists() && !overwrite {
-            return Err(MemoryError::Invalid("memory already exists".to_string()));
+        let logical_path = self.paths.logical_path(path)?;
+        let normalized_markdown = normalize_markdown(markdown);
+        if let Some((physical_path, mut document)) = self
+            .find_document_by_logical_path(&logical_path)?
+            .map(|document| (self.paths.active_document_path(document.id), document))
+        {
+            if !overwrite {
+                return Err(MemoryError::Invalid("memory already exists".to_string()));
+            }
+            document.title = parse_memory(
+                &normalized_markdown,
+                logical_path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("Memory"),
+            )
+            .title;
+            document.updated_at_ms = now_ms();
+            document.markdown = normalized_markdown;
+            self.write_document_at(&physical_path, &document)?;
+            self.sync()?;
+            return Ok(WriteOutcome::Saved {
+                title: document.title,
+                path: logical_path.to_string_lossy().replace('\\', "/"),
+            });
         }
-        if let Some(parent) = target.absolute.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let target = self.paths.write_target(&target.relative)?;
-        let temporary = temporary_path(&target.absolute);
-        let write_result = (|| -> Result<(), MemoryError> {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)?;
-            file.write_all(markdown.as_bytes())?;
-            file.sync_all()?;
-            std::fs::rename(&temporary, &target.absolute)?;
-            Ok(())
-        })();
-        if write_result.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        write_result?;
-        self.sync()?;
-        let fallback = target
-            .relative
+        let fallback = logical_path
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or("Memory");
+        let title = parse_memory(&normalized_markdown, fallback).title;
+        let now = now_ms();
+        let document = MemoryDocument {
+            schema_version: 1,
+            id: self.allocate_document_id(),
+            logical_path: logical_path.clone(),
+            title: title.clone(),
+            created_at_ms: now,
+            updated_at_ms: now,
+            markdown: normalized_markdown,
+        };
+        self.write_document_at(&self.paths.active_document_path(document.id), &document)?;
+        self.sync()?;
         Ok(WriteOutcome::Saved {
-            title: parse_memory(markdown, fallback).title,
-            path: target.relative.to_string_lossy().replace('\\', "/"),
+            title,
+            path: logical_path.to_string_lossy().replace('\\', "/"),
         })
     }
 
@@ -85,46 +99,51 @@ impl MemoryStore {
 
     pub(crate) fn forget(&self, path: &Path) -> Result<PathBuf, MemoryError> {
         self.sync()?;
-        let target = self.paths.existing_target(path)?;
-        let vault = self.paths.root().parent().unwrap_or(self.paths.root());
-        let base = vault.join(".trash/tcui-memory").join(&target.relative);
-        if let Some(parent) = base.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let destination = available_trash_path(base);
-        std::fs::rename(target.absolute, &destination)?;
+        let logical = self.paths.logical_path(path)?;
+        let document = self
+            .find_document_by_logical_path(&logical)?
+            .ok_or_else(|| MemoryError::Invalid("memory path is unavailable".to_string()))?;
+        let source = self.paths.active_document_path(document.id);
+        let destination = available_trash_path(self.paths.trash_document_path(document.id));
+        std::fs::rename(source, &destination)?;
         self.sync()?;
         Ok(destination)
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn add_from_plaintext(&self, path: &Path) -> Result<WriteOutcome, MemoryError> {
+        let source = std::fs::canonicalize(path)?;
+        let extension = source.extension().and_then(|value| value.to_str());
+        if !matches!(extension, Some("md" | "txt")) {
+            return Err(MemoryError::Invalid(
+                "memory import accepts only .md or .txt files".to_string(),
+            ));
+        }
+        let contents = std::fs::read_to_string(&source)?;
+        let logical = PathBuf::from(format!(
+            "{}.md",
+            source
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("memory")
+        ));
+        self.write(&logical, &contents, false)
+    }
+
     fn find_duplicate(&self, fact: &str) -> Result<Option<String>, MemoryError> {
-        for entry in walkdir::WalkDir::new(self.paths.root()).follow_links(false) {
-            let entry = entry.map_err(|error| MemoryError::Walk(error.to_string()))?;
-            if !entry.file_type().is_file()
-                || entry.path().extension().and_then(|value| value.to_str()) != Some("md")
-            {
+        let normalized_fact = normalize_markdown(fact).trim().to_string();
+        for entry in std::fs::read_dir(self.paths.root())? {
+            let entry = entry?;
+            if !is_memory_document_path(&entry.path()) {
                 continue;
             }
-            let content = std::fs::read_to_string(entry.path())?;
-            if memory_body(&content) == fact {
-                let fallback = entry
-                    .path()
-                    .file_stem()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("Memory");
-                return Ok(Some(parse_memory(&content, fallback).title));
+            let document = self.read_document_at(&entry.path())?;
+            if memory_body(&document.markdown) == normalized_fact {
+                return Ok(Some(document.title));
             }
         }
         Ok(None)
     }
-}
-
-fn temporary_path(target: &Path) -> PathBuf {
-    let name = target
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("memory.md");
-    target.with_file_name(format!(".{name}.tmp-{:016x}", rand::random::<u64>()))
 }
 
 fn available_trash_path(path: PathBuf) -> PathBuf {

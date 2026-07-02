@@ -45,16 +45,22 @@ pub(crate) fn run_skill_operation(
     config: &crate::config::AppConfig,
     request: &str,
 ) -> Result<Option<SkillOperation>, MemoryError> {
-    if !crate::skills::mentions(request)
+    let mentions = crate::skills::mentions(request);
+    if !mentions
         .iter()
-        .any(|name| name == "memory")
+        .any(|name| matches!(name.as_str(), "memory" | "memorize" | "remember"))
     {
         return Ok(None);
     }
-    let Some(command) = request
-        .rsplit_once("@memory")
-        .map(|(_, command)| command.trim())
-    else {
+    let command = ["@memory", "@memorize", "@remember"]
+        .iter()
+        .filter_map(|marker| {
+            request
+                .rsplit_once(marker)
+                .map(|(_, command)| command.trim())
+        })
+        .next_back();
+    let Some(command) = command else {
         return Ok(None);
     };
     let (operation, arguments) = command
@@ -190,9 +196,16 @@ mod tests {
     #[test]
     fn memory_skill_write_and_read_use_the_in_process_store() {
         // Given
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .expect("env lock poisoned");
         let vault =
             std::env::temp_dir().join(format!("tcui-memory-skill-{}", rand::random::<u64>()));
+        let data_home =
+            std::env::temp_dir().join(format!("tcui-memory-skill-data-{}", rand::random::<u64>()));
         std::fs::create_dir_all(&vault).expect("temporary vault");
+        std::fs::create_dir_all(&data_home).expect("temporary data home");
+        std::env::set_var("XDG_DATA_HOME", &data_home);
         let mut config = crate::config::AppConfig::default();
         config.memory.enabled = true;
         config.vault_path = Some(vault.to_string_lossy().to_string());
@@ -215,5 +228,77 @@ mod tests {
         ));
         assert!(read.context.contains("Use Helix."));
         std::fs::remove_dir_all(vault).expect("temporary vault cleanup");
+        std::fs::remove_dir_all(data_home).expect("temporary data home cleanup");
+        std::env::remove_var("XDG_DATA_HOME");
+    }
+
+    #[test]
+    fn memorize_alias_uses_the_memory_skill_path() {
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .expect("env lock poisoned");
+        let vault =
+            std::env::temp_dir().join(format!("tcui-memorize-skill-{}", rand::random::<u64>()));
+        let data_home = std::env::temp_dir().join(format!(
+            "tcui-memorize-skill-data-{}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&vault).expect("temporary vault");
+        std::fs::create_dir_all(&data_home).expect("temporary data home");
+        std::env::set_var("XDG_DATA_HOME", &data_home);
+        let mut config = crate::config::AppConfig::default();
+        config.memory.enabled = true;
+        config.vault_path = Some(vault.to_string_lossy().to_string());
+
+        let written = super::run_skill_operation(
+            &config,
+            "@memorize write preferences/editor.md\n# Editor\n\nUse Helix.",
+        )
+        .expect("write operation")
+        .expect("write result");
+
+        assert!(matches!(
+            written.activity,
+            Some(crate::memory::MemoryActivity::Saved { .. })
+        ));
+        std::fs::remove_dir_all(vault).expect("temporary vault cleanup");
+        std::fs::remove_dir_all(data_home).expect("temporary data home cleanup");
+        std::env::remove_var("XDG_DATA_HOME");
+    }
+
+    #[test]
+    fn remember_prefix_can_route_memory_operations_without_breaking_plain_remember() {
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .expect("env lock poisoned");
+        let vault =
+            std::env::temp_dir().join(format!("tcui-remember-skill-{}", rand::random::<u64>()));
+        let data_home = std::env::temp_dir().join(format!(
+            "tcui-remember-skill-data-{}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&vault).expect("temporary vault");
+        std::fs::create_dir_all(&data_home).expect("temporary data home");
+        std::env::set_var("XDG_DATA_HOME", &data_home);
+        let mut config = crate::config::AppConfig::default();
+        config.memory.enabled = true;
+        config.vault_path = Some(vault.to_string_lossy().to_string());
+
+        super::run_skill_operation(
+            &config,
+            "@memory write preferences/editor.md\n# Editor\n\nUse Helix.",
+        )
+        .expect("write operation")
+        .expect("write result");
+        let read = super::run_skill_operation(&config, "@remember read preferences/editor.md")
+            .expect("read operation")
+            .expect("read result");
+        let plain = super::run_skill_operation(&config, "@remember User prefers Helix.");
+
+        assert!(read.context.contains("Use Helix."));
+        assert!(plain.expect("plain remember result").is_none());
+        std::fs::remove_dir_all(vault).expect("temporary vault cleanup");
+        std::fs::remove_dir_all(data_home).expect("temporary data home cleanup");
+        std::env::remove_var("XDG_DATA_HOME");
     }
 }

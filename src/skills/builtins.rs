@@ -11,6 +11,11 @@ pub(crate) const BUILTINS: &[Builtin] = &[
         source: include_str!("../../skills/websearch/SKILL.md"),
     },
     Builtin {
+        name: "research",
+        description: "Research a subject and compile a sourced report.",
+        source: include_str!("../../skills/research/SKILL.md"),
+    },
+    Builtin {
         name: "exa",
         description: "Research the web with the live Exa MCP tools.",
         source: include_str!("../../skills/exa/SKILL.md"),
@@ -64,6 +69,12 @@ pub(crate) const BUILTINS: &[Builtin] = &[
     #[cfg(feature = "memory")]
     Builtin {
         name: "memory",
+        description: "Search, read, write, forget, or inspect local memory.",
+        source: include_str!("../../skills/memory/SKILL.md"),
+    },
+    #[cfg(feature = "memory")]
+    Builtin {
+        name: "memorize",
         description: "Search, read, write, forget, or inspect local memory.",
         source: include_str!("../../skills/memory/SKILL.md"),
     },

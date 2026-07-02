@@ -63,6 +63,16 @@ struct RenderedKittyHeading {
     alignment: Alignment,
 }
 
+pub(crate) struct InputLayout {
+    pub(crate) visible_lines: Vec<String>,
+    pub(crate) line_ranges: Vec<(usize, usize)>,
+    pub(crate) scroll: usize,
+    pub(crate) cursor_x: u16,
+    pub(crate) cursor_y: u16,
+    pub(crate) total_lines: usize,
+    pub(crate) show_scrollbar: bool,
+}
+
 impl<'a> ChatTab<'a> {
     pub fn new(state: &'a mut crate::ui::ChatTabState, props: ChatTabProps<'a>) -> Self {
         Self {
@@ -88,6 +98,11 @@ impl<'a> ChatTab<'a> {
 
         let has_title = self.state.generated_title.is_some();
         let header_lines = if has_title { 2 } else { 0 };
+        let input_height = if is_empty {
+            centered_input_height(self.state, area)
+        } else {
+            bottom_input_height(self.state, area)
+        };
 
         let chunks = if is_empty {
             let mut constraints = vec![];
@@ -95,7 +110,7 @@ impl<'a> ChatTab<'a> {
                 constraints.push(Constraint::Length(header_lines));
             }
             constraints.push(Constraint::Min(0));
-            constraints.push(Constraint::Length(5));
+            constraints.push(Constraint::Length(input_height));
             constraints.push(Constraint::Min(0));
 
             Layout::default()
@@ -108,7 +123,7 @@ impl<'a> ChatTab<'a> {
                 constraints.push(Constraint::Length(header_lines));
             }
             constraints.push(Constraint::Min(0));
-            constraints.push(Constraint::Length(3));
+            constraints.push(Constraint::Length(input_height));
 
             Layout::default()
                 .direction(Direction::Vertical)
@@ -769,39 +784,73 @@ impl<'a> ChatTab<'a> {
     fn render_input(&mut self, f: &mut Frame, area: Rect) {
         let theme = crate::theme::active_theme();
         self.state.input_area = Some(area);
-        let inner = Rect::new(
-            area.x.saturating_add(1),
-            area.y.saturating_add(1),
-            area.width.saturating_sub(2),
-            area.height.saturating_sub(2),
-        );
-        self.state.input_text_area = Some(inner);
-        let (display, scroll, cursor_x) = visible_input_line(
+        let max_body_lines = area.height.saturating_sub(2) as usize;
+        let layout = input_layout(
             &self.state.input_content,
             self.state.input_cursor,
             self.state.input_scroll,
-            inner.width.saturating_sub(1) as usize,
+            area.width.saturating_sub(2) as usize,
+            max_body_lines,
             true,
         );
-        self.state.input_scroll = scroll;
+        self.state.input_scroll = layout.scroll;
+        let inner_width = area
+            .width
+            .saturating_sub(2)
+            .saturating_sub(u16::from(layout.show_scrollbar));
+        let inner = Rect::new(
+            area.x.saturating_add(1),
+            area.y.saturating_add(1),
+            inner_width,
+            area.height.saturating_sub(2),
+        );
+        self.state.input_text_area = Some(inner);
 
-        let input = Paragraph::new(format!(" {display}"))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.border))
-                    .title(" Message ")
-                    .title_style(Style::default().fg(theme.muted)),
-            )
-            .style(if self.state.input_content.is_empty() {
-                Style::default().fg(theme.muted).bg(theme.panel)
-            } else {
-                Style::default().fg(theme.foreground).bg(theme.panel)
-            });
+        let input = Paragraph::new(
+            layout
+                .visible_lines
+                .iter()
+                .map(|line| Line::from(format!(" {line}")))
+                .collect::<Vec<_>>(),
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.border))
+                .title(" Message ")
+                .title_style(Style::default().fg(theme.muted)),
+        )
+        .style(if self.state.input_content.is_empty() {
+            Style::default().fg(theme.muted).bg(theme.panel)
+        } else {
+            Style::default().fg(theme.foreground).bg(theme.panel)
+        });
 
         f.render_widget(input, area);
+        if layout.show_scrollbar {
+            let track = Rect::new(area.right().saturating_sub(2), inner.y, 1, inner.height);
+            let thumb = scrollbar_thumb(
+                track,
+                layout.total_lines,
+                inner.height as usize,
+                layout.scroll,
+            );
+            f.render_widget(
+                Paragraph::new(vec![Line::from("│"); track.height as usize])
+                    .style(Style::default().fg(theme.muted)),
+                track,
+            );
+            f.render_widget(
+                Paragraph::new(vec![Line::from("█"); thumb.height as usize])
+                    .style(Style::default().fg(theme.foreground)),
+                thumb,
+            );
+        }
         if inner.width > 0 && inner.height > 0 {
-            f.set_cursor_position((inner.x.saturating_add(cursor_x).saturating_add(1), inner.y));
+            f.set_cursor_position((
+                inner.x.saturating_add(layout.cursor_x).saturating_add(1),
+                inner.y.saturating_add(layout.cursor_y),
+            ));
         }
     }
 
@@ -817,56 +866,133 @@ impl<'a> ChatTab<'a> {
             .split(area);
 
         self.state.input_area = Some(horizontal[1]);
-        let inner = Rect::new(
-            horizontal[1].x.saturating_add(1),
-            horizontal[1].y.saturating_add(1),
-            horizontal[1].width.saturating_sub(2),
-            horizontal[1].height.saturating_sub(2),
-        );
-        self.state.input_text_area = Some(inner);
-        let (display, scroll, cursor_x) = visible_input_line(
+        let max_body_lines = horizontal[1].height.saturating_sub(2) as usize;
+        let layout = input_layout(
             &self.state.input_content,
             self.state.input_cursor,
             self.state.input_scroll,
-            inner.width.saturating_sub(1) as usize,
+            horizontal[1].width.saturating_sub(2) as usize,
+            max_body_lines,
             true,
         );
-        self.state.input_scroll = scroll;
+        self.state.input_scroll = layout.scroll;
+        let inner_width = horizontal[1]
+            .width
+            .saturating_sub(2)
+            .saturating_sub(u16::from(layout.show_scrollbar));
+        let inner = Rect::new(
+            horizontal[1].x.saturating_add(1),
+            horizontal[1].y.saturating_add(1),
+            inner_width,
+            horizontal[1].height.saturating_sub(2),
+        );
+        self.state.input_text_area = Some(inner);
 
-        let input = Paragraph::new(format!(" {display}"))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.accent))
-                    .title(" Start a conversation ")
-                    .title_style(
-                        Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-            )
-            .style(if self.state.input_content.is_empty() {
-                Style::default().fg(theme.muted).bg(theme.panel)
-            } else {
-                Style::default().fg(theme.foreground).bg(theme.panel)
-            });
+        let input = Paragraph::new(
+            layout
+                .visible_lines
+                .iter()
+                .map(|line| Line::from(format!(" {line}")))
+                .collect::<Vec<_>>(),
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.accent))
+                .title(" Start a conversation ")
+                .title_style(
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+        )
+        .style(if self.state.input_content.is_empty() {
+            Style::default().fg(theme.muted).bg(theme.panel)
+        } else {
+            Style::default().fg(theme.foreground).bg(theme.panel)
+        });
 
         f.render_widget(input, horizontal[1]);
+        if layout.show_scrollbar {
+            let track = Rect::new(
+                horizontal[1].right().saturating_sub(2),
+                inner.y,
+                1,
+                inner.height,
+            );
+            let thumb = scrollbar_thumb(
+                track,
+                layout.total_lines,
+                inner.height as usize,
+                layout.scroll,
+            );
+            f.render_widget(
+                Paragraph::new(vec![Line::from("│"); track.height as usize])
+                    .style(Style::default().fg(theme.muted)),
+                track,
+            );
+            f.render_widget(
+                Paragraph::new(vec![Line::from("█"); thumb.height as usize])
+                    .style(Style::default().fg(theme.foreground)),
+                thumb,
+            );
+        }
         if inner.width > 0 && inner.height > 0 {
-            f.set_cursor_position((inner.x.saturating_add(cursor_x).saturating_add(1), inner.y));
+            f.set_cursor_position((
+                inner.x.saturating_add(layout.cursor_x).saturating_add(1),
+                inner.y.saturating_add(layout.cursor_y),
+            ));
         }
     }
 }
 
-fn visible_input_line(
+fn bottom_input_height(state: &crate::ui::ChatTabState, area: Rect) -> u16 {
+    let max_box_height = (area.height / 2).max(3);
+    let viewport_height = max_box_height.saturating_sub(2) as usize;
+    let layout = input_layout(
+        &state.input_content,
+        state.input_cursor,
+        state.input_scroll,
+        area.width.saturating_sub(3) as usize,
+        viewport_height.max(1),
+        true,
+    );
+    (layout.visible_lines.len() as u16 + 2).clamp(3, max_box_height)
+}
+
+fn centered_input_height(state: &crate::ui::ChatTabState, area: Rect) -> u16 {
+    let width = area.width.saturating_mul(76) / 100;
+    let max_box_height = (area.height / 2).max(5);
+    let viewport_height = max_box_height.saturating_sub(2) as usize;
+    let layout = input_layout(
+        &state.input_content,
+        state.input_cursor,
+        state.input_scroll,
+        width.saturating_sub(3) as usize,
+        viewport_height.max(1),
+        true,
+    );
+    (layout.visible_lines.len() as u16 + 2).clamp(5, max_box_height)
+}
+
+pub(crate) fn input_layout(
     content: &str,
     cursor: usize,
     scroll: usize,
     width: usize,
+    viewport_height: usize,
     show_placeholder: bool,
-) -> (String, usize, u16) {
-    if width == 0 {
-        return (String::new(), scroll, 0);
+) -> InputLayout {
+    if width == 0 || viewport_height == 0 {
+        return InputLayout {
+            visible_lines: Vec::new(),
+            line_ranges: Vec::new(),
+            scroll,
+            cursor_x: 0,
+            cursor_y: 0,
+            total_lines: 0,
+            show_scrollbar: false,
+        };
     }
 
     if content.is_empty() {
@@ -876,23 +1002,69 @@ fn visible_input_line(
             ""
         };
         let visible: String = placeholder.chars().take(width).collect();
-        return (visible, 0, 0);
+        return InputLayout {
+            visible_lines: vec![visible],
+            line_ranges: vec![(0, 0)],
+            scroll: 0,
+            cursor_x: 0,
+            cursor_y: 0,
+            total_lines: 1,
+            show_scrollbar: false,
+        };
     }
 
     let chars: Vec<char> = content.chars().collect();
-    let available = width;
     let cursor = cursor.min(chars.len());
-    let mut scroll = scroll.min(chars.len());
-    if cursor < scroll {
-        scroll = cursor;
+    let mut lines = Vec::new();
+    let mut ranges = Vec::new();
+    let mut current = String::new();
+    let mut start = 0usize;
+    let mut column = 0usize;
+
+    for (idx, ch) in chars.iter().enumerate() {
+        if *ch == '\n' {
+            lines.push(current.clone());
+            ranges.push((start, idx));
+            current.clear();
+            start = idx + 1;
+            column = 0;
+            continue;
+        }
+        if column >= width {
+            lines.push(current.clone());
+            ranges.push((start, idx));
+            current.clear();
+            start = idx;
+            column = 0;
+        }
+        current.push(*ch);
+        column += 1;
     }
-    if cursor > scroll + available {
-        scroll = cursor.saturating_sub(available);
+    lines.push(current);
+    ranges.push((start, chars.len()));
+
+    let cursor_line = ranges
+        .iter()
+        .position(|(_, end)| cursor < *end)
+        .unwrap_or_else(|| ranges.len().saturating_sub(1));
+    let cursor_x = cursor.saturating_sub(ranges[cursor_line].0).min(width) as u16;
+    let mut scroll = scroll.min(lines.len().saturating_sub(viewport_height));
+    if cursor_line < scroll {
+        scroll = cursor_line;
     }
-    let end = (scroll + available).min(chars.len());
-    let visible: String = chars[scroll..end].iter().collect();
-    let relative = cursor.saturating_sub(scroll).min(available) as u16;
-    (visible, scroll, relative)
+    if cursor_line >= scroll + viewport_height {
+        scroll = cursor_line + 1 - viewport_height;
+    }
+    let end = (scroll + viewport_height).min(lines.len());
+    InputLayout {
+        visible_lines: lines[scroll..end].to_vec(),
+        line_ranges: ranges,
+        scroll,
+        cursor_x,
+        cursor_y: cursor_line.saturating_sub(scroll) as u16,
+        total_lines: lines.len(),
+        show_scrollbar: lines.len() > viewport_height,
+    }
 }
 
 fn scrollbar_thumb(
@@ -1097,12 +1269,12 @@ mod tests {
     }
 
     #[test]
-    fn visible_input_line_scrolls_to_keep_cursor_visible() {
-        let (display, scroll, cursor_x) = visible_input_line("abcdefghij", 10, 0, 5, false);
+    fn input_layout_scrolls_to_keep_cursor_visible() {
+        let layout = input_layout("abcdefghij", 10, 0, 5, 1, false);
 
-        assert_eq!(scroll, 5);
-        assert_eq!(cursor_x, 5);
-        assert_eq!(display, "fghij");
+        assert_eq!(layout.scroll, 1);
+        assert_eq!(layout.cursor_x, 5);
+        assert_eq!(layout.visible_lines, vec!["fghij".to_string()]);
     }
 
     #[test]
@@ -1390,6 +1562,52 @@ mod tests {
 
         assert!(chat.state.chat_scrollbar_area.is_some());
         assert!(chat.state.input_text_area.is_some());
+    }
+
+    #[test]
+    fn multiline_input_grows_and_scrolls_with_long_content() {
+        let mut ui = crate::ui::UI::new();
+        ui.tabs[0].messages.push(crate::app::message::Message::new(
+            1,
+            "assistant".to_string(),
+            "ready".to_string(),
+        ));
+        ui.tabs[0].input_content = "line one wraps around the viewport width and keeps going. line two wraps around the viewport width and keeps going. line three wraps around the viewport width and keeps going. line four wraps around the viewport width and keeps going. line five wraps around the viewport width and keeps going. line six wraps around the viewport width and keeps going.".to_string();
+        ui.tabs[0].input_cursor = ui.tabs[0].input_content.chars().count();
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 16)).expect("test terminal");
+        let mut chat = ChatTab::new(
+            &mut ui.tabs[0],
+            ChatTabProps {
+                user_alignment: TextAlignment::Left,
+                ai_alignment: TextAlignment::Left,
+                markdown_mode: MarkdownMode::Off,
+                collapse_thinking: true,
+                show_chat_scrollbar: true,
+                kitty_enhanced_text: false,
+                kitty_heading_downscale: HeadingDownscale::None,
+                image_protocol: "off",
+                terminal_capabilities: TerminalCapabilities {
+                    terminal: TerminalKind::Unknown,
+                    multiplexer: None,
+                    kitty_graphics: false,
+                    kitty_text_sizing: false,
+                    tmux_passthrough: false,
+                },
+                frame_tick: 0,
+                providers: &[],
+                models: &[],
+                reasoning_options: &[],
+            },
+        );
+
+        terminal
+            .draw(|frame| chat.render(frame, Rect::new(0, 0, 40, 16)))
+            .expect("render chat");
+
+        let input_area = chat.state.input_area.expect("input area");
+        assert!(input_area.height > 3);
+        assert!(chat.state.input_scroll > 0);
     }
 
     #[test]

@@ -1,21 +1,18 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::path::Path;
 
 use rusqlite::{params, OptionalExtension};
 
 use super::embedding::{as_blob, embed_many};
 use super::index::MemoryIndex;
-use super::markdown::{parse_memory, MemoryChunk};
+use super::markdown::MemoryChunk;
 use super::paths::MemoryPaths;
-use super::store::MemoryError;
+use super::store::{is_memory_document_path, MemoryDocument, MemoryError};
 
 static SYNC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct SourceFile {
-    relative: PathBuf,
-    title: String,
-    frontmatter_raw: Option<String>,
+    physical_name: String,
     modified_ns: i64,
     size_bytes: i64,
     fingerprint: i64,
@@ -43,11 +40,11 @@ pub(super) fn synchronize(paths: &MemoryPaths, database: &Path) -> Result<(), Me
     let existing = existing_files(&index)?;
     let source_names = sources
         .iter()
-        .map(|source| relative_text(&source.relative))
+        .map(|source| source.physical_name.clone())
         .collect::<HashSet<_>>();
     let mut prepared = Vec::new();
     for source in sources {
-        let name = relative_text(&source.relative);
+        let name = source.physical_name.clone();
         let unchanged = existing.get(&name).is_some_and(|row| {
             row.modified_ns == source.modified_ns
                 && row.size_bytes == source.size_bytes
@@ -72,23 +69,19 @@ pub(super) fn synchronize(paths: &MemoryPaths, database: &Path) -> Result<(), Me
         delete_file(&transaction, name)?;
     }
     for file in prepared {
-        let name = relative_text(&file.source.relative);
+        let name = file.source.physical_name.clone();
         delete_vectors(&transaction, &name)?;
         let file_id = transaction.query_row(
             "INSERT INTO memory_files(
-                rel_path, title, frontmatter_raw, modified_ns, size_bytes, content_fingerprint
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                rel_path, modified_ns, size_bytes, content_fingerprint
+             ) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(rel_path) DO UPDATE SET
-                title = excluded.title,
-                frontmatter_raw = excluded.frontmatter_raw,
                 modified_ns = excluded.modified_ns,
                 size_bytes = excluded.size_bytes,
                 content_fingerprint = excluded.content_fingerprint
              RETURNING id",
             params![
                 name,
-                file.source.title,
-                file.source.frontmatter_raw,
                 file.source.modified_ns,
                 file.source.size_bytes,
                 file.source.fingerprint,
@@ -121,41 +114,37 @@ pub(super) fn synchronize(paths: &MemoryPaths, database: &Path) -> Result<(), Me
 }
 
 fn scan_sources(paths: &MemoryPaths) -> Result<Vec<SourceFile>, MemoryError> {
+    let key = crate::storage::crypto::SharedKey::load_or_create_default(
+        &crate::storage::paths::TcuiDataPaths::discover(),
+    )?
+    .key;
     let mut sources = Vec::new();
     for entry in walkdir::WalkDir::new(paths.root()).follow_links(false) {
         let entry = entry.map_err(|error| MemoryError::Walk(error.to_string()))?;
+        if entry.path().starts_with(paths.root().join(".trash")) {
+            continue;
+        }
         if entry.file_type().is_symlink()
             || !entry.file_type().is_file()
-            || entry.path().extension().and_then(|value| value.to_str()) != Some("md")
+            || !is_memory_document_path(entry.path())
         {
             continue;
         }
-        let relative = entry
-            .path()
-            .strip_prefix(paths.root())
-            .map_err(|_| MemoryError::Invalid("memory path escaped its root".to_string()))?
-            .to_path_buf();
-        let confined = paths.existing_target(&relative)?;
-        let content = std::fs::read_to_string(&confined.absolute)?;
-        let metadata = std::fs::metadata(&confined.absolute)?;
-        let fallback = confined
-            .relative
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or("Memory");
-        let parsed = parse_memory(&content, fallback);
+        let physical_name = entry.file_name().to_string_lossy().to_string();
+        let document: MemoryDocument =
+            crate::storage::crypto::read_encrypted_document(entry.path(), &key, "memory")?;
+        let parsed = super::markdown::parse_memory(&document.markdown, &document.title);
+        let metadata = std::fs::metadata(entry.path())?;
         sources.push(SourceFile {
-            relative: confined.relative,
-            title: parsed.title,
-            frontmatter_raw: parsed.frontmatter_raw,
+            physical_name,
             modified_ns: modified_ns(&metadata),
             size_bytes: i64::try_from(metadata.len()).unwrap_or(i64::MAX),
-            fingerprint: fingerprint(content.as_bytes()),
-            content,
+            fingerprint: fingerprint(document.markdown.as_bytes()),
+            content: document.markdown,
             chunks: parsed.chunks,
         });
     }
-    sources.sort_by(|left, right| left.relative.cmp(&right.relative));
+    sources.sort_by(|left, right| left.physical_name.cmp(&right.physical_name));
     Ok(sources)
 }
 
@@ -200,15 +189,11 @@ fn delete_file(transaction: &rusqlite::Transaction<'_>, name: &str) -> rusqlite:
     Ok(())
 }
 
-fn relative_text(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
-}
-
 fn modified_ns(metadata: &std::fs::Metadata) -> i64 {
     metadata
         .modified()
         .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
         .unwrap_or(0)
 }
