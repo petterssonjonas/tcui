@@ -685,6 +685,9 @@ impl TuiApp {
                 crate::llm::chat::ChatStreamEvent::Thinking(content) => {
                     let _ = event_tx.send(Action::StreamThinking(tab_id, assistant_idx, content));
                 }
+                crate::llm::chat::ChatStreamEvent::Title(title) => {
+                    let _ = event_tx.send(Action::SetTitle(title));
+                }
             })
             .await;
 
