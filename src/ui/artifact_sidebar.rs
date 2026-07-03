@@ -565,8 +565,8 @@ impl<'a> ArtifactSidebar<'a> {
 
         let mut x = area.x;
         let y = area.y + 2;
-        let open = button_area(&mut x, y, "Open");
-        f.render_widget(button("Open", theme.info), open);
+        let open = button_area(&mut x, y, "View");
+        f.render_widget(button("View", theme.info), open);
 
         let edit = if matches!(entry.origin, ArtifactOrigin::Saved) {
             let rect = button_area(&mut x, y, "Edit");
