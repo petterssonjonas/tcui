@@ -41,7 +41,11 @@ impl TuiApp {
             })?;
 
             tokio::select! {
-                _ = tick.tick() => {}
+                _ = tick.tick() => {
+                    if let Some(editor) = self.ui.editor_popup.as_mut() {
+                        editor.poll_output();
+                    }
+                }
                 maybe_event = reader.next() => {
                     match maybe_event {
                         Some(Ok(crossterm::event::Event::Key(key))) => {

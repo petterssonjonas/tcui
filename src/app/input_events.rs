@@ -84,6 +84,15 @@ impl TuiApp {
             };
         }
 
+        if let Some(editor) = &mut self.ui.editor_popup {
+            let keep_open = editor.handle_key(key);
+            if keep_open {
+                return None;
+            }
+            self.ui.editor_popup = None;
+            return None;
+        }
+
         if let Some(viewer) = &mut self.ui.artifact_viewer {
             let viewer_handle = viewer.handle().clone();
             return match key.code {
@@ -580,6 +589,10 @@ impl TuiApp {
 
     pub(crate) fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> Option<Action> {
         use crossterm::event::{MouseButton, MouseEventKind};
+
+        if self.ui.editor_popup.is_some() {
+            return None;
+        }
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {

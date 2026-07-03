@@ -69,6 +69,7 @@ pub struct UI {
     pub save_file_dialog: Option<SaveFileDialog>,
     pub export_dialog: Option<ExportDialog>,
     pub artifact_viewer: Option<ArtifactViewerState>,
+    pub editor_popup: Option<crate::ui::modals::editor_popup::EditorPopupState>,
     pub list_popup: Option<ListPopup>,
     pub last_area: Option<Rect>,
     pub chat_area: Option<Rect>,
@@ -237,6 +238,7 @@ impl UI {
             save_file_dialog: None,
             export_dialog: None,
             artifact_viewer: None,
+            editor_popup: None,
             list_popup: None,
             last_area: None,
             chat_area: None,
@@ -497,6 +499,10 @@ impl UI {
                     terminal_capabilities: self.terminal_capabilities,
                 },
             );
+        }
+
+        if let (Some(editor), Some(chat_area)) = (&mut self.editor_popup, self.chat_area) {
+            editor.render(f, chat_area);
         }
 
         if let Some(ref popup) = self.list_popup {

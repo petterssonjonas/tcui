@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 
-use super::terminal::launch_editor;
 use super::TuiApp;
 
 impl TuiApp {
@@ -165,15 +164,13 @@ impl TuiApp {
         let Some(artifact) = self.find_artifact(&handle) else {
             return;
         };
-        let Some(path) = artifact.path.as_deref() else {
+        let Some(path) = artifact.path.clone() else {
             self.ui
                 .show_toast("Editor requires a saved file.".to_string());
             return;
         };
-        match launch_editor(path) {
-            Ok(()) => self
-                .ui
-                .show_toast(format!("Opened {} in editor", artifact.name)),
+        match crate::ui::modals::editor_popup::EditorPopupState::new(&path) {
+            Ok(state) => self.ui.editor_popup = Some(state),
             Err(error) => self.ui.show_toast(error),
         }
     }
