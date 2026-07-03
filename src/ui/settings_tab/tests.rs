@@ -120,6 +120,134 @@ fn activating_preset_provider_row_toggles_provider_enabled_state() {
 }
 
 #[test]
+fn provider_form_state_submits_trimmed_add_provider_action() {
+    // Given
+    let mut popup = popup_with_mcps(0);
+    popup.active_tab = SettingsTab::Providers;
+    popup.providers_tab_focus = ProvidersTabFocus::AddProviderButton;
+    assert!(matches!(popup.activate_focus(), ProvidersAction::None));
+    let form = popup
+        .add_provider_popup
+        .as_mut()
+        .expect("add provider form");
+    form.name = "  Custom AI  ".to_string();
+    form.endpoint = "  https://custom.invalid/v1  ".to_string();
+    form.api_key = "  secret-token  ".to_string();
+    form.focus = ProviderFormFocus::SubmitButton;
+
+    // When
+    let action = popup.activate_provider_popup();
+
+    // Then
+    match action {
+        ProvidersAction::SubmitAdd { provider, api_key } => {
+            assert_eq!(provider.name, "Custom AI");
+            assert_eq!(provider.endpoint, "https://custom.invalid/v1");
+            assert_eq!(provider.backend_type, "openai");
+            assert_eq!(api_key, "secret-token");
+        }
+        other => panic!("expected submit add action, got {other:?}"),
+    }
+    assert!(popup.add_provider_popup.is_none());
+}
+
+#[test]
+fn provider_form_state_blocks_duplicate_provider_name() {
+    // Given
+    let mut popup = popup_with_mcps(0);
+    popup.providers_tab_list = vec![EditableProvider {
+        name: "Custom AI".to_string(),
+        endpoint: "https://existing.invalid/v1".to_string(),
+        backend_type: "openai".to_string(),
+    }];
+    popup.add_provider_popup = Some(ProviderFormState {
+        name: "Custom AI".to_string(),
+        endpoint: "https://custom.invalid/v1".to_string(),
+        api_key: "secret-token".to_string(),
+        focus: ProviderFormFocus::SubmitButton,
+        ..ProviderFormState::new_add()
+    });
+
+    // When
+    let action = popup.activate_provider_popup();
+
+    // Then
+    assert!(matches!(action, ProvidersAction::None));
+    assert!(popup.add_provider_popup.is_some());
+}
+
+#[test]
+fn next_and_prev_tab_cycle_through_all_settings_tabs() {
+    // Given
+    let mut popup = popup_with_mcps(0);
+    popup.local_focus = LocalFocus::ApiTokenEnv;
+
+    // When / Then
+    popup.next_tab();
+    assert_eq!(popup.active_tab, SettingsTab::Keybindings);
+    popup.next_tab();
+    assert_eq!(popup.active_tab, SettingsTab::Providers);
+    popup.next_tab();
+    assert_eq!(popup.active_tab, SettingsTab::Models);
+    popup.next_tab();
+    assert_eq!(popup.active_tab, SettingsTab::Local);
+    assert_eq!(popup.local_focus, LocalFocus::Enabled);
+    popup.next_tab();
+    assert_eq!(popup.active_tab, SettingsTab::Mcp);
+    popup.next_tab();
+    assert_eq!(popup.active_tab, SettingsTab::General);
+    popup.prev_tab();
+    assert_eq!(popup.active_tab, SettingsTab::Mcp);
+}
+
+#[test]
+fn local_server_type_cycles_through_all_variants() {
+    // Given / When / Then
+    assert_eq!(
+        super::local::next_local_server_type(LocalServerType::Auto),
+        LocalServerType::Ollama
+    );
+    assert_eq!(
+        super::local::next_local_server_type(LocalServerType::Ollama),
+        LocalServerType::LlamaCpp
+    );
+    assert_eq!(
+        super::local::next_local_server_type(LocalServerType::LlamaCpp),
+        LocalServerType::LmStudio
+    );
+    assert_eq!(
+        super::local::next_local_server_type(LocalServerType::LmStudio),
+        LocalServerType::OpenAiCompat
+    );
+    assert_eq!(
+        super::local::next_local_server_type(LocalServerType::OpenAiCompat),
+        LocalServerType::Auto
+    );
+}
+
+#[test]
+fn local_text_input_filters_numeric_and_token_fields() {
+    // Given
+    let mut popup = popup_with_mcps(0);
+    popup.active_tab = SettingsTab::Local;
+
+    // When
+    popup.local_focus = LocalFocus::Port;
+    popup.type_char('x');
+    popup.type_char('1');
+    popup.type_char('2');
+    popup.local_focus = LocalFocus::ApiTokenEnv;
+    popup.type_char('A');
+    popup.type_char('-');
+    popup.type_char('_');
+    popup.type_char('9');
+
+    // Then
+    assert_eq!(popup.local_port, "12");
+    assert_eq!(popup.local_api_token_env, "A_9");
+}
+
+#[test]
 fn keybindings_help_keeps_vault_route_and_omits_local_route() {
     // Given
     let mut popup = popup_with_mcps(0);
