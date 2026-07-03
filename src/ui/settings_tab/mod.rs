@@ -8,8 +8,6 @@ mod providers;
 pub mod state;
 mod util;
 
-#[allow(unused_imports)]
-pub use state::ProvidersFocus;
 pub use state::{
     EditProvidersFocus, EditProvidersHitAreas, EditProvidersPopupState, EditableProvider,
     GeneralDropdown, GeneralFocus, GeneralHitAreas, LocalFocus, LocalHitAreas, McpHitAreas,
