@@ -688,6 +688,17 @@ impl TuiApp {
                         filtered.visible,
                     ));
                 }
+                for issue in filtered.issues {
+                    let message = match issue {
+                        crate::memory::RememberDirectiveIssue::UnterminatedOpen => {
+                            "Memory was not saved: <tcui:remember> was started but never closed."
+                        }
+                        crate::memory::RememberDirectiveIssue::ClosingWithoutOpening => {
+                            "Memory was not saved: </tcui:remember> appeared without a matching start tag."
+                        }
+                    };
+                    let _ = action_tx.send(Action::UpdateStatus(message.to_string()));
+                }
                 filtered.memory
             };
 

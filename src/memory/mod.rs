@@ -14,7 +14,7 @@ mod write;
 
 pub(crate) use activity::{activities, set_activities, MemoryActivity};
 pub(crate) use config::MemoryConfig;
-pub(crate) use directive::RememberFilter;
+pub(crate) use directive::{RememberDirectiveIssue, RememberFilter};
 pub(crate) use host::{append_recall, capture, recall, run_skill_operation, AUTO_CAPTURE_POLICY};
 pub(crate) use mcp_server::run as run_mcp;
 pub(crate) use store::{MemoryDocument, MemoryStore};

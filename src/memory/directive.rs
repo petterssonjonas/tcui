@@ -2,10 +2,17 @@ const OPEN_TAG: &str = "<tcui:remember>";
 const CLOSE_TAG: &str = "</tcui:remember>";
 const MAX_MEMORY_CHARS: usize = 500;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RememberDirectiveIssue {
+    UnterminatedOpen,
+    ClosingWithoutOpening,
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct FilterResult {
     pub(crate) visible: String,
     pub(crate) memory: Option<String>,
+    pub(crate) issues: Vec<RememberDirectiveIssue>,
 }
 
 #[derive(Debug, Default)]
@@ -15,6 +22,7 @@ pub(crate) struct RememberFilter {
     memory: Option<String>,
     capturing: bool,
     in_fence: bool,
+    issues: Vec<RememberDirectiveIssue>,
 }
 
 impl RememberFilter {
@@ -35,9 +43,13 @@ impl RememberFilter {
             let line = std::mem::take(&mut self.pending_line);
             self.process_line(&line, &mut visible);
         }
+        if self.capturing {
+            self.issues.push(RememberDirectiveIssue::UnterminatedOpen);
+        }
         FilterResult {
             visible,
             memory: self.memory,
+            issues: self.issues,
         }
     }
 
@@ -80,6 +92,10 @@ impl RememberFilter {
             }
 
             let Some(start) = text.find(OPEN_TAG) else {
+                if text.contains(CLOSE_TAG) {
+                    self.issues
+                        .push(RememberDirectiveIssue::ClosingWithoutOpening);
+                }
                 visible.push_str(text);
                 return;
             };
@@ -124,7 +140,7 @@ fn might_be_fence_line(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::RememberFilter;
+    use super::{RememberDirectiveIssue, RememberFilter};
 
     #[test]
     fn directive_is_filtered_at_every_stream_boundary() {
@@ -143,6 +159,7 @@ mod tests {
             // Then
             assert_eq!(emitted, "Answer.\n\n", "boundary {boundary}");
             assert_eq!(result.memory.as_deref(), Some("User prefers Rust."));
+            assert!(result.issues.is_empty(), "boundary {boundary}");
         }
     }
 
@@ -248,6 +265,30 @@ mod tests {
             // Then
             assert_eq!(emitted, "", "boundary {boundary}");
             assert_eq!(result.memory, None, "boundary {boundary}");
+            assert_eq!(
+                result.issues,
+                vec![RememberDirectiveIssue::UnterminatedOpen],
+                "boundary {boundary}"
+            );
         }
+    }
+
+    #[test]
+    fn closing_tag_without_opening_is_reported() {
+        // Given
+        let input = "As I was saying, </tcui:remember> is the close tag.";
+        let mut filter = RememberFilter::default();
+
+        // When
+        let emitted = filter.push(input);
+        let result = filter.finish();
+
+        // Then
+        assert_eq!(emitted, input);
+        assert_eq!(result.memory, None);
+        assert_eq!(
+            result.issues,
+            vec![RememberDirectiveIssue::ClosingWithoutOpening]
+        );
     }
 }
