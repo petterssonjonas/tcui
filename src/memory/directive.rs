@@ -35,10 +35,6 @@ impl RememberFilter {
             let line = std::mem::take(&mut self.pending_line);
             self.process_line(&line, &mut visible);
         }
-        if self.capturing {
-            visible.push_str(OPEN_TAG);
-            visible.push_str(&self.captured);
-        }
         FilterResult {
             visible,
             memory: self.memory,
@@ -233,5 +229,25 @@ mod tests {
                 .map(Iterator::count),
             Some(500)
         );
+    }
+
+    #[test]
+    fn unterminated_directive_is_hidden_at_every_stream_boundary() {
+        // Given
+        let input = "<tcui:remember>fact";
+
+        for boundary in 0..=input.len() {
+            let mut filter = RememberFilter::default();
+
+            // When
+            let mut emitted = filter.push(&input[..boundary]);
+            emitted.push_str(&filter.push(&input[boundary..]));
+            let result = filter.finish();
+            emitted.push_str(&result.visible);
+
+            // Then
+            assert_eq!(emitted, "", "boundary {boundary}");
+            assert_eq!(result.memory, None, "boundary {boundary}");
+        }
     }
 }
