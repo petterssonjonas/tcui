@@ -132,6 +132,10 @@ impl TuiApp {
                 self.ui.artifact_sidebar_open = !self.ui.artifact_sidebar_open;
                 Ok(())
             }
+            Action::RefreshArtifactSidebar => {
+                self.refresh_artifact_sidebar_catalogs();
+                Ok(())
+            }
             Action::ShowSettings => {
                 let config = self.config.read().await;
                 let settings = self.load_settings_popup_state(&config);
@@ -606,12 +610,17 @@ impl TuiApp {
                             ));
                         }
                         if let Some(activity) = operation.activity {
+                            let refresh =
+                                matches!(activity, crate::memory::MemoryActivity::Saved { .. });
                             memory_activities.push(activity);
                             let _ = action_tx.send(Action::SetMemoryActivities(
                                 tab_id,
                                 assistant_idx,
                                 memory_activities.clone(),
                             ));
+                            if refresh {
+                                let _ = action_tx.send(Action::RefreshArtifactSidebar);
+                            }
                         }
                     }
                     Ok(Ok(None)) => {}
@@ -737,6 +746,7 @@ impl TuiApp {
                             Ok(Ok(crate::memory::WriteOutcome::Saved { title, path })) => {
                                 memory_activities
                                     .push(crate::memory::MemoryActivity::Saved { title, path });
+                                let _ = action_tx.send(Action::RefreshArtifactSidebar);
                             }
                             Ok(Ok(crate::memory::WriteOutcome::AlreadyKnown { title })) => {
                                 memory_activities
