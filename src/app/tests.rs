@@ -24,7 +24,7 @@ fn with_test_app(label: &str, test: impl FnOnce(&mut TuiApp)) {
     std::env::set_var("XDG_DATA_HOME", &data_home);
     std::env::set_var("XDG_CONFIG_HOME", &config_home);
 
-    let storage = Arc::new(Storage::new().expect("create storage"));
+    let storage = Storage::new().expect("create storage");
     let mut app = TuiApp::new(
         storage,
         Arc::new(tokio::sync::RwLock::new(AppConfig::default())),
@@ -209,6 +209,93 @@ fn media_capture_ignores_existing_non_image_paths() {
 }
 
 #[test]
+fn local_media_sources_finds_file_links_and_skips_duplicates() {
+    // Given
+    let content = concat!(
+        "![preview](file:///tmp/tcui-preview.png)\n",
+        "file:///tmp/tcui-preview.png\n",
+        "file:///tmp/tcui-second.JPG\n",
+        "https://example.com/remote.png\n",
+        "file:///tmp/not-media.txt\n",
+    );
+
+    // When
+    let sources = local_media_sources(content);
+
+    // Then
+    assert_eq!(
+        sources,
+        [
+            "file:///tmp/tcui-preview.png".to_string(),
+            "file:///tmp/tcui-second.JPG".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn find_artifact_searches_all_catalogs() {
+    with_test_app("find-artifact", |app| {
+        // Given
+        let root = unique_temp_dir("artifact-catalog");
+        let saved = root.join("saved.md");
+        let memory = root.join("memory.md");
+        let vault_root = root.join("vault");
+        let vault_file = vault_root.join("notes/vault.md");
+        std::fs::create_dir_all(vault_file.parent().expect("vault parent"))
+            .expect("create vault dirs");
+        std::fs::write(&saved, "# Saved").expect("write saved artifact");
+        std::fs::write(&memory, "# Memory").expect("write memory artifact");
+        std::fs::write(&vault_file, "# Vault").expect("write vault artifact");
+
+        let temporary = crate::ui::artifact_sidebar::ArtifactEntry::temp_markdown(
+            42,
+            "temp.md".to_string(),
+            "# Temp".to_string(),
+        );
+        let saved_entry = crate::ui::artifact_sidebar::ArtifactEntry::saved_file(saved.clone());
+        let memory_entry = crate::ui::artifact_sidebar::ArtifactEntry::memory_file(
+            std::path::PathBuf::from("memory.md"),
+            "Memory note".to_string(),
+            "# Memory".to_string(),
+            memory,
+        );
+        let vault_entry =
+            crate::ui::artifact_sidebar::ArtifactEntry::vault_file(&vault_root, &vault_file);
+
+        app.ui.tabs[app.ui.active_tab]
+            .temporary_artifacts
+            .push(temporary.clone());
+        app.ui.saved_artifacts.push(saved_entry.clone());
+        app.ui.memory_artifacts.push(memory_entry.clone());
+        app.ui.vault_artifacts.push(vault_entry.clone());
+
+        // When / Then
+        assert_eq!(
+            app.find_artifact(&temporary.handle)
+                .map(|artifact| artifact.name),
+            Some("temp.md".to_string())
+        );
+        assert_eq!(
+            app.find_artifact(&saved_entry.handle)
+                .map(|artifact| artifact.name),
+            Some("saved.md".to_string())
+        );
+        assert_eq!(
+            app.find_artifact(&memory_entry.handle)
+                .map(|artifact| artifact.name),
+            Some("Memory note".to_string())
+        );
+        assert_eq!(
+            app.find_artifact(&vault_entry.handle)
+                .map(|artifact| artifact.name),
+            Some("notes/vault.md".to_string())
+        );
+
+        std::fs::remove_dir_all(root).expect("cleanup artifact catalog");
+    });
+}
+
+#[test]
 fn startup_uses_saved_default_provider_and_model() {
     let _guard = env_lock().lock().expect("env lock poisoned");
     let root = unique_temp_dir("startup-defaults");
@@ -230,7 +317,7 @@ default_model = "deepseek-v4-flash"
     )
     .expect("write config");
 
-    let storage = Arc::new(Storage::new().expect("create storage"));
+    let storage = Storage::new().expect("create storage");
 
     let mut app = TuiApp::new(
         storage,
@@ -286,7 +373,7 @@ selected_model = "llama3.1"
     )
     .expect("write config");
 
-    let storage = Arc::new(Storage::new().expect("create storage"));
+    let storage = Storage::new().expect("create storage");
     let app = TuiApp::new(
         storage,
         Arc::new(tokio::sync::RwLock::new(
@@ -448,6 +535,36 @@ fn theme_command_persists_selection() {
 }
 
 #[test]
+fn send_message_creates_conversation_and_saves_user_message() {
+    with_test_app("send-message", |app| {
+        // Given
+        let initial_conversation = app.ui.tabs[0].active_conversation;
+
+        // When
+        app.send_message("Hello from test".to_string())
+            .expect("send message");
+
+        // Then
+        let conversation_id = app.ui.tabs[0].active_conversation;
+        assert!(conversation_id > 0);
+        if initial_conversation > 0 {
+            assert_eq!(conversation_id, initial_conversation);
+        }
+        let stored = app
+            .storage
+            .get_messages(conversation_id)
+            .expect("stored messages");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].role, "user");
+        assert_eq!(stored[0].content, "Hello from test");
+        assert_eq!(
+            app.ui.tabs[0].generated_title.as_deref(),
+            Some("Hello from test")
+        );
+    });
+}
+
+#[test]
 fn slash_remindme_is_handled_without_model_streaming() {
     with_test_app("slash-remindme", |app| {
         std::env::set_var("TCUI_REMINDER_SYSTEMD_RUN", "true");
@@ -464,6 +581,89 @@ fn slash_remindme_is_handled_without_model_streaming() {
             .contains("Scheduled one-shot reminder"));
 
         std::env::remove_var("TCUI_REMINDER_SYSTEMD_RUN");
+    });
+}
+
+#[test]
+fn settings_popup_state_loads_disabled_items_and_saves_local_fields() {
+    with_test_app("settings-state", |app| {
+        // Given
+        let mut config = AppConfig {
+            default_provider: "Custom".to_string(),
+            default_model: "custom-model".to_string(),
+            theme: "nord".to_string(),
+            providers: vec![crate::config::ProviderConfig {
+                name: "Custom".to_string(),
+                endpoint: "https://example.invalid/v1".to_string(),
+                env_var: "CUSTOM_API_KEY".to_string(),
+                backend_type: "openai".to_string(),
+                auth_type: "api_key".to_string(),
+            }],
+            disabled_providers: vec!["Custom".to_string()],
+            disabled_models: vec!["custom-model".to_string()],
+            ..AppConfig::default()
+        };
+        config.local_inference.enabled = true;
+        config.local_inference.port = 11434;
+
+        // When
+        let mut popup = app.load_settings_popup_state(&config);
+
+        // Then
+        assert!(popup.disabled_providers.contains("Custom"));
+        assert!(popup.disabled_models.contains("custom-model"));
+        assert_eq!(popup.local_port, "11434");
+
+        // When
+        popup.local_port = "12345".to_string();
+        popup.local_health_interval_seconds = "9".to_string();
+        popup.local_connect_timeout_ms = "700".to_string();
+        popup.local_request_timeout_ms = "1700".to_string();
+        popup.local_api_token_env = "LOCAL_TOKEN".to_string();
+        popup.theme = "dracula".to_string();
+        tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(app.save_settings_popup_state(&popup))
+            .expect("save settings");
+
+        // Then
+        let saved = AppConfig::load().expect("load saved settings");
+        assert_eq!(saved.local_inference.port, 12345);
+        assert_eq!(saved.local_inference.health_check_interval_seconds, 9);
+        assert_eq!(saved.local_inference.connect_timeout_ms, 700);
+        assert_eq!(saved.local_inference.request_timeout_ms, 1700);
+        assert_eq!(
+            saved.local_inference.api_token_env.as_deref(),
+            Some("LOCAL_TOKEN")
+        );
+        assert_eq!(saved.theme, "dracula");
+    });
+}
+
+#[test]
+fn apply_theme_selection_updates_popup_and_saved_config() {
+    with_test_app("theme-selection", |app| {
+        // Given
+        app.ui.settings_popup = Some(app.load_settings_popup_state(&AppConfig::default()));
+
+        // When
+        app.apply_theme_selection("nord").expect("apply theme");
+
+        // Then
+        let live_theme = app
+            .config
+            .try_read()
+            .map(|config| config.theme.clone())
+            .expect("read live config");
+        assert_eq!(live_theme, "nord");
+        assert_eq!(
+            app.ui
+                .settings_popup
+                .as_ref()
+                .map(|popup| popup.theme.as_str()),
+            Some("nord")
+        );
+        assert_eq!(AppConfig::load().expect("load config").theme, "nord");
     });
 }
 
@@ -488,7 +688,7 @@ fn startup_loads_persisted_conversation_history() {
     std::env::set_var("XDG_DATA_HOME", &data_home);
     std::env::set_var("XDG_CONFIG_HOME", &config_home);
 
-    let storage = Arc::new(Storage::new().expect("create storage"));
+    let storage = Storage::new().expect("create storage");
     let conversation_id = storage.create_conversation(0).expect("create conversation");
     storage
         .update_conversation_title(conversation_id, "Persisted title")
@@ -533,7 +733,7 @@ fn closing_active_chat_deletes_it_and_loads_the_next_persisted_conversation() {
     std::env::set_var("XDG_DATA_HOME", &data_home);
     std::env::set_var("XDG_CONFIG_HOME", &config_home);
 
-    let storage = Arc::new(Storage::new().expect("create storage"));
+    let storage = Storage::new().expect("create storage");
     let first = storage.create_conversation(0).expect("first conversation");
     storage
         .update_conversation_title(first, "First chat")
@@ -559,7 +759,7 @@ fn closing_active_chat_deletes_it_and_loads_the_next_persisted_conversation() {
         .expect("save second message");
 
     let mut app = TuiApp::new(
-        Arc::clone(&storage),
+        storage,
         Arc::new(tokio::sync::RwLock::new(AppConfig::default())),
         Arc::new(LlmClient::new()),
         None,
@@ -575,7 +775,7 @@ fn closing_active_chat_deletes_it_and_loads_the_next_persisted_conversation() {
     assert_eq!(app.ui.tabs[0].messages.len(), 1);
     assert_eq!(app.ui.tabs[0].messages[0].content, "First message");
     assert_eq!(
-        storage
+        app.storage
             .get_conversations(0)
             .expect("stored conversations")
             .len(),

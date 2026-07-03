@@ -30,13 +30,9 @@ pub(crate) use input::char_to_byte_index;
 use crate::{config::AppConfig, llm::LlmClient, obsidian::Vault, storage::Storage};
 
 pub struct TuiApp {
-    pub storage: Arc<Storage>,
+    pub storage: Storage,
     pub config: Arc<tokio::sync::RwLock<AppConfig>>,
-    #[allow(dead_code)]
-    pub key_store: Arc<crate::config::KeyStore>,
     pub ui: crate::ui::UI,
-    #[allow(dead_code)]
-    pub llm: Arc<LlmClient>,
     pub vault: Option<Arc<Vault>>,
     pub action_tx: tokio::sync::mpsc::UnboundedSender<Action>,
     pub action_rx: tokio::sync::mpsc::UnboundedReceiver<Action>,
@@ -48,12 +44,11 @@ pub struct TuiApp {
 
 impl TuiApp {
     pub fn new(
-        storage: Arc<Storage>,
+        storage: Storage,
         config: Arc<tokio::sync::RwLock<AppConfig>>,
-        llm: Arc<LlmClient>,
+        _llm: Arc<LlmClient>,
         vault: Option<Arc<Vault>>,
     ) -> Self {
-        let key_store = Arc::new(crate::config::KeyStore::new());
         let mut ui = crate::ui::UI::new();
         let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
         let system_prompt = Self::load_system_prompt();
@@ -113,9 +108,7 @@ impl TuiApp {
         let app = Self {
             storage,
             config,
-            key_store,
             ui,
-            llm,
             vault,
             action_tx,
             action_rx,

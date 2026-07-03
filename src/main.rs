@@ -170,7 +170,7 @@ async fn main() -> Result<()> {
     });
 
     let mut app = TuiApp::new(
-        Arc::new(storage),
+        storage,
         Arc::new(RwLock::new(config)),
         Arc::new(LlmClient::new()),
         vault,
