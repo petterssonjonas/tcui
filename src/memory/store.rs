@@ -369,10 +369,29 @@ pub(crate) fn normalize_markdown(markdown: &str) -> String {
 }
 
 pub(crate) fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock before epoch")
-        .as_millis() as i64
+    static LAST_TIMESTAMP_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+    let observed = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before epoch")
+            .as_millis(),
+    )
+    .unwrap_or(i64::MAX);
+    let mut previous = LAST_TIMESTAMP_MS.load(std::sync::atomic::Ordering::Relaxed);
+
+    loop {
+        let timestamp = observed.max(previous.saturating_add(1));
+        match LAST_TIMESTAMP_MS.compare_exchange(
+            previous,
+            timestamp,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        ) {
+            Ok(_) => return timestamp,
+            Err(current) => previous = current,
+        }
+    }
 }
 
 pub(crate) fn is_memory_document_path(path: &Path) -> bool {
