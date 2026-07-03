@@ -161,7 +161,11 @@ async fn main() -> Result<()> {
     let config = AppConfig::load()?;
 
     let vault = config.vault_path.as_ref().and_then(|p| {
-        let v = Vault::new(std::path::PathBuf::from(p));
+        let expanded = crate::app::generated_file::expand_user_path(
+            std::path::Path::new(p),
+            dirs::home_dir().as_deref(),
+        );
+        let v = Vault::new(expanded);
         if v.exists() {
             Some(Arc::new(v))
         } else {

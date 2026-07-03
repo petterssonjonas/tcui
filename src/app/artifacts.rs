@@ -4,23 +4,47 @@ use super::TuiApp;
 
 impl TuiApp {
     pub(crate) fn refresh_vault_artifacts(&mut self) {
-        self.ui.vault_artifacts = self
-            .vault
-            .as_ref()
-            .and_then(|vault| {
-                vault.list_files(None).ok().map(|paths| {
-                    paths
-                        .into_iter()
-                        .map(|path| {
-                            crate::ui::artifact_sidebar::ArtifactEntry::vault_file(
-                                &vault.root,
-                                &path,
-                            )
-                        })
-                        .collect()
-                })
+        let Some(root) = self.configured_vault_root() else {
+            self.ui.vault_available = false;
+            self.ui.vault_artifacts.clear();
+            return;
+        };
+
+        self.ui.vault_available = true;
+        let vault = crate::obsidian::Vault::new(root);
+        self.ui.vault_artifacts = vault
+            .list_files(None)
+            .ok()
+            .map(|paths| {
+                paths
+                    .into_iter()
+                    .map(|path| {
+                        crate::ui::artifact_sidebar::ArtifactEntry::vault_file(&vault.root, &path)
+                    })
+                    .collect()
             })
             .unwrap_or_default();
+    }
+
+    fn configured_vault_root(&self) -> Option<std::path::PathBuf> {
+        if let Some(vault) = &self.vault {
+            return Some(vault.root.clone());
+        }
+
+        let raw_path = self
+            .config
+            .try_read()
+            .ok()
+            .and_then(|config| config.vault_path.clone())?;
+        let trimmed = raw_path.trim().trim_matches(['"', '\'']);
+        if trimmed.is_empty() {
+            return None;
+        }
+        let path = crate::app::generated_file::expand_user_path(
+            std::path::Path::new(trimmed),
+            dirs::home_dir().as_deref(),
+        );
+        path.is_dir().then_some(path)
     }
 
     pub(crate) fn refresh_saved_artifacts(&mut self) {
@@ -46,13 +70,7 @@ impl TuiApp {
                 .vault
                 .as_ref()
                 .map(|v| v.root.clone())
-                .or_else(|| {
-                    self.config
-                        .try_read()
-                        .ok()
-                        .and_then(|cfg| cfg.vault_path.clone())
-                        .map(std::path::PathBuf::from)
-                })
+                .or_else(|| self.configured_vault_root())
                 .unwrap_or_else(|| {
                     crate::storage::paths::TcuiDataPaths::discover()
                         .root
@@ -118,7 +136,7 @@ impl TuiApp {
             ));
             return;
         }
-        if artifact.is_markdown() && self.vault.is_some() {
+        if artifact.is_markdown() && self.configured_vault_root().is_some() {
             if self.save_temp_artifact_to_vault(&artifact).is_ok() {
                 self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::CloudConnected;
                 self.ui.connection_message = Some(format!("Saved {} to vault", artifact.name));
@@ -159,9 +177,10 @@ impl TuiApp {
         &mut self,
         artifact: &crate::ui::artifact_sidebar::ArtifactEntry,
     ) -> color_eyre::Result<()> {
-        let Some(vault) = &self.vault else {
+        let Some(root) = self.configured_vault_root() else {
             return Ok(());
         };
+        let vault = crate::obsidian::Vault::new(root);
         let content = artifact.content.clone().unwrap_or_default();
         vault.write_file(std::path::Path::new(&artifact.name), &content)?;
         self.remove_temporary_artifact(&artifact.handle);
@@ -174,9 +193,10 @@ impl TuiApp {
         handle: &crate::ui::artifact_sidebar::ArtifactHandle,
         saved_path: &std::path::Path,
     ) {
-        let Some(vault) = &self.vault else {
+        let Some(root) = self.configured_vault_root() else {
             return;
         };
+        let vault = crate::obsidian::Vault::new(root);
         if saved_path.starts_with(&vault.root) {
             self.remove_temporary_artifact(handle);
             self.refresh_artifact_sidebar_catalogs();
@@ -228,8 +248,8 @@ impl TuiApp {
                 self.refresh_memory_artifacts();
             }
             crate::ui::artifact_sidebar::ArtifactHandle::Vault(path) => {
-                if let Some(vault) = &self.vault {
-                    let full_path = vault.root.join(path);
+                if let Some(root) = self.configured_vault_root() {
+                    let full_path = root.join(path);
                     let _ = std::fs::remove_file(full_path);
                     self.refresh_vault_artifacts();
                 }

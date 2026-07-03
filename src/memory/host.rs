@@ -158,12 +158,14 @@ fn configured_store(config: &crate::config::AppConfig) -> Result<MemoryStore, Me
     if !config.memory.enabled {
         return Err(MemoryError::Invalid("memory is disabled".to_string()));
     }
-    let vault = config
+    let raw_vault = config
         .vault_path
         .as_deref()
         .map(Path::new)
         .ok_or_else(|| MemoryError::Invalid("Obsidian vault is not configured".to_string()))?;
-    MemoryStore::open(vault, &MemoryStore::default_cache_path())
+    let vault =
+        crate::app::generated_file::expand_user_path(raw_vault, dirs::home_dir().as_deref());
+    MemoryStore::open(&vault, &MemoryStore::default_cache_path())
 }
 
 fn bounded_memory_context(markdown: &str, max_chars: usize) -> String {
