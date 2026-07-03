@@ -1,10 +1,10 @@
 .gitnexus
 target/
+.opencode/
 .omo/
 .sisyphus/
 .claude/
 .debug-journal.md
-scratchpad.md
 temp/
 TODO.md
 PLAN.md
