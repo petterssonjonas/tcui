@@ -29,6 +29,7 @@ pub(crate) struct MemoryPaths {
 
 impl MemoryPaths {
     pub(crate) fn new(vault: &Path) -> Result<Self, PathError> {
+        std::fs::create_dir_all(vault)?;
         let vault = std::fs::canonicalize(vault)?;
         let legacy_memories = vault.join("memories");
         std::fs::create_dir_all(&legacy_memories)?;

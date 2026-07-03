@@ -199,6 +199,19 @@ impl TuiApp {
                 }
                 _ => None,
             }
+        } else if self.ui.delete_confirm.is_some() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    if let Some(handle) = self.ui.delete_confirm.take() {
+                        self.delete_artifact(handle);
+                    }
+                    None
+                }
+                _ => {
+                    self.ui.delete_confirm = None;
+                    None
+                }
+            }
         } else if self.ui.show_settings {
             if self
                 .ui
@@ -588,19 +601,27 @@ impl TuiApp {
     pub(crate) fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> Option<Action> {
         use crossterm::event::{MouseButton, MouseEventKind};
 
-        if self.ui.editor_popup.is_some() {
-            return None;
-        }
-
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.handle_mouse_click(mouse.column, mouse.row)
             }
             MouseEventKind::ScrollUp => {
+                if self.ui.editor_popup.is_some() {
+                    if let Some(editor) = self.ui.editor_popup.as_mut() {
+                        editor.send_scroll(false);
+                    }
+                    return None;
+                }
                 self.handle_mouse_scroll(mouse.column, mouse.row, mouse.modifiers, false);
                 None
             }
             MouseEventKind::ScrollDown => {
+                if self.ui.editor_popup.is_some() {
+                    if let Some(editor) = self.ui.editor_popup.as_mut() {
+                        editor.send_scroll(true);
+                    }
+                    return None;
+                }
                 self.handle_mouse_scroll(mouse.column, mouse.row, mouse.modifiers, true);
                 None
             }
@@ -779,6 +800,23 @@ impl TuiApp {
         let pos = ratatui::layout::Position::new(col, row);
         let area = self.ui.last_area?;
 
+        if self.ui.delete_confirm.is_some() {
+            if let Some(areas) = self.ui.delete_confirm_areas {
+                if areas.yes.contains(pos) {
+                    if let Some(handle) = self.ui.delete_confirm.take() {
+                        self.delete_artifact(handle);
+                    }
+                    return None;
+                }
+                if areas.no.contains(pos) {
+                    self.ui.delete_confirm = None;
+                    return None;
+                }
+            }
+            self.ui.delete_confirm = None;
+            return None;
+        }
+
         if let Some(dialog) = &self.ui.save_file_dialog {
             let popup_area = crate::ui::modals::save_file::SaveFileDialog::popup_area(area);
             if popup_area.contains(pos) {
@@ -854,18 +892,6 @@ impl TuiApp {
                         .is_some_and(|area| area.contains(pos))
                     {
                         self.ui.artifact_viewer = None;
-                        return None;
-                    }
-                    if viewer.hit_areas.save.is_some_and(|area| area.contains(pos)) {
-                        self.prepare_artifact_save(viewer.handle().clone());
-                        return None;
-                    }
-                    if viewer
-                        .hit_areas
-                        .delete
-                        .is_some_and(|area| area.contains(pos))
-                    {
-                        self.delete_artifact(viewer.handle().clone());
                         return None;
                     }
                     return None;
@@ -1664,7 +1690,7 @@ impl TuiApp {
                     self.prepare_artifact_save(handle);
                 }
                 crate::ui::artifact_sidebar::ArtifactSidebarAction::Delete(handle) => {
-                    self.delete_artifact(handle);
+                    self.ui.delete_confirm = Some(handle);
                 }
             }
             return None;

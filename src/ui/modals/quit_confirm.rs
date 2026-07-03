@@ -1,7 +1,10 @@
 #![allow(dead_code)]
 use ratatui::{prelude::*, widgets::*, Frame};
 
-pub struct QuitConfirmModal;
+pub struct QuitConfirmModal {
+    title: String,
+    message: String,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct QuitConfirmAreas {
@@ -11,21 +14,33 @@ pub struct QuitConfirmAreas {
 
 impl QuitConfirmModal {
     pub fn new() -> Self {
-        Self
+        Self {
+            title: "Quit".to_string(),
+            message: "Are you sure you want to quit?".to_string(),
+        }
+    }
+
+    pub fn title(mut self, title: &str) -> Self {
+        self.title = title.to_string();
+        self
+    }
+
+    pub fn message(mut self, message: &str) -> Self {
+        self.message = message.to_string();
+        self
     }
 
     pub fn render(&self, f: &mut Frame) -> QuitConfirmAreas {
         let area = f.area();
         let popup_area = Self::centered_rect(40, 20, area);
 
-        // Clear background
         f.render_widget(
             Block::default().style(Style::default().bg(Color::Black)),
             area,
         );
 
         let block = Block::default()
-            .title(" Quit ")
+            .title(format!(" {} ", self.title))
             .title_style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Red))
@@ -33,7 +48,7 @@ impl QuitConfirmModal {
 
         let text = vec![
             Line::from(""),
-            Line::from("Are you sure you want to quit?").alignment(Alignment::Center),
+            Line::from(self.message.clone()).alignment(Alignment::Center),
             Line::from(""),
             Line::from(vec![
                 Span::styled(
@@ -56,13 +71,12 @@ impl QuitConfirmModal {
         f.render_widget(Clear, popup_area);
         f.render_widget(paragraph, popup_area);
 
-        // Compute button hit areas relative to popup
-        let yes_width = 7u16; // " [Y]es "
-        let no_width = 6u16; // " [N]o "
+        let yes_width = 7u16;
+        let no_width = 6u16;
         let gap = 5u16;
         let total_width = yes_width + gap + no_width;
         let start_x = popup_area.x + (popup_area.width.saturating_sub(total_width)) / 2;
-        let button_y = popup_area.y + 4; // line 4 of the popup content
+        let button_y = popup_area.y + 4;
 
         let yes = Rect::new(start_x, button_y, yes_width, 1);
         let no = Rect::new(start_x + yes_width + gap, button_y, no_width, 1);

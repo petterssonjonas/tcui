@@ -131,7 +131,8 @@ impl ArtifactEntry {
             ArtifactOrigin::Temporary if self.is_markdown() && has_vault => Some("Vault"),
             ArtifactOrigin::Temporary => Some("Save"),
             ArtifactOrigin::Memory => Some("Exp"),
-            ArtifactOrigin::Saved | ArtifactOrigin::Vault => None,
+            ArtifactOrigin::Saved => Some("Export"),
+            ArtifactOrigin::Vault => None,
         }
     }
 

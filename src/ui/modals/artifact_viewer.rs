@@ -52,76 +52,40 @@ impl ArtifactViewerState {
     pub fn render(&mut self, f: &mut Frame, area: Rect, props: ArtifactViewerProps<'_>) {
         let popup_area = popup_area(area);
         let block = Block::default()
-            .title(format!(" {} ", self.artifact.name))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
             .style(Style::default().bg(Color::Black));
         let inner = block.inner(popup_area);
         f.render_widget(Clear, popup_area);
         f.render_widget(block, popup_area);
+        let title_y = popup_area.y;
 
-        let layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Min(0),
-                Constraint::Length(1),
-            ])
-            .margin(1)
-            .split(inner);
-
-        let mut x = layout[0].x;
-        let save = if self.artifact.can_save(true) {
-            let label = if self.artifact.is_markdown() {
-                "Save"
-            } else {
-                "Export"
-            };
-            let rect = Rect::new(x, layout[0].y, label.len() as u16 + 2, 1);
-            x = x.saturating_add(rect.width + 1);
-            f.render_widget(
-                Paragraph::new(format!("[{label}]")).style(Style::default().fg(Color::Green)),
-                rect,
-            );
-            Some(rect)
-        } else {
-            None
-        };
-        let delete = if self.artifact.can_delete() {
-            let rect = Rect::new(x, layout[0].y, 5, 1);
-            f.render_widget(
-                Paragraph::new("[Del]").style(Style::default().fg(Color::Red)),
-                rect,
-            );
-            Some(rect)
-        } else {
-            None
-        };
-
-        let badge = format!(
-            "{} · {}",
-            self.artifact.origin_label(),
-            kind_label(self.artifact.kind)
-        );
-        let close_x = layout[0].x + layout[0].width.saturating_sub(3);
-        let close = Rect::new(close_x, layout[0].y, 3, 1);
+        let name_label = format!(" {} ", self.artifact.name);
         f.render_widget(
-            Paragraph::new("[x]").style(Style::default().fg(Color::Gray)),
-            close,
+            Paragraph::new(name_label).style(Style::default().fg(Color::Cyan)),
+            Rect::new(
+                popup_area.x + 1,
+                title_y,
+                self.artifact.name.len() as u16 + 2,
+                1,
+            ),
         );
 
-        let badge_area = Rect::new(
-            layout[0].x,
-            layout[0].y,
-            layout[0].width.saturating_sub(5),
-            1,
-        );
+        let center_label = " Viewer ";
+        let center_x = popup_area.x + popup_area.width / 2 - center_label.len() as u16 / 2;
         f.render_widget(
-            Paragraph::new(badge)
-                .style(Style::default().fg(Color::DarkGray))
-                .alignment(Alignment::Right),
-            badge_area,
+            Paragraph::new(center_label).style(Style::default().fg(Color::Cyan)),
+            Rect::new(center_x, title_y, center_label.len() as u16, 1),
         );
+
+        let right_label = " Esc to close [x]";
+        let right_len = right_label.len() as u16;
+        let right_x = popup_area.x + popup_area.width.saturating_sub(right_len);
+        f.render_widget(
+            Paragraph::new(right_label).style(Style::default().fg(Color::Gray)),
+            Rect::new(right_x, title_y, right_len, 1),
+        );
+        let close = Rect::new(right_x + right_len - 3, title_y, 3, 1);
 
         match self.artifact.kind {
             ArtifactKind::Image => {
@@ -136,13 +100,13 @@ impl ArtifactViewerState {
                     }
                 }
                 if let Some(state) = &mut self.image_state {
-                    state.render(f, layout[1]);
+                    state.render(f, inner);
                 } else {
                     f.render_widget(
                         Paragraph::new("Image preview unavailable")
                             .alignment(Alignment::Center)
                             .style(Style::default().fg(Color::DarkGray)),
-                        layout[1],
+                        inner,
                     );
                 }
             }
@@ -161,32 +125,25 @@ impl ArtifactViewerState {
                 let rendered = MarkdownRenderer::new(props.terminal_capabilities).render(
                     content,
                     props.markdown_mode,
-                    layout[1].width.saturating_sub(2) as usize,
+                    inner.width.saturating_sub(2) as usize,
                     false,
                     props.kitty_heading_downscale,
                     !props.image_protocol.eq_ignore_ascii_case("off"),
                 );
-                self.clamp_scroll(rendered.lines.len(), usize::from(layout[1].height));
+                self.clamp_scroll(rendered.lines.len(), usize::from(inner.height));
                 f.render_widget(
                     Paragraph::new(rendered.lines)
                         .wrap(Wrap { trim: false })
                         .scroll((self.scroll as u16, 0)),
-                    layout[1],
+                    inner,
                 );
             }
         }
 
-        f.render_widget(
-            Paragraph::new("Esc to close----[x]")
-                .style(Style::default().fg(Color::DarkGray))
-                .alignment(Alignment::Center),
-            layout[2],
-        );
-
         self.hit_areas = ArtifactViewerHitAreas {
             close: Some(close),
-            save,
-            delete,
+            save: None,
+            delete: None,
         };
     }
 }

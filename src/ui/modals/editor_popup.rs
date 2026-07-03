@@ -5,7 +5,7 @@ use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use portable_pty::{Child, CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
@@ -18,6 +18,7 @@ const OUTPUT_CHANNEL_SIZE: usize = 64;
 const INPUT_CHANNEL_SIZE: usize = 64;
 
 pub struct EditorPopupState {
+    artifact_name: String,
     parser: Arc<RwLock<Parser>>,
     input_tx: Sender<Bytes>,
     output_rx: Receiver<Vec<u8>>,
@@ -30,6 +31,11 @@ pub struct EditorPopupState {
 
 impl EditorPopupState {
     pub fn new(path: &std::path::Path) -> Result<Self, String> {
+        let artifact_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("editor")
+            .to_string();
         let editor_parts = resolve_editor()?;
         let pty_system = NativePtySystem::default();
         let initial_rows: u16 = 24;
@@ -73,6 +79,7 @@ impl EditorPopupState {
         spawn_writer(writer, input_rx);
 
         Ok(Self {
+            artifact_name,
             parser,
             input_tx,
             output_rx,
@@ -92,9 +99,8 @@ impl EditorPopupState {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
             .style(Style::default().bg(Color::Black));
-        f.render_widget(block.clone(), popup_area);
-
         let inner = block.inner(popup_area);
+        f.render_widget(block, popup_area);
         let rows = inner.height.max(1);
         let cols = inner.width.max(1);
         if (rows, cols) != self.current_size {
@@ -106,14 +112,32 @@ impl EditorPopupState {
         let pseudo_term = PseudoTerminal::new(screen);
         f.render_widget(pseudo_term, inner);
 
-        let close_x = popup_area.x + popup_area.width.saturating_sub(4);
-        let close_y = popup_area.y;
-        let close_area = Rect::new(close_x, close_y, 3, 1);
+        let title_y = popup_area.y;
+
+        let name_label = format!(" {} ", self.artifact_name);
         f.render_widget(
-            Paragraph::new("[x]")
-                .style(Style::default().fg(Color::Gray))
-                .alignment(Alignment::Right),
-            Rect::new(close_x, close_y, 3, 1),
+            Paragraph::new(name_label).style(Style::default().fg(Color::Cyan)),
+            Rect::new(
+                popup_area.x + 1,
+                title_y,
+                self.artifact_name.len() as u16 + 2,
+                1,
+            ),
+        );
+
+        let center_label = " Editor ";
+        let center_x = popup_area.x + popup_area.width / 2 - center_label.len() as u16 / 2;
+        f.render_widget(
+            Paragraph::new(center_label).style(Style::default().fg(Color::Cyan)),
+            Rect::new(center_x, title_y, center_label.len() as u16, 1),
+        );
+
+        let close_len: u16 = 3;
+        let close_x = popup_area.x + popup_area.width.saturating_sub(close_len + 1);
+        let close_area = Rect::new(close_x, title_y, close_len, 1);
+        f.render_widget(
+            Paragraph::new("[x]").style(Style::default().fg(Color::Gray)),
+            close_area,
         );
         self.close_hit_area = Some(close_area);
     }
@@ -166,6 +190,15 @@ impl EditorPopupState {
 
     pub fn close(&mut self) {
         let _ = self.child.kill();
+    }
+
+    pub fn send_scroll(&mut self, down: bool) {
+        let seq = if down {
+            vec![0x1b, b'[', b'B']
+        } else {
+            vec![0x1b, b'[', b'A']
+        };
+        let _ = self.input_tx.try_send(Bytes::from(seq));
     }
 
     pub fn close_area(&self) -> Option<Rect> {

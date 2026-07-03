@@ -82,6 +82,29 @@ impl TuiApp {
         let Some(artifact) = self.find_artifact(&handle) else {
             return;
         };
+        if matches!(
+            artifact.origin,
+            crate::ui::artifact_sidebar::ArtifactOrigin::Saved
+        ) {
+            let base_dir = self
+                .config
+                .try_read()
+                .ok()
+                .and_then(|cfg| cfg.artifact_save_dir.clone())
+                .map(|path| {
+                    crate::app::generated_file::expand_user_path(
+                        std::path::Path::new(&path),
+                        dirs::home_dir().as_deref(),
+                    )
+                })
+                .or_else(dirs::download_dir)
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            self.ui.save_file_dialog = Some(crate::ui::modals::save_file::SaveFileDialog::new(
+                &artifact, base_dir, "Export",
+            ));
+            return;
+        }
         if artifact.is_markdown() && self.vault.is_some() {
             if self.save_temp_artifact_to_vault(&artifact).is_ok() {
                 self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::CloudConnected;

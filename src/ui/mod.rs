@@ -77,6 +77,8 @@ pub struct UI {
     pub connection_message: Option<String>,
     pub toast: Option<Toast>,
     pub modal_areas: Option<ModalAreas>,
+    pub delete_confirm: Option<crate::ui::artifact_sidebar::ArtifactHandle>,
+    pub delete_confirm_areas: Option<ModalAreas>,
     pub settings_tab_areas: Option<Vec<Rect>>,
     pub status_bar_areas: Option<StatusBarAreas>,
     pub artifact_sidebar_state: ArtifactSidebarState,
@@ -246,6 +248,8 @@ impl UI {
             connection_message: None,
             toast: None,
             modal_areas: None,
+            delete_confirm: None,
+            delete_confirm_areas: None,
             settings_tab_areas: None,
             status_bar_areas: None,
             artifact_sidebar_state: ArtifactSidebarState::default(),
@@ -523,6 +527,17 @@ impl UI {
                     });
                 }
             }
+        }
+
+        if self.delete_confirm.is_some() {
+            let modal = QuitConfirmModal::new()
+                .title("Delete")
+                .message("Delete this artifact?");
+            let areas = modal.render(f);
+            self.delete_confirm_areas = Some(ModalAreas {
+                yes: areas.yes,
+                no: areas.no,
+            });
         }
     }
 
