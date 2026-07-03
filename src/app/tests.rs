@@ -1084,3 +1084,54 @@ fn move_input_cursor_respects_content_bounds() {
         assert_eq!(app.ui.tabs[0].input_cursor, 2);
     });
 }
+
+#[cfg(feature = "memory")]
+#[tokio::test]
+async fn refresh_artifact_sidebar_action_populates_memory_artifacts() {
+    let _guard = env_lock().lock().expect("env lock poisoned");
+    let root = unique_temp_dir("memory-sidebar");
+    let data_home = root.join("data-home");
+    let config_home = root.join("config-home");
+    let vault = root.join("vault");
+    std::fs::create_dir_all(&data_home).expect("create data dir");
+    std::fs::create_dir_all(&config_home).expect("create config dir");
+    std::fs::create_dir_all(&vault).expect("create vault dir");
+    std::env::set_var("XDG_DATA_HOME", &data_home);
+    std::env::set_var("XDG_CONFIG_HOME", &config_home);
+
+    let mut config = AppConfig::default();
+    config.memory.enabled = true;
+    config.vault_path = Some(vault.to_string_lossy().to_string());
+    config.save().expect("save config");
+
+    let storage = Storage::new().expect("create storage");
+    let mut app = TuiApp::new(
+        storage,
+        Arc::new(tokio::sync::RwLock::new(config)),
+        Arc::new(crate::llm::LlmClient::new()),
+        Some(Arc::new(crate::obsidian::Vault::new(vault.clone()))),
+    );
+
+    let store =
+        crate::memory::MemoryStore::open(&vault, &crate::memory::MemoryStore::default_cache_path())
+            .expect("open memory store");
+    store
+        .remember("User prefers Rust for systems work.")
+        .expect("save memory");
+
+    assert!(app.ui.memory_artifacts.is_empty());
+
+    app.dispatch(Action::RefreshArtifactSidebar)
+        .await
+        .expect("dispatch refresh");
+
+    assert_eq!(app.ui.memory_artifacts.len(), 1);
+    assert_eq!(
+        app.ui.memory_artifacts[0].content.as_deref(),
+        Some("User prefers Rust for systems work.")
+    );
+
+    std::fs::remove_dir_all(&root).expect("cleanup temp dir");
+    std::env::remove_var("XDG_DATA_HOME");
+    std::env::remove_var("XDG_CONFIG_HOME");
+}

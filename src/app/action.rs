@@ -58,4 +58,5 @@ pub enum Action {
     ShowMcpPopup,
     ShowLocalSearch(String),
     CloseListPopup,
+    RefreshArtifactSidebar,
 }

@@ -58,10 +58,11 @@ impl TuiApp {
             self.ui.memory_artifacts = documents
                 .into_iter()
                 .map(|(path, document)| {
+                    let body = strip_frontmatter(&document.markdown);
                     crate::ui::artifact_sidebar::ArtifactEntry::memory_file(
                         document.logical_path,
                         document.title,
-                        document.markdown,
+                        body.to_string(),
                         path,
                     )
                 })
@@ -306,4 +307,15 @@ fn is_artifact_image(source: &str) -> bool {
             .as_deref(),
         Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp")
     )
+}
+
+fn strip_frontmatter(markdown: &str) -> &str {
+    let trimmed = markdown.trim_start();
+    let Some(after_dashes) = trimmed.strip_prefix("---") else {
+        return markdown;
+    };
+    let Some(end) = after_dashes.find("\n---") else {
+        return markdown;
+    };
+    after_dashes[end + 4..].trim_start_matches('\n').trim_end()
 }
