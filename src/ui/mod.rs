@@ -69,6 +69,7 @@ pub struct UI {
     pub save_file_dialog: Option<SaveFileDialog>,
     pub export_dialog: Option<ExportDialog>,
     pub artifact_viewer: Option<ArtifactViewerState>,
+    pub editor_popup: Option<crate::ui::modals::editor_popup::EditorPopupState>,
     pub list_popup: Option<ListPopup>,
     pub last_area: Option<Rect>,
     pub chat_area: Option<Rect>,
@@ -76,9 +77,12 @@ pub struct UI {
     pub connection_message: Option<String>,
     pub toast: Option<Toast>,
     pub modal_areas: Option<ModalAreas>,
+    pub delete_confirm: Option<crate::ui::artifact_sidebar::ArtifactHandle>,
+    pub delete_confirm_areas: Option<ModalAreas>,
     pub settings_tab_areas: Option<Vec<Rect>>,
     pub status_bar_areas: Option<StatusBarAreas>,
     pub artifact_sidebar_state: ArtifactSidebarState,
+    pub vault_available: bool,
     pub vault_artifacts: Vec<ArtifactEntry>,
     pub saved_artifacts: Vec<ArtifactEntry>,
     pub memory_artifacts: Vec<ArtifactEntry>,
@@ -237,6 +241,7 @@ impl UI {
             save_file_dialog: None,
             export_dialog: None,
             artifact_viewer: None,
+            editor_popup: None,
             list_popup: None,
             last_area: None,
             chat_area: None,
@@ -244,9 +249,12 @@ impl UI {
             connection_message: None,
             toast: None,
             modal_areas: None,
+            delete_confirm: None,
+            delete_confirm_areas: None,
             settings_tab_areas: None,
             status_bar_areas: None,
             artifact_sidebar_state: ArtifactSidebarState::default(),
+            vault_available: false,
             vault_artifacts: vec![],
             saved_artifacts: vec![],
             memory_artifacts: vec![],
@@ -356,7 +364,7 @@ impl UI {
                     &self.saved_artifacts,
                     &self.memory_artifacts,
                     &self.vault_artifacts,
-                    !self.vault_artifacts.is_empty(),
+                    self.vault_available,
                     &mut self.artifact_sidebar_state,
                 );
                 artifact_sidebar.render(f, content_layout[2]);
@@ -499,6 +507,10 @@ impl UI {
             );
         }
 
+        if let (Some(editor), Some(chat_area)) = (&mut self.editor_popup, self.chat_area) {
+            editor.render(f, chat_area);
+        }
+
         if let Some(ref popup) = self.list_popup {
             popup.render(f, area);
         }
@@ -517,6 +529,17 @@ impl UI {
                     });
                 }
             }
+        }
+
+        if self.delete_confirm.is_some() {
+            let modal = QuitConfirmModal::new()
+                .title("Delete")
+                .message("Delete this artifact?");
+            let areas = modal.render(f);
+            self.delete_confirm_areas = Some(ModalAreas {
+                yes: areas.yes,
+                no: areas.no,
+            });
         }
     }
 

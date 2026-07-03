@@ -41,7 +41,14 @@ impl TuiApp {
             })?;
 
             tokio::select! {
-                _ = tick.tick() => {}
+                _ = tick.tick() => {
+                    if let Some(editor) = self.ui.editor_popup.as_mut() {
+                        let done = editor.poll_output();
+                        if done {
+                            self.ui.editor_popup = None;
+                        }
+                    }
+                }
                 maybe_event = reader.next() => {
                     match maybe_event {
                         Some(Ok(crossterm::event::Event::Key(key))) => {
@@ -534,6 +541,10 @@ impl TuiApp {
             let skills =
                 crate::skill_runtime::prepare(&config_snapshot, &user_request, &request).await;
             runtime_system_prompt.push_str(&skills.context);
+            let now = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
+            runtime_system_prompt.push_str(&format!(
+                "\n\nCurrent date and time: {now}. Use this when referencing relative dates like 'today' or 'yesterday'."
+            ));
             request.messages.extend(skills.messages);
             for notice in skills.notices {
                 let _ = action_tx.send(Action::UpdateStatus(notice));
@@ -673,6 +684,9 @@ impl TuiApp {
                 }
                 crate::llm::chat::ChatStreamEvent::Thinking(content) => {
                     let _ = event_tx.send(Action::StreamThinking(tab_id, assistant_idx, content));
+                }
+                crate::llm::chat::ChatStreamEvent::Title(title) => {
+                    let _ = event_tx.send(Action::SetTitle(title));
                 }
             })
             .await;

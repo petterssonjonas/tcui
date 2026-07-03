@@ -80,3 +80,34 @@ pub struct DiffLine {
     pub sign: String,
     pub text: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::SafetyLayer;
+    use std::path::Path;
+
+    #[test]
+    fn backup_preserves_original_content_and_diff_captures_changes() {
+        let backup_dir =
+            std::env::temp_dir().join(format!("tcui-safety-{}", rand::random::<u64>()));
+        let safety = SafetyLayer::new(backup_dir.clone());
+        let original = "line one\nline two\n";
+        let updated = "line one\nline two changed\nline three\n";
+
+        let backup_path = safety
+            .create_backup(Path::new("note.md"), original)
+            .expect("backup created");
+
+        assert!(backup_path.starts_with(&backup_dir));
+        assert_eq!(
+            std::fs::read_to_string(&backup_path).expect("read backup"),
+            original
+        );
+
+        let diff = safety.generate_diff(original, updated);
+        assert!(diff.contains("-line two"));
+        assert!(diff.contains("+line two changed"));
+
+        std::fs::remove_dir_all(&backup_dir).expect("cleanup");
+    }
+}

@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 pub(crate) fn launch_editor(path: &std::path::Path) -> Result<(), String> {
     let editor = std::env::var("EDITOR")
         .ok()
@@ -21,6 +22,7 @@ pub(crate) fn launch_editor(path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) fn preferred_terminal() -> Option<String> {
     if let Some(terminal) = std::env::var_os("TERMINAL")
         .and_then(|value| value.into_string().ok())
@@ -44,6 +46,7 @@ pub(crate) fn preferred_terminal() -> Option<String> {
     .map(ToString::to_string)
 }
 
+#[allow(dead_code)]
 pub(crate) fn spawn_terminal_command(terminal: &str, command_line: &str) -> std::io::Result<()> {
     let mut command = std::process::Command::new(terminal);
     match terminal {
@@ -73,6 +76,7 @@ pub(crate) fn command_exists(command: &str) -> bool {
         .any(|directory| directory.join(command).is_file())
 }
 
+#[allow(dead_code)]
 pub(crate) fn shell_escape(path: &std::path::Path) -> String {
     let value = path.display().to_string();
     format!("'{}'", value.replace('\'', "'\"'\"'"))

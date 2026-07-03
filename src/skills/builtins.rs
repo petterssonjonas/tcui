@@ -37,7 +37,7 @@ pub(crate) const BUILTINS: &[Builtin] = &[
     },
     Builtin {
         name: "obsidian",
-        description: "Search, read, or explicitly update Obsidian notes through live MCP tools.",
+        description: "Search, read, or explicitly update Obsidian notes in the configured vault.",
         source: include_str!("../../skills/obsidian/SKILL.md"),
     },
     Builtin {

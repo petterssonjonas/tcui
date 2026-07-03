@@ -299,7 +299,7 @@ struct ActionLabels {
 fn action_labels(pinned: bool) -> ActionLabels {
     ActionLabels {
         pin: if pinned { "[Unpin]" } else { "[Pin]" },
-        export: "[Exp]",
+        export: "[Export]",
         delete: "[Del]",
     }
 }
@@ -443,7 +443,7 @@ mod tests {
         assert!(screen.contains("Pinned chats"));
         assert!(screen.contains("Recent chats"));
         assert!(screen.contains("[Pin]") || screen.contains("[Unpin]"));
-        assert!(screen.contains("[Exp]"));
+        assert!(screen.contains("[Export]"));
         assert!(screen.contains("[Del]"));
     }
 }

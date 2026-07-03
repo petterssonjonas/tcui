@@ -4,8 +4,7 @@ use std::path::{Path, PathBuf};
 use ratatui::{prelude::*, widgets::*, Frame};
 
 const ROW_HEIGHT: u16 = 3;
-const TEMP_MAX_ROWS: usize = 3;
-const SECTION_MAX_ROWS: usize = 6;
+const FLAT_SECTION_MAX_ROWS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ArtifactHandle {
@@ -131,7 +130,8 @@ impl ArtifactEntry {
             ArtifactOrigin::Temporary if self.is_markdown() && has_vault => Some("Vault"),
             ArtifactOrigin::Temporary => Some("Save"),
             ArtifactOrigin::Memory => Some("Exp"),
-            ArtifactOrigin::Saved | ArtifactOrigin::Vault => None,
+            ArtifactOrigin::Saved => Some("Export"),
+            ArtifactOrigin::Vault => None,
         }
     }
 
@@ -339,12 +339,24 @@ impl<'a> ArtifactSidebar<'a> {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        let temp_body_height =
-            section_body_height(self.state.temp_collapsed, TEMP_MAX_ROWS, inner.height);
-        let saved_body_height =
-            section_body_height(self.state.saved_collapsed, SECTION_MAX_ROWS, inner.height);
-        let memory_body_height =
-            section_body_height(self.state.memory_collapsed, SECTION_MAX_ROWS, inner.height);
+        let temp_body_height = section_body_height(
+            self.state.temp_collapsed,
+            self.temporary.len(),
+            FLAT_SECTION_MAX_ROWS,
+            inner.height,
+        );
+        let saved_body_height = section_body_height(
+            self.state.saved_collapsed,
+            self.saved.len(),
+            FLAT_SECTION_MAX_ROWS,
+            inner.height,
+        );
+        let memory_body_height = section_body_height(
+            self.state.memory_collapsed,
+            self.memories.len(),
+            FLAT_SECTION_MAX_ROWS,
+            inner.height,
+        );
         let vault_body_constraint = if self.state.vault_collapsed {
             Constraint::Length(0)
         } else {
@@ -375,7 +387,7 @@ impl<'a> ArtifactSidebar<'a> {
                 entries: self.temporary,
                 scroll: self.state.temp_scroll,
                 collapsed: self.state.temp_collapsed,
-                max_rows: TEMP_MAX_ROWS,
+                max_rows: FLAT_SECTION_MAX_ROWS,
             },
         );
         self.render_flat_section(
@@ -384,11 +396,11 @@ impl<'a> ArtifactSidebar<'a> {
             chunks[3],
             SectionConfig {
                 section: ArtifactSection::Saved,
-                title: "Saved Artifacts",
+                title: "Saved files",
                 entries: self.saved,
                 scroll: self.state.saved_scroll,
                 collapsed: self.state.saved_collapsed,
-                max_rows: SECTION_MAX_ROWS,
+                max_rows: FLAT_SECTION_MAX_ROWS,
             },
         );
         self.render_flat_section(
@@ -401,7 +413,7 @@ impl<'a> ArtifactSidebar<'a> {
                 entries: self.memories,
                 scroll: self.state.memory_scroll,
                 collapsed: self.state.memory_collapsed,
-                max_rows: SECTION_MAX_ROWS,
+                max_rows: FLAT_SECTION_MAX_ROWS,
             },
         );
         self.render_vault_section(f, chunks[6], chunks[7]);
@@ -565,8 +577,8 @@ impl<'a> ArtifactSidebar<'a> {
 
         let mut x = area.x;
         let y = area.y + 2;
-        let open = button_area(&mut x, y, "Open");
-        f.render_widget(button("Open", theme.info), open);
+        let open = button_area(&mut x, y, "View");
+        f.render_widget(button("View", theme.info), open);
 
         let edit = if matches!(entry.origin, ArtifactOrigin::Saved) {
             let rect = button_area(&mut x, y, "Edit");
@@ -776,11 +788,19 @@ fn is_hidden_component(name: &str) -> bool {
     name.starts_with('.')
 }
 
-fn section_body_height(collapsed: bool, max_rows: usize, available: u16) -> u16 {
+fn section_body_height(
+    collapsed: bool,
+    entry_count: usize,
+    max_rows: usize,
+    available: u16,
+) -> u16 {
     if collapsed {
         0
+    } else if entry_count == 0 {
+        available.min(1)
     } else {
-        available.min((max_rows as u16).saturating_mul(ROW_HEIGHT))
+        let rows = entry_count.min(max_rows) as u16;
+        available.min(rows.saturating_mul(ROW_HEIGHT))
     }
 }
 
@@ -945,5 +965,58 @@ mod tests {
 
         state.toggle_vault_dir(&path);
         assert!(!state.collapsed_vault_dirs.contains(&path));
+    }
+
+    #[test]
+    fn empty_flat_sections_use_one_row_and_vault_gets_remaining_space() {
+        let mut state = ArtifactSidebarState::default();
+        let mut sidebar = ArtifactSidebar::new(&[], &[], &[], &[], true, &mut state);
+        let mut terminal = Terminal::new(TestBackend::new(40, 30)).expect("terminal");
+
+        terminal
+            .draw(|frame| sidebar.render(frame, Rect::new(0, 0, 40, 30)))
+            .expect("render");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert_eq!(state.temp_body.expect("temp body").height, 1);
+        assert_eq!(state.saved_body.expect("saved body").height, 1);
+        assert_eq!(state.memory_body.expect("memory body").height, 1);
+        assert!(state.vault_body.expect("vault body").height > 1);
+        assert!(rendered.contains("Saved files"));
+    }
+
+    #[test]
+    fn flat_sections_grow_by_card_height_to_three_cards() {
+        let temporary = vec![
+            entry("one.md", ArtifactOrigin::Temporary),
+            entry("two.md", ArtifactOrigin::Temporary),
+        ];
+        let saved = vec![
+            entry("a.md", ArtifactOrigin::Saved),
+            entry("b.md", ArtifactOrigin::Saved),
+            entry("c.md", ArtifactOrigin::Saved),
+            entry("d.md", ArtifactOrigin::Saved),
+        ];
+        let memories = vec![entry("memory.md", ArtifactOrigin::Memory)];
+        let vault = vec![entry("vault.md", ArtifactOrigin::Vault)];
+        let mut state = ArtifactSidebarState::default();
+        let mut sidebar =
+            ArtifactSidebar::new(&temporary, &saved, &memories, &vault, true, &mut state);
+        let mut terminal = Terminal::new(TestBackend::new(40, 40)).expect("terminal");
+
+        terminal
+            .draw(|frame| sidebar.render(frame, Rect::new(0, 0, 40, 40)))
+            .expect("render");
+
+        assert_eq!(state.temp_body.expect("temp body").height, 6);
+        assert_eq!(state.saved_body.expect("saved body").height, 9);
+        assert_eq!(state.memory_body.expect("memory body").height, 3);
+        assert!(state.vault_body.expect("vault body").height > 1);
     }
 }

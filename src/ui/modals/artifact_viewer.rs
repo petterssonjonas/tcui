@@ -10,6 +10,7 @@ use crate::ui::components::{
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactViewerHitAreas {
     pub close: Option<Rect>,
+    pub edit: Option<Rect>,
     pub save: Option<Rect>,
     pub delete: Option<Rect>,
 }
@@ -52,69 +53,50 @@ impl ArtifactViewerState {
     pub fn render(&mut self, f: &mut Frame, area: Rect, props: ArtifactViewerProps<'_>) {
         let popup_area = popup_area(area);
         let block = Block::default()
-            .title(format!(" {} ", self.artifact.name))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
             .style(Style::default().bg(Color::Black));
         let inner = block.inner(popup_area);
         f.render_widget(Clear, popup_area);
         f.render_widget(block, popup_area);
+        let title_y = popup_area.y;
 
-        let layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(2),
-                Constraint::Min(0),
-                Constraint::Length(1),
-            ])
-            .margin(1)
-            .split(inner);
-
-        let mut x = layout[0].x;
-        let save = if self.artifact.can_save(true) {
-            let label = if self.artifact.is_markdown() {
-                "Save"
-            } else {
-                "Export"
-            };
-            let rect = Rect::new(x, layout[0].y, label.len() as u16 + 2, 1);
-            x = x.saturating_add(rect.width + 1);
-            f.render_widget(
-                Paragraph::new(format!("[{label}]")).style(Style::default().fg(Color::Green)),
-                rect,
-            );
-            Some(rect)
-        } else {
-            None
-        };
-        let delete = if self.artifact.can_delete() {
-            let rect = Rect::new(x, layout[0].y, 5, 1);
-            x = x.saturating_add(rect.width + 1);
-            f.render_widget(
-                Paragraph::new("[Del]").style(Style::default().fg(Color::Red)),
-                rect,
-            );
-            Some(rect)
-        } else {
-            None
-        };
-        let close = Rect::new(x, layout[0].y, 7, 1);
+        let name_label = format!(" {} ", self.artifact.name);
         f.render_widget(
-            Paragraph::new("[Close]").style(Style::default().fg(Color::Gray)),
+            Paragraph::new(name_label).style(Style::default().fg(Color::Cyan)),
+            Rect::new(
+                popup_area.x + 1,
+                title_y,
+                self.artifact.name.len() as u16 + 2,
+                1,
+            ),
+        );
+
+        let center_label = " Viewer ";
+        let center_x = popup_area.x + popup_area.width / 2 - center_label.len() as u16 / 2;
+        f.render_widget(
+            Paragraph::new(center_label).style(Style::default().fg(Color::Cyan)),
+            Rect::new(center_x, title_y, center_label.len() as u16, 1),
+        );
+
+        let close_label = "[x]";
+        let close_len = close_label.len() as u16;
+        let close_x = popup_area.x + popup_area.width.saturating_sub(close_len + 1);
+        let close = Rect::new(close_x, title_y, close_len, 1);
+        f.render_widget(
+            Paragraph::new(close_label).style(Style::default().fg(Color::Red)),
             close,
         );
 
-        let badge = format!(
-            "{} · {}",
-            self.artifact.origin_label(),
-            kind_label(self.artifact.kind)
-        );
-        f.render_widget(
-            Paragraph::new(badge)
-                .style(Style::default().fg(Color::DarkGray))
-                .alignment(Alignment::Right),
-            layout[0],
-        );
+        let content_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(inner);
+        let content_area = content_layout[0];
+        let button_area = content_layout[1];
+
+        let mut edit = None;
+        let mut delete = None;
 
         match self.artifact.kind {
             ArtifactKind::Image => {
@@ -129,13 +111,13 @@ impl ArtifactViewerState {
                     }
                 }
                 if let Some(state) = &mut self.image_state {
-                    state.render(f, layout[1]);
+                    state.render(f, content_area);
                 } else {
                     f.render_widget(
                         Paragraph::new("Image preview unavailable")
                             .alignment(Alignment::Center)
                             .style(Style::default().fg(Color::DarkGray)),
-                        layout[1],
+                        content_area,
                     );
                 }
             }
@@ -154,31 +136,54 @@ impl ArtifactViewerState {
                 let rendered = MarkdownRenderer::new(props.terminal_capabilities).render(
                     content,
                     props.markdown_mode,
-                    layout[1].width.saturating_sub(2) as usize,
+                    content_area.width.saturating_sub(2) as usize,
                     false,
                     props.kitty_heading_downscale,
                     !props.image_protocol.eq_ignore_ascii_case("off"),
                 );
-                self.clamp_scroll(rendered.lines.len(), usize::from(layout[1].height));
+                self.clamp_scroll(rendered.lines.len(), usize::from(content_area.height));
                 f.render_widget(
                     Paragraph::new(rendered.lines)
                         .wrap(Wrap { trim: false })
                         .scroll((self.scroll as u16, 0)),
-                    layout[1],
+                    content_area,
                 );
             }
         }
 
-        f.render_widget(
-            Paragraph::new("Esc closes, mouse wheel scrolls")
-                .style(Style::default().fg(Color::DarkGray))
-                .alignment(Alignment::Center),
-            layout[2],
-        );
+        if button_area.height > 0 {
+            let theme = crate::theme::active_theme();
+            let mut x = button_area.right().saturating_sub(1);
+            let y = button_area.y;
+
+            if self.artifact.path.is_some() {
+                let label = "[Edit]";
+                let width = label.len() as u16;
+                x = x.saturating_sub(width);
+                let rect = Rect::new(x, y, width, 1);
+                f.render_widget(
+                    Paragraph::new(label).style(Style::default().fg(theme.warning)),
+                    rect,
+                );
+                edit = Some(rect);
+                x = x.saturating_sub(1);
+            }
+
+            let label = "[Del]";
+            let width = label.len() as u16;
+            x = x.saturating_sub(width);
+            let del_rect = Rect::new(x, y, width, 1);
+            f.render_widget(
+                Paragraph::new(label).style(Style::default().fg(theme.error)),
+                del_rect,
+            );
+            delete = Some(del_rect);
+        }
 
         self.hit_areas = ArtifactViewerHitAreas {
             close: Some(close),
-            save,
+            edit,
+            save: None,
             delete,
         };
     }
@@ -196,9 +201,9 @@ pub fn popup_area(area: Rect) -> Rect {
     Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(6),
-            Constraint::Percentage(88),
-            Constraint::Percentage(6),
+            Constraint::Percentage(25),
+            Constraint::Percentage(75),
+            Constraint::Percentage(0),
         ])
         .split(popup_layout[1])[1]
 }

@@ -95,6 +95,7 @@ struct AnthropicDelta {
 pub(crate) enum ChatStreamEvent {
     Answer(String),
     Thinking(String),
+    Title(String),
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -109,6 +110,7 @@ impl ChatStreamOutput {
         match event {
             ChatStreamEvent::Answer(content) => self.answer.push_str(content),
             ChatStreamEvent::Thinking(content) => self.thinking.push_str(content),
+            ChatStreamEvent::Title(_) => {}
         }
     }
 }
@@ -417,17 +419,11 @@ fn openai_stream_events(
             );
             push_if_present(&mut events, ChatStreamEvent::Thinking, delta.thinking);
             if let Some(content) = delta.content {
-                let visible = title_filter.push(&content);
-                if !visible.is_empty() {
-                    events.push(ChatStreamEvent::Answer(visible));
-                }
+                push_title_filtered_content(&mut events, title_filter.push(&content));
             }
         }
         if let Some(text) = choice.text {
-            let visible = title_filter.push(&text);
-            if !visible.is_empty() {
-                events.push(ChatStreamEvent::Answer(visible));
-            }
+            push_title_filtered_content(&mut events, title_filter.push(&text));
         }
     }
     Ok(OpenAiChunkResult {
@@ -457,10 +453,7 @@ fn anthropic_stream_events(
     if let Some(delta) = parsed.delta {
         push_if_present(&mut events, ChatStreamEvent::Thinking, delta.thinking);
         if let Some(text) = delta.text {
-            let visible = title_filter.push(&text);
-            if !visible.is_empty() {
-                events.push(ChatStreamEvent::Answer(visible));
-            }
+            push_title_filtered_content(&mut events, title_filter.push(&text));
         }
     }
     Ok(events)
@@ -476,6 +469,15 @@ fn push_if_present(
     }
 }
 
+fn push_title_filtered_content(events: &mut Vec<ChatStreamEvent>, chunk: TitleFilteredChunk) {
+    if let Some(title) = chunk.title {
+        events.push(ChatStreamEvent::Title(title));
+    }
+    if !chunk.visible.is_empty() {
+        events.push(ChatStreamEvent::Answer(chunk.visible));
+    }
+}
+
 fn flush_title_filter<F>(
     output: &mut ChatStreamOutput,
     on_event: &mut F,
@@ -484,8 +486,13 @@ fn flush_title_filter<F>(
     F: FnMut(ChatStreamEvent) + Send,
 {
     let tail = title_filter.finish();
-    if !tail.is_empty() {
-        let event = ChatStreamEvent::Answer(tail);
+    if let Some(title) = tail.title {
+        let event = ChatStreamEvent::Title(title);
+        output.push(&event);
+        on_event(event);
+    }
+    if !tail.visible.is_empty() {
+        let event = ChatStreamEvent::Answer(tail.visible);
         output.push(&event);
         on_event(event);
     }
@@ -506,51 +513,70 @@ where
 #[derive(Debug, Default)]
 struct TitleTagFilter {
     buffer: String,
-    skipping: bool,
+    title: String,
+    capturing: bool,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TitleFilteredChunk {
+    visible: String,
+    title: Option<String>,
 }
 
 impl TitleTagFilter {
-    fn push(&mut self, input: &str) -> String {
-        const START: &str = "<chat-title>";
-        const END: &str = "</chat-title>";
+    const START: &str = "<tcui:chat-title>";
+    const END: &str = "</tcui:chat-title>";
+
+    fn push(&mut self, input: &str) -> TitleFilteredChunk {
+        let mut chunk = TitleFilteredChunk::default();
 
         self.buffer.push_str(input);
-        let mut output = String::new();
         loop {
-            if self.skipping {
-                if let Some(end) = self.buffer.find(END) {
-                    self.buffer.drain(..end + END.len());
-                    self.skipping = false;
+            if self.capturing {
+                if let Some(end) = self.buffer.find(Self::END) {
+                    self.title.push_str(&self.buffer[..end]);
+                    self.buffer.drain(..end + Self::END.len());
+                    self.capturing = false;
+                    let title = self.title.trim();
+                    if !title.is_empty() {
+                        chunk.title = Some(title.to_string());
+                    }
+                    self.title.clear();
                     continue;
                 }
-                let keep = matching_suffix_prefix_len(&self.buffer, END);
-                self.buffer.drain(..self.buffer.len().saturating_sub(keep));
+                let keep = matching_suffix_prefix_len(&self.buffer, Self::END);
+                let capture_len = self.buffer.len().saturating_sub(keep);
+                self.title.push_str(&self.buffer[..capture_len]);
+                self.buffer.drain(..capture_len);
                 break;
             }
 
-            if let Some(start) = self.buffer.find(START) {
-                output.push_str(&self.buffer[..start]);
-                self.buffer.drain(..start + START.len());
-                self.skipping = true;
+            if let Some(start) = self.buffer.find(Self::START) {
+                chunk.visible.push_str(&self.buffer[..start]);
+                self.buffer.drain(..start + Self::START.len());
+                self.capturing = true;
                 continue;
             }
 
-            let keep = matching_suffix_prefix_len(&self.buffer, START);
+            let keep = matching_suffix_prefix_len(&self.buffer, Self::START);
             if self.buffer.len() > keep {
                 let emit_len = self.buffer.len() - keep;
-                output.push_str(&self.buffer[..emit_len]);
+                chunk.visible.push_str(&self.buffer[..emit_len]);
                 self.buffer.drain(..emit_len);
             }
             break;
         }
-        output
+        chunk
     }
 
-    fn finish(mut self) -> String {
-        if self.skipping {
-            String::new()
+    fn finish(mut self) -> TitleFilteredChunk {
+        if self.capturing {
+            TitleFilteredChunk::default()
         } else {
-            std::mem::take(&mut self.buffer)
+            TitleFilteredChunk {
+                visible: std::mem::take(&mut self.buffer),
+                title: None,
+            }
         }
     }
 }

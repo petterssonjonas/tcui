@@ -2,6 +2,7 @@
 pub mod safety;
 pub mod vault;
 
+pub use safety::SafetyLayer;
 pub use vault::Vault;
 
 #[derive(Debug, Clone)]

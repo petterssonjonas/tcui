@@ -505,7 +505,7 @@ fn render_code(
     for line in content.lines() {
         let mut text = line.to_string();
         if UnicodeWidthStr::width(text.as_str()) > width {
-            text.truncate(width);
+            text = truncate_to_display_width(&text, width);
         }
         lines.push(Line::from(Span::styled(
             text,
@@ -525,7 +525,7 @@ fn render_table(lines: &mut Vec<Line<'static>>, rows: Vec<Vec<String>>, width: u
         for cell in row {
             let mut cell = cell.trim().to_string();
             if UnicodeWidthStr::width(cell.as_str()) > col_width {
-                cell.truncate(col_width.saturating_sub(1));
+                cell = truncate_to_display_width(&cell, col_width.saturating_sub(1));
                 cell.push('…');
             }
             rendered.push_str(&format!(" {:width$}|", cell, width = col_width));
@@ -743,6 +743,24 @@ fn tokenize(text: &str) -> Vec<String> {
     tokens
 }
 
+fn truncate_to_display_width(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+
+    let mut width = 0usize;
+    let mut end = 0usize;
+    for (idx, ch) in text.char_indices() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width > max_width {
+            break;
+        }
+        width += ch_width;
+        end = idx + ch.len_utf8();
+    }
+    text[..end].to_string()
+}
+
 fn append_link_targets(targets: &mut Vec<LinkTarget>, line: usize, runs: &[StyledRun]) {
     let mut column = 0;
     for run in runs {
@@ -891,5 +909,49 @@ fn heading_overlay_style(level: usize) -> Style {
             .fg(theme.success)
             .bg(theme.background)
             .add_modifier(Modifier::BOLD),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{render_markdown, RenderOptions};
+    use crate::config::app_config::{HeadingDownscale, MarkdownMode};
+    use crate::ui::components::terminal_capabilities::TerminalCapabilities;
+
+    fn opts(width: usize) -> RenderOptions {
+        RenderOptions {
+            mode: MarkdownMode::Full,
+            width,
+            kitty_enhanced_text: false,
+            kitty_heading_downscale: HeadingDownscale::None,
+            image_protocol_enabled: false,
+            terminal_capabilities: TerminalCapabilities::detect(),
+        }
+    }
+
+    #[test]
+    fn render_markdown_table_truncates_multibyte_cells_without_panicking() {
+        let rendered = render_markdown("| col |\n| --- |\n| 🙂🙂 |", opts(5));
+        let joined = rendered
+            .lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(joined.contains('…'));
+    }
+
+    #[test]
+    fn render_markdown_code_truncates_multibyte_lines_without_panicking() {
+        let rendered = render_markdown("```\n🙂🙂🙂\n```", opts(3));
+        let joined = rendered
+            .lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(joined.contains('🙂'));
     }
 }
