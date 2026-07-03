@@ -1,11 +1,12 @@
 use color_eyre::{eyre::eyre, Result};
 use serde::Deserialize;
 use serde_json::{Map, Value};
+use std::path::{Path, PathBuf};
 
 use crate::app::Message;
 use crate::config::AppConfig;
 use crate::llm::chat::{stream_chat, ChatRequest};
-use crate::mcp::{merged_configs, profile_by_skill, McpClient, McpToolSummary};
+use crate::mcp::{merged_configs, profile_by_name, profile_by_skill, McpClient, McpToolSummary};
 use crate::skills::{Skill, SkillCatalog};
 
 const MAX_SKILL_CHARS: usize = 20_000;
@@ -64,8 +65,15 @@ pub(crate) async fn prepare(
                 ));
                 prepare_local_search(config, user_request, base_request).await
             }
-            "exa" | "tavily" | "firecrawl" | "gnome" | "obsidian" => {
+            "exa" | "tavily" | "firecrawl" | "gnome" => {
                 prepare_mcp(config, user_request, base_request, &skill).await
+            }
+            "obsidian" => {
+                if obsidian_mcp_enabled(config) {
+                    prepare_mcp(config, user_request, base_request, &skill).await
+                } else {
+                    prepare_obsidian_native(config, user_request, base_request).await
+                }
             }
             _ => {
                 prepared.context.push_str(&format!(
@@ -278,6 +286,10 @@ fn authorize_tool(tool: &str, user_request: &str) -> Result<()> {
         ),
         (&["move"], &["move"]),
         (&["rename"], &["rename"]),
+        (
+            &["restore", "rollback", "revert"],
+            &["restore", "rollback", "revert"],
+        ),
         (&["send", "message", "email"], &["send", "message", "email"]),
         (
             &["post", "publish", "upload"],
@@ -363,6 +375,208 @@ fn truncate_chars(text: &str, limit: usize) -> String {
     text.chars().take(limit).collect()
 }
 
+fn obsidian_mcp_enabled(config: &AppConfig) -> bool {
+    merged_configs(&config.mcp_servers).iter().any(|server| {
+        profile_by_name(&server.name).is_some_and(|profile| profile.skill == "obsidian")
+            && server.enabled
+    })
+}
+
+fn resolve_vault_root(config: &AppConfig) -> Result<PathBuf> {
+    let raw_path = config
+        .vault_path
+        .as_deref()
+        .map(str::trim)
+        .map(|path| path.trim_matches(['"', '\'']))
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| eyre!("Obsidian vault path is not configured"))?;
+    let path = crate::app::generated_file::expand_user_path(
+        Path::new(raw_path),
+        dirs::home_dir().as_deref(),
+    );
+    if !path.is_dir() {
+        return Err(eyre!(
+            "Obsidian vault path is not a directory: {}",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
+fn validate_vault_path(path: &str) -> Result<()> {
+    if path.starts_with('/') || path.starts_with('\\') {
+        return Err(eyre!("vault path must be relative"));
+    }
+    if Path::new(path)
+        .components()
+        .any(|component| component.as_os_str() == "..")
+    {
+        return Err(eyre!("vault path must not escape the vault"));
+    }
+    Ok(())
+}
+
+fn obsidian_native_tools() -> Vec<Value> {
+    vec![
+        serde_json::json!({
+            "name": "read_note",
+            "input_schema": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            }
+        }),
+        serde_json::json!({
+            "name": "search_notes",
+            "input_schema": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"]
+            }
+        }),
+        serde_json::json!({
+            "name": "write_note",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"}
+                },
+                "required": ["path", "content"]
+            }
+        }),
+        serde_json::json!({
+            "name": "restore_note",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "backup": {"type": "string"}
+                },
+                "required": ["path", "backup"]
+            }
+        }),
+    ]
+}
+
+async fn prepare_obsidian_native(
+    config: &AppConfig,
+    user_request: &str,
+    base_request: &ChatRequest,
+) -> Result<Message> {
+    let vault_root = resolve_vault_root(config)?;
+    let vault = crate::obsidian::Vault::new(vault_root.clone());
+    if !vault.exists() {
+        return Err(eyre!(
+            "Obsidian vault not found at {}",
+            vault_root.display()
+        ));
+    }
+
+    let tools = obsidian_native_tools();
+    let tools_json = truncate_chars(&serde_json::to_string(&tools)?, MAX_TOOL_CATALOG_CHARS);
+    let system = format!(
+        "Choose exactly one tool for the request. Return JSON only as \
+         {{\"tool\":\"name\",\"arguments\":{{...}}}}. Available tools:\n{tools_json}"
+    );
+    let planner_input = format!(
+        "{user_request}\n\n[OBSIDIAN VAULT]\nRoot: {}",
+        vault_root.display()
+    );
+    let output = planner_completion(base_request, &system, &planner_input).await?;
+    let json =
+        extract_json_object(&output).ok_or_else(|| eyre!("planner returned invalid JSON"))?;
+    let plan: ToolPlan = serde_json::from_str(json)?;
+
+    authorize_tool(&plan.tool, user_request)?;
+
+    let backup_dir = crate::storage::paths::TcuiDataPaths::discover()
+        .root
+        .join("vault-backups");
+    let safety = crate::obsidian::SafetyLayer::new(backup_dir.clone());
+
+    let result = match plan.tool.as_str() {
+        "read_note" => {
+            let path = plan
+                .arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| eyre!("missing path argument"))?;
+            validate_vault_path(path)?;
+            let content = vault.read_file(Path::new(path))?;
+            format!("Content of {path}:\n\n{content}")
+        }
+        "search_notes" => {
+            let query = plan
+                .arguments
+                .get("query")
+                .and_then(Value::as_str)
+                .ok_or_else(|| eyre!("missing query argument"))?;
+            let results = vault.search(query)?;
+            if results.is_empty() {
+                format!("No notes found matching '{query}'")
+            } else {
+                let lines: Vec<String> = results
+                    .iter()
+                    .map(|path| {
+                        path.strip_prefix(&vault_root)
+                            .map(|relative| relative.display().to_string())
+                            .unwrap_or_else(|_| path.display().to_string())
+                    })
+                    .collect();
+                format!("Found {} notes:\n{}", results.len(), lines.join("\n"))
+            }
+        }
+        "write_note" => {
+            let path = plan
+                .arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| eyre!("missing path argument"))?;
+            let content = plan
+                .arguments
+                .get("content")
+                .and_then(Value::as_str)
+                .ok_or_else(|| eyre!("missing content argument"))?;
+            validate_vault_path(path)?;
+            let full_path = vault_root.join(path);
+            let old_content = if full_path.exists() {
+                std::fs::read_to_string(&full_path).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let backup_path = safety.create_backup(Path::new(path), &old_content)?;
+            let _diff = safety.generate_diff(&old_content, content);
+            vault.write_file(Path::new(path), content)?;
+            format!("Wrote {path}. Backup saved to {}", backup_path.display())
+        }
+        "restore_note" => {
+            let path = plan
+                .arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| eyre!("missing path argument"))?;
+            let backup = plan
+                .arguments
+                .get("backup")
+                .and_then(Value::as_str)
+                .ok_or_else(|| eyre!("missing backup argument"))?;
+            validate_vault_path(path)?;
+            let backup_path = backup_dir.join(backup);
+            let backup_content = std::fs::read_to_string(&backup_path)?;
+            vault.write_file(Path::new(path), &backup_content)?;
+            format!("Restored {path} from {}", backup_path.display())
+        }
+        _ => return Err(eyre!("unknown obsidian tool '{}'", plan.tool)),
+    };
+
+    Ok(external_data_message(
+        "Obsidian Vault",
+        &result,
+        MAX_TOOL_RESULT_CHARS,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,6 +619,20 @@ mod tests {
         assert!(authorize_tool("delete_note", "Delete the email").is_err());
         assert!(authorize_tool("delete_note", "Delete the note named Draft").is_ok());
         assert!(authorize_tool("search_notes", "Find notes about Rust").is_ok());
+    }
+
+    #[test]
+    fn restore_tool_requires_explicit_restore_request() {
+        assert!(authorize_tool("restore_note", "Show my notes").is_err());
+        assert!(authorize_tool("restore_note", "Restore note to yesterday").is_ok());
+    }
+
+    #[test]
+    fn vault_path_validation_rejects_absolute_and_parent_escapes() {
+        assert!(validate_vault_path("notes/idea.md").is_ok());
+        assert!(validate_vault_path("/etc/passwd").is_err());
+        assert!(validate_vault_path("../outside.md").is_err());
+        assert!(validate_vault_path("notes/../../outside.md").is_err());
     }
 
     #[test]

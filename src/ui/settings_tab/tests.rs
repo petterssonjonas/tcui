@@ -13,6 +13,7 @@ fn popup_with_mcps(count: usize) -> SettingsPopup {
         ai_alignment: TextAlignment::Left,
         markdown_mode: MarkdownMode::Full,
         artifact_save_dir: String::new(),
+        vault_path: String::new(),
         available_models: vec![],
         db_providers: vec![],
         show_selector: true,
@@ -269,6 +270,42 @@ fn keybindings_help_keeps_vault_route_and_omits_local_route() {
     // Then
     assert!(rendered.contains("/vault <query>"));
     assert!(!rendered.contains("/local"));
+}
+
+#[test]
+fn general_settings_edits_vault_path() {
+    let mut popup = popup_with_mcps(0);
+    popup.active_tab = SettingsTab::General;
+    popup.general_focus = GeneralFocus::VaultPath;
+
+    for c in "/tmp/obsidian".chars() {
+        popup.type_char(c);
+    }
+    popup.backspace();
+
+    assert_eq!(popup.vault_path, "/tmp/obsidia");
+}
+
+#[test]
+fn general_settings_render_exposes_obsidian_vault_path() {
+    let mut popup = popup_with_mcps(0);
+    popup.active_tab = SettingsTab::General;
+    popup.vault_path = "/tmp/obsidian".to_string();
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).expect("test terminal");
+
+    terminal
+        .draw(|frame| popup.render(frame))
+        .expect("render general settings");
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+
+    assert!(rendered.contains("Obsidian vault path"));
+    assert!(popup.general_hit_areas.vault_path.is_some());
 }
 
 #[cfg(feature = "memory")]
