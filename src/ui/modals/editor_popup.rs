@@ -136,7 +136,7 @@ impl EditorPopupState {
         let close_x = popup_area.x + popup_area.width.saturating_sub(close_len + 1);
         let close_area = Rect::new(close_x, title_y, close_len, 1);
         f.render_widget(
-            Paragraph::new("[x]").style(Style::default().fg(Color::Gray)),
+            Paragraph::new("[x]").style(Style::default().fg(Color::Red)),
             close_area,
         );
         self.close_hit_area = Some(close_area);
@@ -228,9 +228,9 @@ fn popup_area(area: Rect) -> Rect {
     Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(4),
-            Constraint::Percentage(92),
-            Constraint::Percentage(4),
+            Constraint::Percentage(25),
+            Constraint::Percentage(75),
+            Constraint::Percentage(0),
         ])
         .split(popup_layout[1])[1]
 }
