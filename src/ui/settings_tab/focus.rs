@@ -46,8 +46,19 @@ impl SettingsPopup {
         } else if let Some(form) = self.add_provider_popup.as_mut() {
             Self::type_char_in_form(form, c);
         } else if self.active_tab == SettingsTab::General {
-            if self.general_focus == GeneralFocus::ArtifactSaveDir {
-                self.artifact_save_dir.push(c);
+            match self.general_focus {
+                GeneralFocus::ArtifactSaveDir => self.artifact_save_dir.push(c),
+                GeneralFocus::VaultPath => self.vault_path.push(c),
+                GeneralFocus::Theme
+                | GeneralFocus::UserAlignment
+                | GeneralFocus::AiAlignment
+                | GeneralFocus::ShowSelector
+                | GeneralFocus::ShowChatScrollbar
+                | GeneralFocus::CollapseThinking
+                | GeneralFocus::KittyEnhancedText
+                | GeneralFocus::KittyTextScale
+                | GeneralFocus::WebSearchEnabled
+                | GeneralFocus::QuitConfirmation => {}
             }
         } else if self.active_tab == SettingsTab::Local {
             match self.local_focus {
@@ -94,8 +105,23 @@ impl SettingsPopup {
         } else if let Some(form) = self.add_provider_popup.as_mut() {
             Self::backspace_in_form(form);
         } else if self.active_tab == SettingsTab::General {
-            if self.general_focus == GeneralFocus::ArtifactSaveDir {
-                self.artifact_save_dir.pop();
+            match self.general_focus {
+                GeneralFocus::ArtifactSaveDir => {
+                    self.artifact_save_dir.pop();
+                }
+                GeneralFocus::VaultPath => {
+                    self.vault_path.pop();
+                }
+                GeneralFocus::Theme
+                | GeneralFocus::UserAlignment
+                | GeneralFocus::AiAlignment
+                | GeneralFocus::ShowSelector
+                | GeneralFocus::ShowChatScrollbar
+                | GeneralFocus::CollapseThinking
+                | GeneralFocus::KittyEnhancedText
+                | GeneralFocus::KittyTextScale
+                | GeneralFocus::WebSearchEnabled
+                | GeneralFocus::QuitConfirmation => {}
             }
         } else if self.active_tab == SettingsTab::Local {
             match self.local_focus {
@@ -435,7 +461,8 @@ impl SettingsPopup {
                     GeneralFocus::KittyEnhancedText => GeneralFocus::CollapseThinking,
                     GeneralFocus::CollapseThinking => GeneralFocus::ShowChatScrollbar,
                     GeneralFocus::ShowChatScrollbar => GeneralFocus::ShowSelector,
-                    GeneralFocus::ShowSelector => GeneralFocus::ArtifactSaveDir,
+                    GeneralFocus::ShowSelector => GeneralFocus::VaultPath,
+                    GeneralFocus::VaultPath => GeneralFocus::ArtifactSaveDir,
                     GeneralFocus::ArtifactSaveDir => GeneralFocus::AiAlignment,
                     GeneralFocus::AiAlignment => GeneralFocus::UserAlignment,
                 };
@@ -492,7 +519,7 @@ impl SettingsPopup {
                     self.toggle_general_dropdown(GeneralDropdown::AiAlignment);
                     ProvidersAction::None
                 }
-                GeneralFocus::ArtifactSaveDir => ProvidersAction::None,
+                GeneralFocus::ArtifactSaveDir | GeneralFocus::VaultPath => ProvidersAction::None,
                 GeneralFocus::ShowSelector => {
                     self.show_selector = !self.show_selector;
                     ProvidersAction::None
@@ -627,7 +654,8 @@ impl SettingsPopup {
                     GeneralFocus::Theme => GeneralFocus::UserAlignment,
                     GeneralFocus::UserAlignment => GeneralFocus::AiAlignment,
                     GeneralFocus::AiAlignment => GeneralFocus::ArtifactSaveDir,
-                    GeneralFocus::ArtifactSaveDir => GeneralFocus::ShowSelector,
+                    GeneralFocus::ArtifactSaveDir => GeneralFocus::VaultPath,
+                    GeneralFocus::VaultPath => GeneralFocus::ShowSelector,
                     GeneralFocus::ShowSelector => GeneralFocus::ShowChatScrollbar,
                     GeneralFocus::ShowChatScrollbar => GeneralFocus::CollapseThinking,
                     GeneralFocus::CollapseThinking => GeneralFocus::KittyEnhancedText,

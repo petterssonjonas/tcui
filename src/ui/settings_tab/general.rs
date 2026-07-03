@@ -18,6 +18,7 @@ impl SettingsPopup {
                 Constraint::Length(3),
                 Constraint::Length(3),
                 Constraint::Length(3),
+                Constraint::Length(3),
             ])
             .margin(1)
             .split(area);
@@ -106,6 +107,27 @@ impl SettingsPopup {
         self.general_hit_areas.artifact_save_dir = Some(chunks[3]);
         f.render_widget(artifact_save_widget, chunks[3]);
 
+        let vault_path_focused = self.active_tab == SettingsTab::General
+            && self.general_focus == GeneralFocus::VaultPath;
+        let vault_path_widget = Paragraph::new(self.vault_path.as_str())
+            .block(
+                Block::default()
+                    .title(" Obsidian vault path ")
+                    .borders(Borders::ALL)
+                    .border_style(if vault_path_focused {
+                        Style::default().fg(Color::Cyan)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    }),
+            )
+            .style(if vault_path_focused {
+                Style::default().fg(Color::White)
+            } else {
+                Style::default().fg(Color::Gray)
+            });
+        self.general_hit_areas.vault_path = Some(chunks[4]);
+        f.render_widget(vault_path_widget, chunks[4]);
+
         let selector_focused = self.active_tab == SettingsTab::General
             && self.general_focus == GeneralFocus::ShowSelector;
         let selector_lines = vec![Line::from(vec![
@@ -130,8 +152,8 @@ impl SettingsPopup {
                     Style::default().fg(Color::DarkGray)
                 }),
         );
-        self.general_hit_areas.show_selector = Some(chunks[4]);
-        f.render_widget(selector_widget, chunks[4]);
+        self.general_hit_areas.show_selector = Some(chunks[5]);
+        f.render_widget(selector_widget, chunks[5]);
 
         let collapse_focused = self.active_tab == SettingsTab::General
             && self.general_focus == GeneralFocus::ShowChatScrollbar;
@@ -161,8 +183,8 @@ impl SettingsPopup {
                     Style::default().fg(Color::DarkGray)
                 }),
         );
-        self.general_hit_areas.show_chat_scrollbar = Some(chunks[5]);
-        f.render_widget(scrollbar_widget, chunks[5]);
+        self.general_hit_areas.show_chat_scrollbar = Some(chunks[6]);
+        f.render_widget(scrollbar_widget, chunks[6]);
 
         let collapse_focused = self.active_tab == SettingsTab::General
             && self.general_focus == GeneralFocus::CollapseThinking;
@@ -192,8 +214,8 @@ impl SettingsPopup {
                     Style::default().fg(Color::DarkGray)
                 }),
         );
-        self.general_hit_areas.collapse_thinking = Some(chunks[6]);
-        f.render_widget(collapse_widget, chunks[6]);
+        self.general_hit_areas.collapse_thinking = Some(chunks[7]);
+        f.render_widget(collapse_widget, chunks[7]);
 
         let kitty_toggle_focused = self.active_tab == SettingsTab::General
             && self.general_focus == GeneralFocus::KittyEnhancedText;
@@ -221,8 +243,8 @@ impl SettingsPopup {
                 Style::default().fg(Color::DarkGray)
             },
         ));
-        self.general_hit_areas.kitty_enhanced_text = Some(chunks[7]);
-        f.render_widget(kitty_toggle, chunks[7]);
+        self.general_hit_areas.kitty_enhanced_text = Some(chunks[8]);
+        f.render_widget(kitty_toggle, chunks[8]);
 
         let kitty_scale_focused = self.active_tab == SettingsTab::General
             && self.general_focus == GeneralFocus::KittyTextScale;
@@ -242,8 +264,8 @@ impl SettingsPopup {
             } else {
                 Style::default().fg(Color::Gray)
             });
-        self.general_hit_areas.kitty_text_scale = Some(chunks[8]);
-        f.render_widget(kitty_scale, chunks[8]);
+        self.general_hit_areas.kitty_text_scale = Some(chunks[9]);
+        f.render_widget(kitty_scale, chunks[9]);
 
         let web_toggle_focused = self.active_tab == SettingsTab::General
             && self.general_focus == GeneralFocus::WebSearchEnabled;
@@ -271,8 +293,8 @@ impl SettingsPopup {
                 Style::default().fg(Color::DarkGray)
             },
         ));
-        self.general_hit_areas.web_search_enabled = Some(chunks[9]);
-        f.render_widget(web_toggle, chunks[9]);
+        self.general_hit_areas.web_search_enabled = Some(chunks[10]);
+        f.render_widget(web_toggle, chunks[10]);
 
         let quit_focused = self.active_tab == SettingsTab::General
             && self.general_focus == GeneralFocus::QuitConfirmation;
@@ -301,8 +323,8 @@ impl SettingsPopup {
                     Style::default().fg(Color::DarkGray)
                 },
             ));
-        self.general_hit_areas.quit_confirmation = Some(chunks[10]);
-        f.render_widget(quit_toggle, chunks[10]);
+        self.general_hit_areas.quit_confirmation = Some(chunks[11]);
+        f.render_widget(quit_toggle, chunks[11]);
 
         if let Some(dropdown) = self.general_dropdown_open {
             match dropdown {
@@ -409,7 +431,7 @@ impl SettingsPopup {
                     self.general_hit_areas.dropdown_items = item_areas;
                 }
                 GeneralDropdown::KittyTextScale => {
-                    let dropdown_area = Self::dropdown_area_below(chunks[8], 5);
+                    let dropdown_area = Self::dropdown_area_below(chunks[9], 5);
                     let list_items: Vec<ListItem> = KITTY_HEADING_SIZE_OPTIONS
                         .iter()
                         .map(|downscale| {
@@ -538,6 +560,7 @@ impl SettingsPopup {
             GeneralFocus::UserAlignment => Some(GeneralDropdown::UserAlignment),
             GeneralFocus::AiAlignment => Some(GeneralDropdown::AiAlignment),
             GeneralFocus::ArtifactSaveDir => None,
+            GeneralFocus::VaultPath => None,
             GeneralFocus::ShowSelector => None,
             GeneralFocus::ShowChatScrollbar => None,
             GeneralFocus::CollapseThinking => None,

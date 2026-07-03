@@ -119,6 +119,7 @@ impl TuiApp {
                 theme: config.theme.clone(),
                 markdown_mode: config.markdown_mode,
                 artifact_save_dir: config.artifact_save_dir.clone().unwrap_or_default(),
+                vault_path: config.vault_path.clone().unwrap_or_default(),
                 available_models,
                 db_providers,
                 show_selector: config.show_selector,
@@ -186,6 +187,8 @@ impl TuiApp {
         config.markdown_mode = settings.markdown_mode;
         config.artifact_save_dir = (!settings.artifact_save_dir.trim().is_empty())
             .then_some(settings.artifact_save_dir.trim().to_string());
+        config.vault_path = (!settings.vault_path.trim().is_empty())
+            .then_some(settings.vault_path.trim().to_string());
         config.default_provider = settings.default_provider.clone();
         config.default_model = settings.default_model.clone();
         config.small_model =
