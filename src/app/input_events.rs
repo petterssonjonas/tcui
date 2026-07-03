@@ -84,12 +84,10 @@ impl TuiApp {
             };
         }
 
-        if let Some(editor) = &mut self.ui.editor_popup {
-            let keep_open = editor.handle_key(key);
-            if keep_open {
-                return None;
+        if self.ui.editor_popup.is_some() {
+            if let Some(editor) = self.ui.editor_popup.as_mut() {
+                editor.handle_key(key);
             }
-            self.ui.editor_popup = None;
             return None;
         }
 
@@ -823,6 +821,26 @@ impl TuiApp {
                 return None;
             }
             self.ui.export_dialog = None;
+            return None;
+        }
+
+        if self.ui.editor_popup.is_some() {
+            if let Some(chat_area) = self.ui.chat_area {
+                let popup_area = crate::ui::modals::editor_popup::popup_area_pub(chat_area);
+                if popup_area.contains(pos) {
+                    if self
+                        .ui
+                        .editor_popup
+                        .as_ref()
+                        .is_some_and(|e| e.close_area().is_some_and(|area| area.contains(pos)))
+                    {
+                        if let Some(mut editor) = self.ui.editor_popup.take() {
+                            editor.close();
+                        }
+                    }
+                    return None;
+                }
+            }
             return None;
         }
 

@@ -3,11 +3,10 @@ use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use portable_pty::{Child, CommandBuilder, NativePtySystem, PtySize, PtySystem};
+use portable_pty::{Child, CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    text::Line,
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
@@ -19,111 +18,144 @@ const OUTPUT_CHANNEL_SIZE: usize = 64;
 const INPUT_CHANNEL_SIZE: usize = 64;
 
 pub struct EditorPopupState {
-    pub artifact_name: String,
     parser: Arc<RwLock<Parser>>,
     input_tx: Sender<Bytes>,
     output_rx: Receiver<Vec<u8>>,
     child: Box<dyn Child + Send>,
+    master: Box<dyn MasterPty + Send>,
+    pub close_hit_area: Option<Rect>,
+    child_exited: bool,
+    current_size: (u16, u16),
 }
 
 impl EditorPopupState {
     pub fn new(path: &std::path::Path) -> Result<Self, String> {
-        let command_line = build_editor_command_line(path)?;
-        let artifact_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("editor")
-            .to_string();
-
+        let editor_parts = resolve_editor()?;
         let pty_system = NativePtySystem::default();
+        let initial_rows: u16 = 24;
+        let initial_cols: u16 = 80;
         let pair = pty_system
             .openpty(PtySize {
-                rows: 24,
-                cols: 80,
+                rows: initial_rows,
+                cols: initial_cols,
                 pixel_width: 0,
                 pixel_height: 0,
             })
             .map_err(|error| format!("Failed to open PTY: {error}"))?;
 
-        let mut cmd = CommandBuilder::new("sh");
-        cmd.arg("-lc");
-        cmd.arg(&command_line);
+        let mut cmd = CommandBuilder::new(&editor_parts[0]);
+        for arg in &editor_parts[1..] {
+            cmd.arg(arg);
+        }
+        cmd.arg(path);
+        cmd.env("TERM", "xterm-256color");
         let child = pair
             .slave
             .spawn_command(cmd)
             .map_err(|error| format!("Failed to spawn editor: {error}"))?;
         drop(pair.slave);
 
-        let parser = Arc::new(RwLock::new(Parser::new(24, 80, 0)));
+        let parser = Arc::new(RwLock::new(Parser::new(initial_rows, initial_cols, 0)));
         let (output_tx, output_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(OUTPUT_CHANNEL_SIZE);
         let (input_tx, input_rx) = tokio::sync::mpsc::channel::<Bytes>(INPUT_CHANNEL_SIZE);
 
-        spawn_reader(
-            pair.master
-                .try_clone_reader()
-                .map_err(|error| error.to_string())?,
-            output_tx,
-        );
-        spawn_writer(
-            pair.master
-                .take_writer()
-                .map_err(|error| error.to_string())?,
-            input_rx,
-        );
+        let reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|error| error.to_string())?;
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|error| error.to_string())?;
+        let master = pair.master;
+
+        spawn_reader(reader, output_tx);
+        spawn_writer(writer, input_rx);
 
         Ok(Self {
-            artifact_name,
             parser,
             input_tx,
             output_rx,
             child,
+            master,
+            close_hit_area: None,
+            child_exited: false,
+            current_size: (initial_rows, initial_cols),
         })
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
         let popup_area = popup_area(area);
-        let title = Line::from(format!(" Editing: {} ", self.artifact_name));
+        f.render_widget(Clear, popup_area);
+
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
-            .style(Style::default().bg(Color::Black))
-            .title(title);
-        f.render_widget(Clear, popup_area);
+            .style(Style::default().bg(Color::Black));
         f.render_widget(block.clone(), popup_area);
 
         let inner = block.inner(popup_area);
-        let layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(1)])
-            .margin(1)
-            .split(inner);
+        let rows = inner.height.max(1);
+        let cols = inner.width.max(1);
+        if (rows, cols) != self.current_size {
+            self.resize(rows, cols);
+        }
 
         let parser = self.parser.read().expect("parser lock poisoned");
         let screen = parser.screen();
-        let pseudo_term = PseudoTerminal::new(screen).block(block);
-        f.render_widget(pseudo_term, layout[0]);
+        let pseudo_term = PseudoTerminal::new(screen);
+        f.render_widget(pseudo_term, inner);
 
+        let close_x = popup_area.x + popup_area.width.saturating_sub(4);
+        let close_y = popup_area.y;
+        let close_area = Rect::new(close_x, close_y, 3, 1);
         f.render_widget(
-            Paragraph::new("Esc closes the editor popup")
-                .style(Style::default().fg(Color::DarkGray))
-                .alignment(Alignment::Center),
-            layout[1],
+            Paragraph::new("[x]")
+                .style(Style::default().fg(Color::Gray))
+                .alignment(Alignment::Right),
+            Rect::new(close_x, close_y, 3, 1),
         );
+        self.close_hit_area = Some(close_area);
     }
 
-    pub fn poll_output(&mut self) {
-        while let Ok(bytes) = self.output_rx.try_recv() {
+    fn resize(&mut self, rows: u16, cols: u16) {
+        {
             let mut parser = self.parser.write().expect("parser lock poisoned");
-            parser.process(&bytes);
+            parser.screen_mut().set_size(rows, cols);
         }
+        let _ = self.master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+        self.current_size = (rows, cols);
+    }
+
+    pub fn poll_output(&mut self) -> bool {
+        loop {
+            match self.output_rx.try_recv() {
+                Ok(bytes) => {
+                    let mut parser = self.parser.write().expect("parser lock poisoned");
+                    parser.process(&bytes);
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    self.child_exited = true;
+                    break;
+                }
+            }
+        }
+        self.child_exited
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.child_exited
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         if key.kind != crossterm::event::KeyEventKind::Press {
             return true;
-        }
-        if key.code == KeyCode::Esc {
-            return false;
         }
         let bytes = key_to_bytes(key);
         if !bytes.is_empty() {
@@ -135,6 +167,10 @@ impl EditorPopupState {
     pub fn close(&mut self) {
         let _ = self.child.kill();
     }
+
+    pub fn close_area(&self) -> Option<Rect> {
+        self.close_hit_area
+    }
 }
 
 impl Drop for EditorPopupState {
@@ -143,21 +179,25 @@ impl Drop for EditorPopupState {
     }
 }
 
+pub fn popup_area_pub(area: Rect) -> Rect {
+    popup_area(area)
+}
+
 fn popup_area(area: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(8),
-            Constraint::Percentage(84),
-            Constraint::Percentage(8),
+            Constraint::Percentage(6),
+            Constraint::Percentage(88),
+            Constraint::Length(2),
         ])
         .split(area);
     Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(6),
-            Constraint::Percentage(88),
-            Constraint::Percentage(6),
+            Constraint::Percentage(4),
+            Constraint::Percentage(92),
+            Constraint::Percentage(4),
         ])
         .split(popup_layout[1])[1]
 }
@@ -192,17 +232,16 @@ fn spawn_writer(mut writer: Box<dyn Write + Send>, mut rx: Receiver<Bytes>) {
     });
 }
 
-fn build_editor_command_line(path: &std::path::Path) -> Result<String, String> {
-    let path_str = shell_escape(path);
+fn resolve_editor() -> Result<Vec<String>, String> {
     if let Ok(editor) = std::env::var("EDITOR") {
         let trimmed = editor.trim();
         if !trimmed.is_empty() {
-            return Ok(format!("{trimmed} {path_str}"));
+            return Ok(trimmed.split_whitespace().map(String::from).collect());
         }
     }
     for editor in ["nvim", "vim", "nano"] {
         if command_exists(editor) {
-            return Ok(format!("{editor} {path_str}"));
+            return Ok(vec![editor.to_string()]);
         }
     }
     Err("No editor found. Set $EDITOR or install nvim, vim, or nano.".to_string())
@@ -213,11 +252,6 @@ fn command_exists(command: &str) -> bool {
         .into_iter()
         .flat_map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
         .any(|directory| directory.join(command).is_file())
-}
-
-fn shell_escape(path: &std::path::Path) -> String {
-    let value = path.display().to_string();
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn key_to_bytes(key: KeyEvent) -> Vec<u8> {

@@ -63,7 +63,7 @@ impl ArtifactViewerState {
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2),
+                Constraint::Length(1),
                 Constraint::Min(0),
                 Constraint::Length(1),
             ])
@@ -89,7 +89,6 @@ impl ArtifactViewerState {
         };
         let delete = if self.artifact.can_delete() {
             let rect = Rect::new(x, layout[0].y, 5, 1);
-            x = x.saturating_add(rect.width + 1);
             f.render_widget(
                 Paragraph::new("[Del]").style(Style::default().fg(Color::Red)),
                 rect,
@@ -98,22 +97,30 @@ impl ArtifactViewerState {
         } else {
             None
         };
-        let close = Rect::new(x, layout[0].y, 7, 1);
-        f.render_widget(
-            Paragraph::new("[Close]").style(Style::default().fg(Color::Gray)),
-            close,
-        );
 
         let badge = format!(
             "{} · {}",
             self.artifact.origin_label(),
             kind_label(self.artifact.kind)
         );
+        let close_x = layout[0].x + layout[0].width.saturating_sub(3);
+        let close = Rect::new(close_x, layout[0].y, 3, 1);
+        f.render_widget(
+            Paragraph::new("[x]").style(Style::default().fg(Color::Gray)),
+            close,
+        );
+
+        let badge_area = Rect::new(
+            layout[0].x,
+            layout[0].y,
+            layout[0].width.saturating_sub(5),
+            1,
+        );
         f.render_widget(
             Paragraph::new(badge)
                 .style(Style::default().fg(Color::DarkGray))
                 .alignment(Alignment::Right),
-            layout[0],
+            badge_area,
         );
 
         match self.artifact.kind {
@@ -170,7 +177,7 @@ impl ArtifactViewerState {
         }
 
         f.render_widget(
-            Paragraph::new("Esc closes, mouse wheel scrolls")
+            Paragraph::new("Esc to close----[x]")
                 .style(Style::default().fg(Color::DarkGray))
                 .alignment(Alignment::Center),
             layout[2],

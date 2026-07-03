@@ -43,7 +43,10 @@ impl TuiApp {
             tokio::select! {
                 _ = tick.tick() => {
                     if let Some(editor) = self.ui.editor_popup.as_mut() {
-                        editor.poll_output();
+                        let done = editor.poll_output();
+                        if done {
+                            self.ui.editor_popup = None;
+                        }
                     }
                 }
                 maybe_event = reader.next() => {
