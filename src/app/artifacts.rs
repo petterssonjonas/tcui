@@ -42,11 +42,24 @@ impl TuiApp {
         self.ui.memory_artifacts.clear();
         #[cfg(feature = "memory")]
         {
-            let Some(vault) = self.vault.as_ref() else {
-                return;
-            };
+            let vault_root: std::path::PathBuf = self
+                .vault
+                .as_ref()
+                .map(|v| v.root.clone())
+                .or_else(|| {
+                    self.config
+                        .try_read()
+                        .ok()
+                        .and_then(|cfg| cfg.vault_path.clone())
+                        .map(std::path::PathBuf::from)
+                })
+                .unwrap_or_else(|| {
+                    crate::storage::paths::TcuiDataPaths::discover()
+                        .root
+                        .join("vault")
+                });
             let Ok(store) = crate::memory::MemoryStore::open(
-                &vault.root,
+                &vault_root,
                 &crate::memory::MemoryStore::default_cache_path(),
             ) else {
                 return;

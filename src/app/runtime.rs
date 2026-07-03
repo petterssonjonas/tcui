@@ -541,6 +541,10 @@ impl TuiApp {
             let skills =
                 crate::skill_runtime::prepare(&config_snapshot, &user_request, &request).await;
             runtime_system_prompt.push_str(&skills.context);
+            let now = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
+            runtime_system_prompt.push_str(&format!(
+                "\n\nCurrent date and time: {now}. Use this when referencing relative dates like 'today' or 'yesterday'."
+            ));
             request.messages.extend(skills.messages);
             for notice in skills.notices {
                 let _ = action_tx.send(Action::UpdateStatus(notice));
