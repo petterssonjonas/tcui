@@ -350,6 +350,21 @@ impl TuiApp {
                     }
                     None
                 }
+                KeyCode::Char(' ')
+                    if self.ui.settings_popup.as_ref().is_some_and(|settings| {
+                        settings.active_tab == crate::ui::settings_tab::SettingsTab::General
+                            && matches!(
+                                settings.general_focus,
+                                crate::ui::settings_tab::GeneralFocus::ArtifactSaveDir
+                                    | crate::ui::settings_tab::GeneralFocus::VaultPath
+                            )
+                    }) =>
+                {
+                    if let Some(settings) = &mut self.ui.settings_popup {
+                        settings.type_char(' ');
+                    }
+                    None
+                }
                 KeyCode::Enter | KeyCode::Char(' ') => {
                     let mut provider_action = crate::ui::settings_tab::ProvidersAction::None;
                     let mut theme_to_apply = None;
@@ -882,16 +897,34 @@ impl TuiApp {
             return None;
         }
 
-        if let Some(viewer) = &self.ui.artifact_viewer {
+        if self.ui.artifact_viewer.is_some() {
             if let Some(chat_area) = self.ui.chat_area {
                 let popup_area = crate::ui::modals::artifact_viewer::popup_area(chat_area);
                 if popup_area.contains(pos) {
-                    if viewer
-                        .hit_areas
-                        .close
-                        .is_some_and(|area| area.contains(pos))
-                    {
+                    let (close, edit, delete, handle) = self
+                        .ui
+                        .artifact_viewer
+                        .as_ref()
+                        .map(|viewer| {
+                            (
+                                viewer.hit_areas.close,
+                                viewer.hit_areas.edit,
+                                viewer.hit_areas.delete,
+                                viewer.handle().clone(),
+                            )
+                        })
+                        .expect("viewer checked above");
+                    if close.is_some_and(|area| area.contains(pos)) {
                         self.ui.artifact_viewer = None;
+                        return None;
+                    }
+                    if edit.is_some_and(|area| area.contains(pos)) {
+                        self.ui.artifact_viewer = None;
+                        self.edit_artifact(handle);
+                        return None;
+                    }
+                    if delete.is_some_and(|area| area.contains(pos)) {
+                        self.ui.delete_confirm = Some(handle);
                         return None;
                     }
                     return None;
@@ -1071,6 +1104,13 @@ impl TuiApp {
                             if area.contains(pos) {
                                 settings.general_focus =
                                     crate::ui::settings_tab::GeneralFocus::ArtifactSaveDir;
+                                return None;
+                            }
+                        }
+                        if let Some(area) = settings.general_hit_areas.vault_path {
+                            if area.contains(pos) {
+                                settings.general_focus =
+                                    crate::ui::settings_tab::GeneralFocus::VaultPath;
                                 return None;
                             }
                         }

@@ -10,6 +10,7 @@ use crate::ui::components::{
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactViewerHitAreas {
     pub close: Option<Rect>,
+    pub edit: Option<Rect>,
     pub save: Option<Rect>,
     pub delete: Option<Rect>,
 }
@@ -78,14 +79,24 @@ impl ArtifactViewerState {
             Rect::new(center_x, title_y, center_label.len() as u16, 1),
         );
 
-        let right_label = " Esc to close [x]";
-        let right_len = right_label.len() as u16;
-        let right_x = popup_area.x + popup_area.width.saturating_sub(right_len);
+        let close_label = "[x]";
+        let close_len = close_label.len() as u16;
+        let close_x = popup_area.x + popup_area.width.saturating_sub(close_len + 1);
+        let close = Rect::new(close_x, title_y, close_len, 1);
         f.render_widget(
-            Paragraph::new(right_label).style(Style::default().fg(Color::Gray)),
-            Rect::new(right_x, title_y, right_len, 1),
+            Paragraph::new(close_label).style(Style::default().fg(Color::Red)),
+            close,
         );
-        let close = Rect::new(right_x + right_len - 3, title_y, 3, 1);
+
+        let content_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(inner);
+        let content_area = content_layout[0];
+        let button_area = content_layout[1];
+
+        let mut edit = None;
+        let mut delete = None;
 
         match self.artifact.kind {
             ArtifactKind::Image => {
@@ -100,13 +111,13 @@ impl ArtifactViewerState {
                     }
                 }
                 if let Some(state) = &mut self.image_state {
-                    state.render(f, inner);
+                    state.render(f, content_area);
                 } else {
                     f.render_widget(
                         Paragraph::new("Image preview unavailable")
                             .alignment(Alignment::Center)
                             .style(Style::default().fg(Color::DarkGray)),
-                        inner,
+                        content_area,
                     );
                 }
             }
@@ -125,25 +136,55 @@ impl ArtifactViewerState {
                 let rendered = MarkdownRenderer::new(props.terminal_capabilities).render(
                     content,
                     props.markdown_mode,
-                    inner.width.saturating_sub(2) as usize,
+                    content_area.width.saturating_sub(2) as usize,
                     false,
                     props.kitty_heading_downscale,
                     !props.image_protocol.eq_ignore_ascii_case("off"),
                 );
-                self.clamp_scroll(rendered.lines.len(), usize::from(inner.height));
+                self.clamp_scroll(rendered.lines.len(), usize::from(content_area.height));
                 f.render_widget(
                     Paragraph::new(rendered.lines)
                         .wrap(Wrap { trim: false })
                         .scroll((self.scroll as u16, 0)),
-                    inner,
+                    content_area,
                 );
             }
         }
 
+        if button_area.height > 0 {
+            let theme = crate::theme::active_theme();
+            let mut x = button_area.right().saturating_sub(1);
+            let y = button_area.y;
+
+            if self.artifact.path.is_some() {
+                let label = "[Edit]";
+                let width = label.len() as u16;
+                x = x.saturating_sub(width);
+                let rect = Rect::new(x, y, width, 1);
+                f.render_widget(
+                    Paragraph::new(label).style(Style::default().fg(theme.warning)),
+                    rect,
+                );
+                edit = Some(rect);
+                x = x.saturating_sub(1);
+            }
+
+            let label = "[Del]";
+            let width = label.len() as u16;
+            x = x.saturating_sub(width);
+            let del_rect = Rect::new(x, y, width, 1);
+            f.render_widget(
+                Paragraph::new(label).style(Style::default().fg(theme.error)),
+                del_rect,
+            );
+            delete = Some(del_rect);
+        }
+
         self.hit_areas = ArtifactViewerHitAreas {
             close: Some(close),
+            edit,
             save: None,
-            delete: None,
+            delete,
         };
     }
 }
@@ -160,9 +201,9 @@ pub fn popup_area(area: Rect) -> Rect {
     Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(6),
-            Constraint::Percentage(88),
-            Constraint::Percentage(6),
+            Constraint::Percentage(25),
+            Constraint::Percentage(75),
+            Constraint::Percentage(0),
         ])
         .split(popup_layout[1])[1]
 }
