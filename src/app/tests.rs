@@ -130,6 +130,33 @@ fn skills_popup_labels_description_and_origin_but_inserts_only_name() {
 }
 
 #[test]
+fn settings_vault_path_accepts_space_key() {
+    with_test_app("settings-vault-space", |app| {
+        app.ui.show_settings = true;
+        app.ui.settings_popup = Some(app.load_settings_popup_state(&AppConfig::default()));
+        let settings = app.ui.settings_popup.as_mut().expect("settings popup");
+        settings.active_tab = crate::ui::settings_tab::SettingsTab::General;
+        settings.general_focus = crate::ui::settings_tab::GeneralFocus::VaultPath;
+        settings.vault_path = "/home/jp/My".to_string();
+
+        let action = app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(' '),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+
+        assert!(action.is_none());
+        assert_eq!(
+            app.ui
+                .settings_popup
+                .as_ref()
+                .expect("settings popup")
+                .vault_path,
+            "/home/jp/My "
+        );
+    });
+}
+
+#[test]
 fn save_dialog_mouse_action_writes_the_artifact() {
     with_test_app("artifact-save-click", |app| {
         // Given
@@ -395,6 +422,57 @@ selected_model = "llama3.1"
     assert_eq!(app.ui.tabs[0].tab.model, "llama3.1");
 
     std::fs::remove_dir_all(&root).expect("cleanup temp dir");
+    std::env::remove_var("XDG_DATA_HOME");
+    std::env::remove_var("XDG_CONFIG_HOME");
+}
+
+#[test]
+fn startup_expands_tilde_vault_path_with_spaces_and_trailing_slash() {
+    let _guard = env_lock().lock().expect("env lock poisoned");
+    let root = unique_temp_dir("startup-vault-tilde");
+    let home = root.join("home");
+    let data_home = root.join("data-home");
+    let config_home = root.join("config-home");
+    let vault = home.join("Documents/Obsidian Vault");
+    std::fs::create_dir_all(&vault).expect("create vault dir");
+    std::fs::create_dir_all(&data_home).expect("create data dir");
+    std::fs::create_dir_all(&config_home).expect("create config dir");
+    std::fs::create_dir_all(config_home.join("tcui")).expect("create tcui config dir");
+    std::fs::write(vault.join("index.md"), "# Index").expect("write vault note");
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_DATA_HOME", &data_home);
+    std::env::set_var("XDG_CONFIG_HOME", &config_home);
+
+    std::fs::write(
+        config_home.join("tcui").join("config.toml"),
+        "vault_path = \"~/Documents/Obsidian Vault/\"\n",
+    )
+    .expect("write config");
+
+    let storage = Storage::new().expect("create storage");
+    let config = AppConfig::load().expect("load config");
+    let vault_handle = config.vault_path.as_ref().and_then(|path| {
+        let expanded = crate::app::generated_file::expand_user_path(
+            std::path::Path::new(path),
+            dirs::home_dir().as_deref(),
+        );
+        let vault = crate::obsidian::Vault::new(expanded);
+        vault.exists().then(|| Arc::new(vault))
+    });
+
+    let app = TuiApp::new(
+        storage,
+        Arc::new(tokio::sync::RwLock::new(config)),
+        Arc::new(LlmClient::new()),
+        vault_handle,
+    );
+
+    assert!(app.vault.is_some());
+    assert_eq!(app.ui.vault_artifacts.len(), 1);
+    assert_eq!(app.ui.vault_artifacts[0].name, "index.md");
+
+    std::fs::remove_dir_all(&root).expect("cleanup temp dir");
+    std::env::remove_var("HOME");
     std::env::remove_var("XDG_DATA_HOME");
     std::env::remove_var("XDG_CONFIG_HOME");
 }
@@ -1083,6 +1161,91 @@ fn move_input_cursor_respects_content_bounds() {
         app.move_input_cursor_right();
         assert_eq!(app.ui.tabs[0].input_cursor, 2);
     });
+}
+
+#[test]
+fn refresh_vault_artifacts_uses_configured_path_without_runtime_vault() {
+    let _guard = env_lock().lock().expect("env lock poisoned");
+    let root = unique_temp_dir("configured-vault-sidebar");
+    let data_home = root.join("data-home");
+    let config_home = root.join("config-home");
+    let vault = root.join("My Vault");
+    std::fs::create_dir_all(&data_home).expect("create data dir");
+    std::fs::create_dir_all(&config_home).expect("create config dir");
+    std::fs::create_dir_all(&vault).expect("create vault dir");
+    std::fs::write(vault.join("note.md"), "# Note").expect("write vault note");
+    std::env::set_var("XDG_DATA_HOME", &data_home);
+    std::env::set_var("XDG_CONFIG_HOME", &config_home);
+
+    let mut config = AppConfig::default();
+    config.vault_path = Some(vault.to_string_lossy().to_string());
+    let storage = Storage::new().expect("create storage");
+    let mut app = TuiApp::new(
+        storage,
+        Arc::new(tokio::sync::RwLock::new(config)),
+        Arc::new(crate::llm::LlmClient::new()),
+        None,
+    );
+
+    app.refresh_vault_artifacts();
+
+    assert_eq!(app.ui.vault_artifacts.len(), 1);
+    assert_eq!(app.ui.vault_artifacts[0].name, "note.md");
+
+    std::fs::remove_dir_all(&root).expect("cleanup temp dir");
+    std::env::remove_var("XDG_DATA_HOME");
+    std::env::remove_var("XDG_CONFIG_HOME");
+}
+
+#[cfg(feature = "memory")]
+#[test]
+fn refresh_memory_artifacts_expands_tilde_vault_path() {
+    let _guard = env_lock().lock().expect("env lock poisoned");
+    let root = unique_temp_dir("memory-tilde-vault");
+    let home = root.join("home");
+    let data_home = root.join("data-home");
+    let config_home = root.join("config-home");
+    let vault = home.join("Documents/My Vault");
+    std::fs::create_dir_all(&vault).expect("create vault dir");
+    std::fs::create_dir_all(&data_home).expect("create data dir");
+    std::fs::create_dir_all(&config_home).expect("create config dir");
+    std::fs::create_dir_all(config_home.join("tcui")).expect("create tcui config dir");
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_DATA_HOME", &data_home);
+    std::env::set_var("XDG_CONFIG_HOME", &config_home);
+
+    let mut config = AppConfig::default();
+    config.memory.enabled = true;
+    config.vault_path = Some("~/Documents/My Vault/".to_string());
+    config.save().expect("save config");
+
+    let storage = Storage::new().expect("create storage");
+    let mut app = TuiApp::new(
+        storage,
+        Arc::new(tokio::sync::RwLock::new(config)),
+        Arc::new(crate::llm::LlmClient::new()),
+        None,
+    );
+
+    let store =
+        crate::memory::MemoryStore::open(&vault, &crate::memory::MemoryStore::default_cache_path())
+            .expect("open memory store");
+    store
+        .remember("User prefers dark mode for coding.")
+        .expect("save memory");
+
+    app.refresh_memory_artifacts();
+
+    assert_eq!(app.ui.memory_artifacts.len(), 1);
+    assert_eq!(
+        app.ui.memory_artifacts[0].content.as_deref(),
+        Some("User prefers dark mode for coding.")
+    );
+
+    std::fs::remove_dir_all(&root).expect("cleanup temp dir");
+    std::env::remove_var("HOME");
+    std::env::remove_var("XDG_DATA_HOME");
+    std::env::remove_var("XDG_CONFIG_HOME");
 }
 
 #[cfg(feature = "memory")]
