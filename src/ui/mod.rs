@@ -82,6 +82,7 @@ pub struct UI {
     pub settings_tab_areas: Option<Vec<Rect>>,
     pub status_bar_areas: Option<StatusBarAreas>,
     pub artifact_sidebar_state: ArtifactSidebarState,
+    pub vault_available: bool,
     pub vault_artifacts: Vec<ArtifactEntry>,
     pub saved_artifacts: Vec<ArtifactEntry>,
     pub memory_artifacts: Vec<ArtifactEntry>,
@@ -253,6 +254,7 @@ impl UI {
             settings_tab_areas: None,
             status_bar_areas: None,
             artifact_sidebar_state: ArtifactSidebarState::default(),
+            vault_available: false,
             vault_artifacts: vec![],
             saved_artifacts: vec![],
             memory_artifacts: vec![],
@@ -362,7 +364,7 @@ impl UI {
                     &self.saved_artifacts,
                     &self.memory_artifacts,
                     &self.vault_artifacts,
-                    !self.vault_artifacts.is_empty(),
+                    self.vault_available,
                     &mut self.artifact_sidebar_state,
                 );
                 artifact_sidebar.render(f, content_layout[2]);
