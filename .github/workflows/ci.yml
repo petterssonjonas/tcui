@@ -10,9 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-      - run: rustup toolchain install stable --profile minimal --component rustfmt
-      - run: rustup default stable
+      - run: rustup toolchain install 1.96.0 --profile minimal --component rustfmt,clippy
+      - run: rustup default 1.96.0
       - run: cargo fmt --all -- --check
-      - run: cargo check --all-targets
-      - run: cargo test
+      - run: cargo clippy --all-features -- -D warnings
+      - run: cargo check --all-targets --all-features
+      - run: cargo test --all-features
       - run: bash evals/smoke.sh
