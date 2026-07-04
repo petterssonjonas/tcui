@@ -15,6 +15,11 @@ permissions:
 jobs:
   linux:
     runs-on: ubuntu-latest
+    env:
+      # Cross-compilation toolchain for aarch64-unknown-linux-gnu.
+      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+      CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - id: meta
@@ -26,15 +31,22 @@ jobs:
           print(cargo['package']['version'])
           PY
           )" >> "$GITHUB_OUTPUT"
-      - run: rustup toolchain install stable --profile minimal
-      - run: rustup default stable
+      - run: rustup toolchain install 1.96.0 --profile minimal
+      - run: rustup default 1.96.0
       - run: rustup target add aarch64-unknown-linux-gnu
+      # Native C/C++ cross-compiler needed by the bundled SQLite, oniguruma,
+      # and sqlite-vec build scripts when targeting aarch64.
+      - run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+      # x86_64 release binary (used by the .deb amd64, .rpm, and x86 tarball).
       - run: cargo build --release
+      # aarch64 release binary (used by the .deb arm64 and arm64 tarball).
+      - run: cargo build --release --target aarch64-unknown-linux-gnu
       - run: cargo install cargo-deb cargo-generate-rpm
       - run: cargo deb --no-build --output target/release/tcui_${{ steps.meta.outputs.version }}_amd64.deb
-      - run: cargo deb --target aarch64-unknown-linux-gnu --output target/release/tcui_${{ steps.meta.outputs.version }}_arm64.deb
+      - run: cargo deb --no-build --target aarch64-unknown-linux-gnu --output target/aarch64-unknown-linux-gnu/release/tcui_${{ steps.meta.outputs.version }}_arm64.deb
       - run: cargo generate-rpm --output target/release/tcui-${{ steps.meta.outputs.version }}-1.x86_64.rpm
       - run: tar -C target/release -czf target/release/tcui-x86_64-unknown-linux-gnu.tar.gz tcui
+      - run: tar -C target/aarch64-unknown-linux-gnu/release -czf target/release/tcui-aarch64-unknown-linux-gnu.tar.gz tcui
       - run: git archive --format=tar.gz --output target/release/tcui-${{ steps.meta.outputs.version }}-source.tar.gz HEAD
       - run: cp scripts/install.sh target/release/install.sh
       - run: cp LICENSE target/release/LICENSE
@@ -43,6 +55,7 @@ jobs:
           cd target/release
           sha256sum \
             tcui-x86_64-unknown-linux-gnu.tar.gz \
+            tcui-aarch64-unknown-linux-gnu.tar.gz \
             tcui-${{ steps.meta.outputs.version }}-source.tar.gz \
             tcui_${{ steps.meta.outputs.version }}_amd64.deb \
             tcui_${{ steps.meta.outputs.version }}_arm64.deb \
@@ -56,6 +69,7 @@ jobs:
         run: |
           gh release upload "${RELEASE_TAG}" \
             target/release/tcui-x86_64-unknown-linux-gnu.tar.gz \
+            target/release/tcui-aarch64-unknown-linux-gnu.tar.gz \
             target/release/tcui-${{ steps.meta.outputs.version }}-source.tar.gz \
             target/release/tcui_${{ steps.meta.outputs.version }}_amd64.deb \
             target/release/tcui_${{ steps.meta.outputs.version }}_arm64.deb \
