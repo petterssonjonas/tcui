@@ -26,6 +26,7 @@ Release assets for every published release:
 - `tcui-x86_64-unknown-linux-gnu.tar.gz` — portable x86_64 binary
 - `tcui-aarch64-unknown-linux-gnu.tar.gz` — portable aarch64 binary
 - `tcui-<version>-source.tar.gz` — source archive
+- `PKGBUILD` — Arch Linux / AUR `tcui-bin` build script (regenerated per release with the correct `pkgver` and binary checksums)
 - `install.sh`, `SHA256SUMS`, `LICENSE`, `potion-base-8M-LICENSE`
 
 Linux install script (detects `uname -m` and the native package manager, downloads the matching `.deb` / `.rpm` / tarball, verifies `SHA256SUMS`, then installs):
@@ -44,6 +45,17 @@ Options, all optional:
 | `TCUI_REPO`      | `petterssonjonas/tcui`   | Override for forks. |
 
 The release workflow (`.github/workflows/release.yml`) builds all of the above on every published release and on manual dispatch.
+
+### Arch Linux / AUR
+
+Each release ships a `PKGBUILD` (`tcui-bin`, sources the matching prebuilt binary tarball for `x86_64` or `aarch64`). Download it from the release and build locally:
+
+```bash
+curl -fsSL https://github.com/petterssonjonas/tcui/releases/latest/download/PKGBUILD -o PKGBUILD
+makepkg -si
+```
+
+The in-repo `packaging/PKGBUILD` is the source of truth the release pipeline regenerates from; AUR maintainers can use it directly when publishing the `tcui-bin` AUR package.
 
 Upgrade in place without touching your config:
 

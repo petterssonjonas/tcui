@@ -62,7 +62,20 @@ jobs:
             tcui-${{ steps.meta.outputs.version }}-1.x86_64.rpm \
             install.sh \
             LICENSE \
-            potion-base-8M-LICENSE > SHA256SUMS
+            potion-base-8M-LICENSE \
+            PKGBUILD > SHA256SUMS
+      - name: Generate release PKGBUILD from packaging/PKGBUILD
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          X86_SUM="$(awk '$2=="tcui-x86_64-unknown-linux-gnu.tar.gz"{print $1}' target/release/SHA256SUMS)"
+          ARM_SUM="$(awk '$2=="tcui-aarch64-unknown-linux-gnu.tar.gz"{print $1}' target/release/SHA256SUMS)"
+          [[ -n "$X86_SUM" && -n "$ARM_SUM" ]] || { echo "missing binary tarball checksums in SHA256SUMS" >&2; exit 1; }
+          cp packaging/PKGBUILD target/release/PKGBUILD
+          sed -i \
+            -e "s|^pkgver=.*|pkgver=${VERSION}|" \
+            -e "s|^sha256sums_x86_64=('[0-9a-f]*')|sha256sums_x86_64=('${X86_SUM}')|" \
+            -e "s|^sha256sums_aarch64=('[0-9a-f]*')|sha256sums_aarch64=('${ARM_SUM}')|" \
+            target/release/PKGBUILD
       - env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
@@ -78,4 +91,5 @@ jobs:
             target/release/LICENSE \
             target/release/potion-base-8M-LICENSE \
             target/release/SHA256SUMS \
+            target/release/PKGBUILD \
             --clobber
