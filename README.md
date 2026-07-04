@@ -18,22 +18,32 @@ API keys are read from provider env vars, `.env`, saved settings, or supported O
 
 ## Install
 
-Release assets include:
+Release assets for every published release:
 
-- `tcui-x86_64-unknown-linux-gnu.tar.gz`
-- `.deb`
-- `arm64 .deb`
-- `.rpm`
+- `tcui_<version>_amd64.deb` — Debian/Ubuntu package for x86_64
+- `tcui_<version>_arm64.deb` — Debian/Ubuntu package for aarch64/arm64
+- `tcui-<version>-1.x86_64.rpm` — RPM package for x86_64
+- `tcui-x86_64-unknown-linux-gnu.tar.gz` — portable x86_64 binary
+- `tcui-aarch64-unknown-linux-gnu.tar.gz` — portable aarch64 binary
+- `tcui-<version>-source.tar.gz` — source archive
+- `install.sh`, `SHA256SUMS`, `LICENSE`, `potion-base-8M-LICENSE`
 
-Linux install script:
+Linux install script (detects `uname -m` and the native package manager, downloads the matching `.deb` / `.rpm` / tarball, verifies `SHA256SUMS`, then installs):
 
 ```bash
 curl -fsSL https://github.com/petterssonjonas/tcui/releases/latest/download/install.sh | bash
 ```
 
-The installer verifies the release `SHA256SUMS` file before installing the binary.
+Options, all optional:
 
-When a release is published, the GitHub release workflow builds the release packages and uploads them alongside the install script and checksums.
+| Env var          | Default                  | Notes |
+|------------------|--------------------------|-------|
+| `TCUI_VERSION`   | `latest`                 | Release tag, with or without leading `v`. |
+| `TCUI_PKG`       | auto                     | Force `deb`, `rpm`, or `tarball` (skips auto-detection). |
+| `TCUI_BIN_DIR`   | `~/.local/bin` (or `/usr/local/bin` as root) | Install dir for the tarball fallback only. |
+| `TCUI_REPO`      | `petterssonjonas/tcui`   | Override for forks. |
+
+The release workflow (`.github/workflows/release.yml`) builds all of the above on every published release and on manual dispatch.
 
 Upgrade in place without touching your config:
 
