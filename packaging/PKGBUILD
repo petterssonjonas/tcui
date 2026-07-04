@@ -1,0 +1,39 @@
+# Maintainer: TermChatUI maintainers
+# Contributor: Jonas Pettersson
+#
+# Binary release PKGBUILD for tcui. Downloads the prebuilt binary tarball and
+# the upstream LICENSE from the matching GitHub release, then installs
+# /usr/bin/tcui. AUR package name: tcui-bin.
+#
+# The release pipeline (.github/workflows/release.yml) regenerates this file
+# per release with the freshly built checksums, so end users who pull the
+# PKGBUILD from a release asset get a ready-to-use file. The in-repo copy
+# below stays accurate to the most recent release.
+pkgname=tcui-bin
+pkgver=0.8.0
+pkgrel=1
+pkgdesc="ChatGPT-style terminal chat UI"
+arch=('x86_64' 'aarch64')
+url="https://github.com/petterssonjonas/tcui"
+license=('GPL-3.0-only')
+depends=('gcc-libs' 'ca-certificates')
+provides=('tcui')
+conflicts=('tcui' 'tcui-git')
+options=('!debug')
+
+# Shared sources: one entry per arch-independent artifact. sha256sums aligns
+# with this array; arch-specific sums live in sha256sums_<arch> below.
+source=("LICENSE::${url}/releases/download/v${pkgver}/LICENSE")
+sha256sums=('fc82ca8b6fdb18d4e3e85cfd8ab58d1bcd3f1b29abe782895abd91d64763f8e7')
+
+# Architecture-specific binary tarballs (one per arch in `arch`).
+source_x86_64=("${pkgname}-${pkgver}-x86_64.tar.gz::${url}/releases/download/v${pkgver}/tcui-x86_64-unknown-linux-gnu.tar.gz")
+source_aarch64=("${pkgname}-${pkgver}-aarch64.tar.gz::${url}/releases/download/v${pkgver}/tcui-aarch64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('418b726885661791d8a4735b103698a0adcc1c384f380945438493426e414e80')
+sha256sums_aarch64=('ef16964fe3d3eccaa98feb58078834bc7b73e20e193efadda1e9e8229c871742')
+
+package() {
+    # Release tarballs expand to a single `tcui` binary next to this PKGBUILD.
+    install -Dm755 "${srcdir}/tcui" "${pkgdir}/usr/bin/tcui"
+    install -Dm644 "${srcdir}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}
