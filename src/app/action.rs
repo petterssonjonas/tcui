@@ -40,15 +40,16 @@ pub enum Action {
     ScrollUp,
     ScrollDown,
     ShowQuitConfirm,
-    SwitchSettingsTab,
+    ShowHelp,
+    DismissHelp,
     ShowSettings,
     CloseSettings,
     ToggleSettings,
     UpdateTabProvider(usize, String),
     UpdateTabModel(usize, String),
-    SetProviderModels(String, Vec<crate::ui::settings_tab::ModelInfo>),
+    SetProviderModels(String, Vec<crate::ui::ModelInfo>),
     SaveApiKey(String, String),
-    MouseClick(u16, u16),
+    MouseClick(MouseClickAction),
     SaveGeneratedFile,
     SaveExportDialog,
     CancelSaveDialog,
@@ -59,4 +60,18 @@ pub enum Action {
     ShowLocalSearch(String),
     CloseListPopup,
     RefreshArtifactSidebar,
+    OpenCommandPalette,
+    OpenSettingsPanel,
+    SetPinnedCommands(Vec<String>),
+    ToggleCollapseThinking,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseClickAction {
+    SelectPaletteItem(usize),
+    ToggleLeftHandle,
+    ToggleRightHandle,
+    OpenProviderDropdown,
+    OpenModelDropdown,
+    SelectSettingsItem(usize),
 }

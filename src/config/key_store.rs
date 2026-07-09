@@ -17,19 +17,6 @@ impl KeyStore {
         Self
     }
 
-    pub fn load_keys(config: &AppConfig) -> Result<Vec<(String, String)>> {
-        let file = Self::load_file(config)?;
-        file.keys
-            .into_iter()
-            .map(|(provider, encrypted)| {
-                Ok((
-                    provider,
-                    crate::storage::Storage::decrypt_shared_text(&encrypted)?,
-                ))
-            })
-            .collect()
-    }
-
     pub fn get(config: &AppConfig, provider: &str) -> Result<Option<String>> {
         let file = Self::load_file(config)?;
         file.keys
@@ -138,8 +125,8 @@ mod tests {
         assert!(raw.contains("enc:v1:"));
         assert!(!raw.contains("sk-secret"));
 
-        let keys = KeyStore::load_keys(&config).expect("load decrypted keys");
-        assert_eq!(keys, vec![("OpenAI".to_string(), "sk-secret".to_string())]);
+        let key = KeyStore::get(&config, "OpenAI").expect("load decrypted key");
+        assert_eq!(key.as_deref(), Some("sk-secret"));
 
         std::fs::remove_dir_all(&root).expect("cleanup temp dir");
     }

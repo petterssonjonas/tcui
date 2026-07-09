@@ -331,11 +331,7 @@ impl<'a> ArtifactSidebar<'a> {
         self.clear_hit_state();
 
         let theme = crate::theme::active_theme();
-        let block = Block::default()
-            .title(" Right Sidebar ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.border))
-            .style(theme.panel_style());
+        let block = Block::default().style(theme.panel_style());
         let inner = block.inner(area);
         f.render_widget(block, area);
 
@@ -886,7 +882,7 @@ mod tests {
     };
     use ratatui::{backend::TestBackend, layout::Position, layout::Rect, Terminal};
     use std::collections::HashSet;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn entry(name: &str, origin: ArtifactOrigin) -> ArtifactEntry {
         ArtifactEntry {
@@ -912,28 +908,24 @@ mod tests {
         ];
 
         let expanded = build_vault_nodes(&entries, &HashSet::new());
+        assert!(expanded.iter().any(|node| node.path == Path::new("notes")));
         assert!(expanded
             .iter()
-            .any(|node| node.path == PathBuf::from("notes")));
+            .any(|node| node.path == Path::new("notes/projects")));
         assert!(expanded
             .iter()
-            .any(|node| node.path == PathBuf::from("notes/projects")));
-        assert!(expanded
-            .iter()
-            .any(|node| node.path == PathBuf::from("notes/projects/b.md")));
+            .any(|node| node.path == Path::new("notes/projects/b.md")));
 
         let mut collapsed_dirs = HashSet::new();
         collapsed_dirs.insert(PathBuf::from("notes"));
         let collapsed = build_vault_nodes(&entries, &collapsed_dirs);
-        assert!(collapsed
-            .iter()
-            .any(|node| node.path == PathBuf::from("notes")));
+        assert!(collapsed.iter().any(|node| node.path == Path::new("notes")));
         assert!(!collapsed
             .iter()
-            .any(|node| node.path == PathBuf::from("notes/projects")));
+            .any(|node| node.path == Path::new("notes/projects")));
         assert!(!collapsed
             .iter()
-            .any(|node| node.path == PathBuf::from("notes/a.md")));
+            .any(|node| node.path == Path::new("notes/a.md")));
     }
 
     #[test]
@@ -946,7 +938,7 @@ mod tests {
             .draw(|frame| sidebar.render(frame, Rect::new(0, 0, 32, 20)))
             .expect("render");
 
-        let action = state.action_at(Position::new(1, 1));
+        let action = state.action_at(Position::new(1, 0));
         assert!(matches!(
             action,
             Some(ArtifactSidebarAction::ToggleSection(

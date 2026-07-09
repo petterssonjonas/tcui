@@ -1,9 +1,9 @@
 #![allow(dead_code)]
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
@@ -12,14 +12,17 @@ pub mod chat_tab;
 pub mod components;
 pub mod modals;
 pub mod session_list;
-pub mod settings_tab;
 pub mod sidebar;
 pub mod status_bar;
 pub mod tab_bar;
 pub mod toast;
 pub mod top_bar;
 
+#[cfg(test)]
+mod toast_tests;
+
 use crate::config::app_config::{HeadingDownscale, MarkdownMode, TextAlignment};
+use crate::tui::components::centered_rect;
 use crate::ui::components::terminal_capabilities::TerminalCapabilities;
 use artifact_sidebar::{ArtifactEntry, ArtifactSidebar, ArtifactSidebarState};
 use modals::artifact_viewer::ArtifactViewerState;
@@ -27,11 +30,18 @@ use modals::export_dialog::ExportDialog;
 use modals::list_popup::ListPopup;
 use modals::quit_confirm::QuitConfirmModal;
 use modals::save_file::SaveFileDialog;
-use settings_tab::SettingsPopup;
 use sidebar::Sidebar;
-use status_bar::{ConnectionStatus, StatusBar, StatusBarAreas};
-use toast::Toast;
+use status_bar::{ConnectionStatus, StatusBar, StatusBarAreas, StatusBarConfig};
+use toast::ToastStack;
 use top_bar::TopBar;
+
+#[derive(Debug, Clone)]
+pub struct ModelInfo {
+    pub id: String,
+    pub input_price: Option<f64>,
+    pub output_price: Option<f64>,
+    pub context_window: Option<u32>,
+}
 
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -50,7 +60,7 @@ pub enum Action {
     SwitchTab(usize),
     AddTab(crate::app::tab::Tab),
     RemoveTab(usize),
-    SetProviderModels(String, Vec<crate::ui::settings_tab::ModelInfo>),
+    SetProviderModels(String, Vec<crate::ui::ModelInfo>),
     ToggleSessionList,
     ToggleSidebar,
     ToggleArtifactSidebar,
@@ -59,27 +69,31 @@ pub enum Action {
 pub struct UI {
     pub tabs: Vec<ChatTabState>,
     pub active_tab: usize,
+    pub panel_state: crate::tui::shell::PanelState,
     pub sidebar_open: bool,
     pub artifact_sidebar_open: bool,
     pub show_session_list: bool,
     pub active_modal: Option<Modal>,
     pub focus_input: bool,
-    pub show_settings: bool,
-    pub settings_popup: Option<SettingsPopup>,
     pub save_file_dialog: Option<SaveFileDialog>,
     pub export_dialog: Option<ExportDialog>,
     pub artifact_viewer: Option<ArtifactViewerState>,
     pub editor_popup: Option<crate::ui::modals::editor_popup::EditorPopupState>,
     pub list_popup: Option<ListPopup>,
+    pub palette: Option<crate::tui::palette::PaletteState>,
+    pub settings_v2: Option<crate::tui::settings_panel::SettingsPanelState>,
+    pub keybind_capture: Option<crate::tui::keybind_capture::KeybindCaptureState>,
+    pub keybinding_overrides: BTreeMap<String, String>,
+    pub show_help: bool,
+    pub mouse_hit_areas: Vec<(Rect, MouseAction)>,
     pub last_area: Option<Rect>,
     pub chat_area: Option<Rect>,
     pub connection_status: ConnectionStatus,
     pub connection_message: Option<String>,
-    pub toast: Option<Toast>,
+    pub toast_stack: ToastStack,
     pub modal_areas: Option<ModalAreas>,
     pub delete_confirm: Option<crate::ui::artifact_sidebar::ArtifactHandle>,
     pub delete_confirm_areas: Option<ModalAreas>,
-    pub settings_tab_areas: Option<Vec<Rect>>,
     pub status_bar_areas: Option<StatusBarAreas>,
     pub artifact_sidebar_state: ArtifactSidebarState,
     pub vault_available: bool,
@@ -100,11 +114,22 @@ pub struct UI {
     pub web_search_enabled: bool,
     pub db_providers: Vec<(String, String, String, String, String)>,
     pub visible_providers: Vec<(String, String, String, String, String)>,
-    pub current_models: Vec<crate::ui::settings_tab::ModelInfo>,
+    pub current_models: Vec<crate::ui::ModelInfo>,
     pub current_reasoning_options: Vec<String>,
     pub disabled_providers: HashSet<String>,
     pub disabled_models: HashSet<String>,
     pub frame_tick: u64,
+    pub tui_config: crate::config::TuiConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseAction {
+    PaletteItem(usize),
+    LeftHandle,
+    RightHandle,
+    ProviderDropdown,
+    ModelDropdown,
+    SettingsItem(usize),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -231,27 +256,31 @@ impl UI {
                 image_states: HashMap::new(),
             }],
             active_tab: 0,
+            panel_state: crate::tui::shell::PanelState::new(),
             sidebar_open: false,
             artifact_sidebar_open: false,
             show_session_list: false,
             active_modal: None,
             focus_input: true,
-            show_settings: false,
-            settings_popup: None,
             save_file_dialog: None,
             export_dialog: None,
             artifact_viewer: None,
             editor_popup: None,
             list_popup: None,
+            palette: None,
+            settings_v2: None,
+            keybind_capture: None,
+            keybinding_overrides: BTreeMap::new(),
+            show_help: false,
+            mouse_hit_areas: Vec::new(),
             last_area: None,
             chat_area: None,
             connection_status: ConnectionStatus::Checking,
             connection_message: None,
-            toast: None,
+            toast_stack: ToastStack::new(),
             modal_areas: None,
             delete_confirm: None,
             delete_confirm_areas: None,
-            settings_tab_areas: None,
             status_bar_areas: None,
             artifact_sidebar_state: ArtifactSidebarState::default(),
             vault_available: false,
@@ -277,6 +306,7 @@ impl UI {
             disabled_providers: HashSet::new(),
             disabled_models: HashSet::new(),
             frame_tick: 0,
+            tui_config: crate::config::TuiConfig::default(),
         }
     }
 
@@ -286,45 +316,95 @@ impl UI {
         let area = f.area();
         self.last_area = Some(area);
         self.modal_areas = None;
-        self.settings_tab_areas = None;
         self.status_bar_areas = None;
         self.chat_area = None;
+        self.mouse_hit_areas.clear();
 
+        if area.width < 80 || area.height < 24 {
+            f.render_widget(Clear, area);
+            f.render_widget(
+                Block::default().style(Style::default().fg(Color::White).bg(Color::Black)),
+                area,
+            );
+            let vertical = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(0),
+                    Constraint::Length(1),
+                    Constraint::Min(0),
+                ])
+                .split(area);
+            let horizontal = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Min(0),
+                    Constraint::Length(30),
+                    Constraint::Min(0),
+                ])
+                .split(vertical[1]);
+            let msg = Paragraph::new("TCUI requires at least 80×24")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(Color::White).bg(Color::Black));
+            f.render_widget(msg, horizontal[1]);
+            return;
+        }
+
+        let status_bar_rows = self.tui_config.status_bar_rows.clamp(1, 2);
         let main_layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),
                 Constraint::Min(0),
-                Constraint::Length(1),
+                Constraint::Length(u16::from(status_bar_rows)),
             ])
             .split(area);
 
         // Top bar
-        let top_bar = TopBar::new(
-            &self.tabs,
-            self.active_tab,
-            self.sidebar_open,
-            self.artifact_sidebar_open,
-        );
+        let top_bar = TopBar::new(&self.tabs, self.active_tab, false, false);
         top_bar.render(f, main_layout[0]);
 
-        let left_width = if self.sidebar_open {
-            sidebar::SIDEBAR_WIDTH
+        let mut panels = self.panel_state;
+        panels.left = if self.sidebar_open {
+            match panels.left {
+                crate::tui::shell::PanelMode::Closed => crate::tui::shell::PanelMode::Thin,
+                crate::tui::shell::PanelMode::Thin => crate::tui::shell::PanelMode::Thin,
+                crate::tui::shell::PanelMode::Wide => {
+                    panels.expand_left();
+                    crate::tui::shell::PanelMode::Wide
+                }
+            }
         } else {
-            0
+            panels.collapse_left();
+            crate::tui::shell::PanelMode::Closed
         };
-        let show_artifact_sidebar =
-            self.artifact_sidebar_open && main_layout[1].width.saturating_sub(left_width) >= 72;
-        let max_artifact_width = main_layout[1]
-            .width
-            .saturating_sub(left_width)
-            .saturating_sub(24);
-        let artifact_width = if !show_artifact_sidebar {
-            0
-        } else if max_artifact_width < 22 {
-            max_artifact_width
+        panels.right = if self.artifact_sidebar_open {
+            match panels.right {
+                crate::tui::shell::PanelMode::Closed => crate::tui::shell::PanelMode::Thin,
+                crate::tui::shell::PanelMode::Thin => crate::tui::shell::PanelMode::Thin,
+                crate::tui::shell::PanelMode::Wide => {
+                    panels.expand_right();
+                    crate::tui::shell::PanelMode::Wide
+                }
+            }
         } else {
-            max_artifact_width.min(32)
+            panels.collapse_right();
+            crate::tui::shell::PanelMode::Closed
+        };
+        panels = panels.clamped_for_area(main_layout[1]);
+
+        let left_actual_width = panels.left_width();
+        let artifact_actual_width = panels.right_width();
+        let left_overlays_chat = panels.left == crate::tui::shell::PanelMode::Wide;
+        let right_overlays_chat = panels.right == crate::tui::shell::PanelMode::Wide;
+        let left_width = if left_overlays_chat {
+            0
+        } else {
+            left_actual_width
+        };
+        let artifact_width = if right_overlays_chat {
+            0
+        } else {
+            artifact_actual_width
         };
         let content_layout = [
             Rect::new(
@@ -349,16 +429,47 @@ impl UI {
                 main_layout[1].height,
             ),
         ];
+        let left_overlay_area = Rect::new(
+            main_layout[1].x,
+            main_layout[1].y,
+            left_actual_width.min(main_layout[1].width),
+            main_layout[1].height,
+        );
+        let right_overlay_area = Rect::new(
+            main_layout[1].right().saturating_sub(artifact_actual_width),
+            main_layout[1].y,
+            artifact_actual_width.min(main_layout[1].width),
+            main_layout[1].height,
+        );
+        let left_sidebar_area = if left_overlays_chat {
+            left_overlay_area
+        } else {
+            content_layout[0]
+        };
+        let right_sidebar_area = if right_overlays_chat {
+            right_overlay_area
+        } else {
+            content_layout[2]
+        };
 
         // Sidebar
-        if self.sidebar_open {
+        if self.sidebar_open && !left_overlays_chat {
+            f.render_widget(
+                Block::default().style(Style::default().fg(theme.foreground).bg(theme.sidebar)),
+                left_sidebar_area,
+            );
             let active_tab = &self.tabs[self.active_tab];
             let sidebar = Sidebar::new(&active_tab.conversations, active_tab.active_conversation);
-            sidebar.render(f, content_layout[0]);
+            sidebar.render(f, left_sidebar_area);
         }
 
+        let left_handle_rect = panels.handle_left_rect(main_layout[1]);
         if let Some(tab_state) = self.tabs.get_mut(self.active_tab) {
-            if artifact_width > 0 {
+            if artifact_actual_width > 0 && !right_overlays_chat {
+                f.render_widget(
+                    Block::default().style(theme.panel_style()),
+                    right_sidebar_area,
+                );
                 let mut artifact_sidebar = ArtifactSidebar::new(
                     &tab_state.temporary_artifacts,
                     &self.saved_artifacts,
@@ -367,31 +478,19 @@ impl UI {
                     self.vault_available,
                     &mut self.artifact_sidebar_state,
                 );
-                artifact_sidebar.render(f, content_layout[2]);
+                artifact_sidebar.render(f, right_sidebar_area);
             } else {
                 self.artifact_sidebar_state = ArtifactSidebarState::default();
             }
         }
 
+        let right_handle_rect = panels.handle_right_rect(main_layout[1]);
+
         self.chat_area = Some(content_layout[1]);
 
         // Content area
         if let Some(tab_state) = self.tabs.get_mut(self.active_tab) {
-            let pane_title = if tab_state.tab.model.is_empty() {
-                format!(" {} ", tab_state.tab.provider)
-            } else {
-                format!(" {} / {} ", tab_state.tab.provider, tab_state.tab.model)
-            };
-            let pane = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.border))
-                .title(Line::from(Span::styled(
-                    pane_title,
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                )))
-                .style(theme.panel_style());
+            let pane = Block::default().style(theme.panel_style());
             let pane_area = pane.inner(content_layout[1]);
             f.render_widget(pane, content_layout[1]);
 
@@ -446,6 +545,7 @@ impl UI {
                     .rev()
                     .find_map(|message| message.token_count)
                     .and_then(|count| u32::try_from(count).ok()),
+                config: StatusBarConfig::from_tui(&self.tui_config),
             };
             let status_areas = status_bar.render(f, main_layout[2]);
             self.status_bar_areas = Some(status_areas);
@@ -474,16 +574,44 @@ impl UI {
             chat_tab.render_dropdowns(f);
         }
 
-        // Settings popup overlay
-        if self.show_settings {
-            if let Some(ref mut settings) = self.settings_popup {
-                settings.render(f);
-                if let Some(popup_area) = self.last_area {
-                    let popup_rect = settings_tab::SettingsPopup::popup_area(popup_area);
-                    self.settings_tab_areas = Some(settings.tab_hit_areas(popup_rect));
+        if self.sidebar_open && left_overlays_chat {
+            f.render_widget(
+                Block::default().style(Style::default().fg(theme.foreground).bg(theme.sidebar)),
+                left_sidebar_area,
+            );
+            let active_tab = &self.tabs[self.active_tab];
+            let sidebar = Sidebar::new(&active_tab.conversations, active_tab.active_conversation);
+            sidebar.render(f, left_sidebar_area);
+        }
+
+        if right_overlays_chat {
+            if let Some(tab_state) = self.tabs.get_mut(self.active_tab) {
+                if artifact_actual_width > 0 {
+                    f.render_widget(
+                        Block::default().style(theme.panel_style()),
+                        right_sidebar_area,
+                    );
+                    let mut artifact_sidebar = ArtifactSidebar::new(
+                        &tab_state.temporary_artifacts,
+                        &self.saved_artifacts,
+                        &self.memory_artifacts,
+                        &self.vault_artifacts,
+                        self.vault_available,
+                        &mut self.artifact_sidebar_state,
+                    );
+                    artifact_sidebar.render(f, right_sidebar_area);
                 }
             }
         }
+
+        let left_handle = Paragraph::new(if left_actual_width == 0 { ">" } else { "<" })
+            .style(Style::default().fg(theme.border).bg(theme.background))
+            .alignment(Alignment::Center);
+        f.render_widget(left_handle, left_handle_rect);
+        let right_handle = Paragraph::new(if artifact_actual_width == 0 { "<" } else { ">" })
+            .style(Style::default().fg(theme.border).bg(theme.background))
+            .alignment(Alignment::Center);
+        f.render_widget(right_handle, right_handle_rect);
 
         if let Some(ref mut dialog) = self.save_file_dialog {
             dialog.render(f, area);
@@ -515,7 +643,57 @@ impl UI {
             popup.render(f, area);
         }
 
-        toast::render(f, area, &mut self.toast, self.frame_tick);
+        if let Some(ref palette) = self.palette {
+            palette.render(f, area);
+            self.mouse_hit_areas.extend(
+                palette
+                    .visible_item_areas(area)
+                    .into_iter()
+                    .map(|(rect, index)| (rect, MouseAction::PaletteItem(index))),
+            );
+        }
+
+        if let Some(ref settings) = self.settings_v2 {
+            settings.render_with_keybindings(f, area, &self.keybinding_overrides);
+            self.mouse_hit_areas.extend(
+                settings
+                    .visible_item_areas(area)
+                    .into_iter()
+                    .map(|(rect, index)| (rect, MouseAction::SettingsItem(index))),
+            );
+        }
+
+        if let Some(ref capture) = self.keybind_capture {
+            capture.render(f, area);
+        }
+
+        toast::render(
+            f,
+            area,
+            &mut self.toast_stack,
+            self.frame_tick,
+            self.tui_config.toast_position,
+            artifact_width,
+        );
+
+        self.mouse_hit_areas
+            .push((left_handle_rect, MouseAction::LeftHandle));
+        self.mouse_hit_areas
+            .push((right_handle_rect, MouseAction::RightHandle));
+        if let Some(areas) = self.status_bar_areas {
+            if let Some(provider) = areas.provider {
+                self.mouse_hit_areas
+                    .push((provider, MouseAction::ProviderDropdown));
+            }
+            if let Some(model) = areas.model {
+                self.mouse_hit_areas
+                    .push((model, MouseAction::ModelDropdown));
+            }
+        }
+
+        if self.show_help {
+            self.render_help(f, area);
+        }
 
         // Modal overlay (rendered on top of everything)
         if let Some(modal) = self.active_modal {
@@ -541,6 +719,81 @@ impl UI {
                 no: areas.no,
             });
         }
+    }
+
+    fn render_help(&self, f: &mut Frame, area: Rect) {
+        let theme = crate::theme::active_theme();
+        let popup = centered_rect(68, 62, area);
+        f.render_widget(Clear, popup);
+        let block = Block::default()
+            .title(" Help ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.border))
+            .style(Style::default().fg(theme.foreground).bg(theme.panel));
+        let commands = crate::tui::palette::all_commands();
+        let mut lines = vec![Line::styled(
+            "Available commands",
+            Style::default().fg(theme.accent),
+        )];
+        lines.push(Line::from(
+            "  Slash commands: /help /settings /theme /mcp /skills /web",
+        ));
+        lines.push(Line::styled(
+            "  Esc or Enter dismisses this help.",
+            Style::default().fg(theme.muted),
+        ));
+        for command in commands.iter().take(8) {
+            let shortcut = command.shortcut.as_deref().unwrap_or("/");
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {shortcut:<14}"),
+                    Style::default().fg(theme.muted),
+                ),
+                Span::raw(command.title.clone()),
+            ]));
+        }
+        lines.extend([
+            Line::from(""),
+            Line::styled("Keybindings", Style::default().fg(theme.accent)),
+        ]);
+        for setting in crate::tui::settings_panel::all_settings()
+            .iter()
+            .filter(|setting| {
+                matches!(
+                    setting.setting_type,
+                    crate::tui::settings_panel::SettingType::Keybind { .. }
+                )
+            })
+            .take(6)
+        {
+            if let crate::tui::settings_panel::SettingType::Keybind {
+                default_binding, ..
+            } = setting.setting_type
+            {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {default_binding:<14}"),
+                        Style::default().fg(theme.muted),
+                    ),
+                    Span::raw(setting.title.to_string()),
+                ]));
+            }
+        }
+        lines.extend([
+            Line::from("  shift+enter  Insert newline"),
+            Line::from("  ctrl+left    Toggle left sidebar"),
+            Line::from("  ctrl+right   Toggle artifact sidebar"),
+            Line::from(""),
+            Line::styled("Usage", Style::default().fg(theme.accent)),
+            Line::from("  Type /settings, /theme, /mcp, /skills, /web, or /help."),
+            Line::from("  Click status provider/model labels to change selectors."),
+            Line::from(""),
+        ]);
+        let paragraph = Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(theme.foreground).bg(theme.panel));
+        f.render_widget(paragraph, popup);
     }
 
     pub fn add_tab(&mut self, tab: crate::app::tab::Tab) {
@@ -675,7 +928,8 @@ impl UI {
         if trimmed.is_empty() {
             return;
         }
-        self.toast = Some(Toast::new(trimmed.to_string(), self.frame_tick));
+        self.toast_stack
+            .push_message(trimmed.to_string(), self.frame_tick);
     }
 }
 
@@ -701,5 +955,96 @@ mod tests {
         let screen = terminal.backend().to_string();
         assert!(screen.contains("Notice"));
         assert!(screen.contains("Update 0.7.0 available"));
+    }
+
+    #[test]
+    fn status_bar_uses_two_configured_rows_and_preserves_hit_areas() {
+        let mut ui = UI::new();
+        ui.tui_config.status_bar_rows = 2;
+        ui.tui_config.status_widgets = vec![
+            crate::config::StatusWidgetPlacement {
+                id: "provider".to_string(),
+                row: 1,
+                area: 1,
+            },
+            crate::config::StatusWidgetPlacement {
+                id: "model".to_string(),
+                row: 1,
+                area: 2,
+            },
+            crate::config::StatusWidgetPlacement {
+                id: "reasoning".to_string(),
+                row: 2,
+                area: 3,
+            },
+            crate::config::StatusWidgetPlacement {
+                id: "connection".to_string(),
+                row: 2,
+                area: 6,
+            },
+        ];
+        ui.current_reasoning_options = vec!["medium".to_string()];
+        if let Some(tab) = ui.tabs.get_mut(ui.active_tab) {
+            tab.tab.provider = "OpenAI".to_string();
+            tab.tab.model = "gpt-5.5".to_string();
+            tab.tab.reasoning_effort = Some("medium".to_string());
+        }
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("test terminal");
+
+        terminal.draw(|frame| ui.render(frame)).expect("render ui");
+
+        let tab = &ui.tabs[ui.active_tab];
+        assert!(tab.provider_hit_area.is_some());
+        assert!(tab.model_hit_area.is_some());
+        assert!(tab.reasoning_hit_area.is_some());
+        assert_eq!(
+            ui.status_bar_areas
+                .and_then(|areas| areas.reasoning)
+                .map(|area| area.y),
+            Some(23)
+        );
+    }
+
+    #[test]
+    fn small_terminal_renders_minimum_size_message() {
+        let mut ui = UI::new();
+        let mut terminal = Terminal::new(TestBackend::new(79, 23)).expect("test terminal");
+
+        terminal.draw(|frame| ui.render(frame)).expect("render ui");
+
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("TCUI requires at least 80×24"));
+        assert!(ui.mouse_hit_areas.is_empty());
+    }
+
+    #[test]
+    fn help_modal_renders_commands_and_usage() {
+        let mut ui = UI::new();
+        ui.show_help = true;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
+
+        terminal.draw(|frame| ui.render(frame)).expect("render ui");
+
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("Available commands"));
+        assert!(screen.contains("/help"));
+        assert!(screen.contains("Esc or Enter dismisses this help."));
+    }
+
+    #[test]
+    fn render_stores_handle_hit_areas() {
+        let mut ui = UI::new();
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("test terminal");
+
+        terminal.draw(|frame| ui.render(frame)).expect("render ui");
+
+        assert!(ui
+            .mouse_hit_areas
+            .iter()
+            .any(|(_, action)| *action == super::MouseAction::LeftHandle));
+        assert!(ui
+            .mouse_hit_areas
+            .iter()
+            .any(|(_, action)| *action == super::MouseAction::RightHandle));
     }
 }

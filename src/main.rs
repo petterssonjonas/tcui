@@ -36,6 +36,7 @@ mod storage;
 #[cfg(test)]
 mod test_support;
 mod theme;
+mod tui;
 mod ui;
 mod updater;
 

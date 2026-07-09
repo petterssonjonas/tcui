@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 use crate::{
     config::{LocalInferenceConfig, LocalServerType, LOCAL_PROVIDER_NAME},
-    ui::settings_tab::ModelInfo,
+    ui::ModelInfo,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

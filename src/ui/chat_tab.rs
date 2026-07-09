@@ -3,7 +3,7 @@ use crate::config::app_config::{HeadingDownscale, MarkdownMode, TextAlignment};
 use crate::ui::components::image_block::{is_local_image_source, ImageBlockState};
 use crate::ui::components::markdown::MarkdownRenderer;
 use crate::ui::components::markdown_model::{KittyHeadingTier, LinkTarget, RenderedImage};
-use crate::ui::settings_tab::ModelInfo;
+use crate::ui::ModelInfo;
 use ratatui::{
     layout::{Rect, Size},
     prelude::*,
@@ -48,11 +48,18 @@ pub struct ChatTabProps<'a> {
 
 struct RenderedMessages {
     lines: Vec<Line<'static>>,
-    thinking_toggle_lines: Vec<(usize, usize)>,
+    thinking_toggle_lines: Vec<ThinkingToggleLine>,
     link_targets: Vec<LinkTarget>,
     images: Vec<RenderedImage>,
     kitty_headings: Vec<RenderedKittyHeading>,
     answer_anchor_lines: Vec<(usize, usize)>,
+}
+
+struct ThinkingToggleLine {
+    message_idx: usize,
+    line: usize,
+    x_offset: u16,
+    width: u16,
 }
 
 struct RenderedKittyHeading {
@@ -171,6 +178,8 @@ impl<'a> ChatTab<'a> {
     pub fn render_dropdowns(&mut self, f: &mut Frame) {
         self.state.dropdown_item_areas.clear();
         const VISIBLE_ITEMS: usize = 6;
+        const PROVIDER_DROPDOWN_MIN_WIDTH: usize = 30;
+        const MODEL_DROPDOWN_MIN_WIDTH: usize = 30;
         const SCROLLBAR_WIDTH: u16 = 1;
 
         if self.state.provider_dropdown_open {
@@ -193,7 +202,7 @@ impl<'a> ChatTab<'a> {
 
                 let labels: Vec<String> = visible_providers
                     .iter()
-                    .map(|(name, _, _, _, _)| clipped_label(name, 12))
+                    .map(|(name, _, _, _, _)| name.clone())
                     .collect();
                 let items: Vec<ListItem> = visible_providers
                     .iter()
@@ -210,7 +219,8 @@ impl<'a> ChatTab<'a> {
                     .collect();
 
                 let content_height = max_visible as u16;
-                let dropdown_width = dropdown_width_for(&labels, 12, SCROLLBAR_WIDTH);
+                let dropdown_width =
+                    dropdown_width_for(&labels, PROVIDER_DROPDOWN_MIN_WIDTH, SCROLLBAR_WIDTH);
                 let dropdown_area = Rect::new(
                     anchor.x,
                     anchor.y.saturating_sub(content_height + 2),
@@ -284,7 +294,7 @@ impl<'a> ChatTab<'a> {
 
                 let labels: Vec<String> = visible_models
                     .iter()
-                    .map(|model| clipped_label(&model.id, 16))
+                    .map(|model| model.id.clone())
                     .collect();
                 let items: Vec<ListItem> = visible_models
                     .iter()
@@ -301,7 +311,8 @@ impl<'a> ChatTab<'a> {
                     .collect();
 
                 let content_height = max_visible as u16;
-                let dropdown_width = dropdown_width_for(&labels, 16, SCROLLBAR_WIDTH);
+                let dropdown_width =
+                    dropdown_width_for(&labels, MODEL_DROPDOWN_MIN_WIDTH, SCROLLBAR_WIDTH);
                 let dropdown_area = Rect::new(
                     anchor.x,
                     anchor.y.saturating_sub(content_height + 2),
@@ -475,14 +486,17 @@ impl<'a> ChatTab<'a> {
         self.state.chat_scrollbar_thumb = None;
         self.state.thinking_hit_areas.clear();
         self.state.link_hit_areas.clear();
-        for (message_idx, line_idx) in rendered.thinking_toggle_lines {
+        for toggle in rendered.thinking_toggle_lines {
+            let line_idx = toggle.line;
             if line_idx >= scroll_offset && line_idx < scroll_offset + viewport.height as usize {
                 self.state.thinking_hit_areas.push((
-                    message_idx,
+                    toggle.message_idx,
                     Rect::new(
-                        viewport.x,
+                        viewport.x.saturating_add(toggle.x_offset),
                         viewport.y + (line_idx - scroll_offset) as u16,
-                        viewport.width,
+                        toggle
+                            .width
+                            .min(viewport.width.saturating_sub(toggle.x_offset)),
                         1,
                     ),
                 ));
@@ -536,6 +550,7 @@ impl<'a> ChatTab<'a> {
     }
 
     fn build_messages(&self, area: Rect) -> RenderedMessages {
+        let theme = crate::theme::active_theme();
         let markdown = MarkdownRenderer::new(self.terminal_capabilities);
         let mut lines: Vec<Line> = Vec::new();
         let mut thinking_toggle_lines = Vec::new();
@@ -544,6 +559,11 @@ impl<'a> ChatTab<'a> {
         let mut kitty_headings = Vec::new();
         let mut answer_anchor_lines = Vec::new();
         let content_width = area.width.saturating_sub(2) as usize;
+        let assistant_box_width = area.width.max(2);
+        let assistant_inner_width = assistant_box_width.saturating_sub(2) as usize;
+        let thinking_x_offset = area.width / 10;
+        let thinking_box_width = area.width.saturating_mul(8).max(10) / 10;
+        let thinking_inner_width = thinking_box_width.saturating_sub(2) as usize;
 
         for (idx, m) in self.state.messages.iter().enumerate() {
             let is_user = m.role == "user";
@@ -557,17 +577,10 @@ impl<'a> ChatTab<'a> {
                 TextAlignment::Left
             };
 
-            let (role_label, role_color) = match m.role.as_str() {
-                "user" => ("You", Color::Green),
-                "assistant" => ("Assistant", Color::Cyan),
-                "system" => ("System", Color::Yellow),
-                _ => ("", Color::White),
-            };
-
-            if !role_label.is_empty() {
+            if m.role == "system" {
                 lines.push(Line::from(vec![Span::styled(
-                    format!("{} ", role_label),
-                    Style::default().fg(role_color).add_modifier(Modifier::BOLD),
+                    " System ",
+                    Style::default().fg(theme.warning),
                 )]));
             }
 
@@ -590,41 +603,78 @@ impl<'a> ChatTab<'a> {
                     } else {
                         ""
                     };
-                    let toggle_label = if collapsed {
-                        if is_last_streaming {
-                            format!("> thinking{dots}")
-                        } else {
-                            "> show thinking".to_string()
-                        }
+                    let indicator = if collapsed { '▸' } else { '▾' };
+                    let toggle_label = if collapsed && is_last_streaming {
+                        format!("{indicator} thinking{dots}")
+                    } else if collapsed {
+                        format!("{indicator} show thinking")
                     } else {
-                        "v hide thinking".to_string()
+                        format!("{indicator} hide thinking")
                     };
                     let toggle_line = lines.len();
-                    lines.push(Line::from(Span::styled(
-                        toggle_label,
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                    thinking_toggle_lines.push((idx, toggle_line));
+                    lines.push(box_top_line(
+                        thinking_x_offset as usize,
+                        thinking_box_width as usize,
+                        &toggle_label,
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .bg(theme.code_bg)
+                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(theme.border).bg(theme.code_bg),
+                        Style::default().bg(theme.code_bg),
+                    ));
+                    thinking_toggle_lines.push(ThinkingToggleLine {
+                        message_idx: idx,
+                        line: toggle_line,
+                        x_offset: thinking_x_offset,
+                        width: thinking_box_width,
+                    });
 
                     if !collapsed {
-                        let answer_context_lines = 5usize;
+                        let answer_context_lines = 6usize;
                         let rendered = markdown.render(
                             thinking,
                             self.markdown_mode,
-                            content_width,
+                            thinking_inner_width,
                             false,
                             self.kitty_heading_downscale,
                             false,
                         );
+                        let content_start = lines.len();
+                        let content_pads = rendered
+                            .lines
+                            .iter()
+                            .map(|line| {
+                                alignment_padding_for(
+                                    thinking_inner_width,
+                                    line.width(),
+                                    alignment.as_ratatui(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
                         for mut target in rendered.link_targets {
-                            target.line += lines.len();
+                            let pad = content_pads.get(target.line).copied().unwrap_or_default();
+                            target.line += content_start;
+                            target.column += thinking_x_offset as usize + 1 + pad;
                             link_targets.push(target);
                         }
                         for mut line in rendered.lines {
                             line.alignment = Some(alignment.as_ratatui());
-                            line.style = Style::default().fg(Color::DarkGray);
-                            lines.push(line);
+                            line.style = line.style.fg(theme.muted).bg(theme.code_bg);
+                            lines.push(box_content_line(
+                                thinking_x_offset as usize,
+                                thinking_inner_width,
+                                line,
+                                Style::default().fg(theme.border).bg(theme.code_bg),
+                                Style::default().bg(theme.code_bg),
+                            ));
                         }
+                        lines.push(box_bottom_line(
+                            thinking_x_offset as usize,
+                            thinking_box_width as usize,
+                            Style::default().fg(theme.border).bg(theme.code_bg),
+                            Style::default().bg(theme.code_bg),
+                        ));
                         answer_anchor = lines
                             .len()
                             .saturating_sub(answer_context_lines)
@@ -643,14 +693,45 @@ impl<'a> ChatTab<'a> {
             let rendered = markdown.render(
                 &m.content,
                 self.markdown_mode,
-                content_width,
+                if is_assistant {
+                    assistant_inner_width
+                } else {
+                    content_width
+                },
                 self.kitty_enhanced_text,
                 self.kitty_heading_downscale,
                 self.image_protocol != "off",
             );
+            let assistant_content_start = if is_assistant {
+                lines.push(box_top_line(
+                    0,
+                    assistant_box_width as usize,
+                    "Assistant",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .bg(theme.panel)
+                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.border).bg(theme.panel),
+                    Style::default().bg(theme.panel),
+                ));
+                lines.len()
+            } else {
+                lines.len()
+            };
+            let content_pads = rendered
+                .lines
+                .iter()
+                .map(|line| {
+                    alignment_padding_for(
+                        assistant_inner_width,
+                        line.width(),
+                        alignment.as_ratatui(),
+                    )
+                })
+                .collect::<Vec<_>>();
             for heading in rendered.kitty_headings {
                 kitty_headings.push(RenderedKittyHeading {
-                    line: heading.start_line + lines.len(),
+                    line: heading.start_line + assistant_content_start,
                     text: heading.text,
                     tier: heading.tier,
                     style: heading.style,
@@ -658,22 +739,45 @@ impl<'a> ChatTab<'a> {
                 });
             }
             if !rendered.lines.is_empty() {
-                answer_anchor = answer_anchor.min(lines.len());
+                answer_anchor = answer_anchor.min(assistant_content_start);
             }
             for image in rendered.images {
                 images.push(RenderedImage {
-                    start_line: image.start_line + lines.len(),
+                    start_line: image.start_line + assistant_content_start,
                     height: image.height,
                     source: image.source,
                 });
             }
             for mut target in rendered.link_targets {
-                target.line += lines.len();
+                if is_assistant {
+                    let pad = content_pads.get(target.line).copied().unwrap_or_default();
+                    target.column += 1 + pad;
+                }
+                target.line += assistant_content_start;
                 link_targets.push(target);
             }
             for mut line in rendered.lines {
                 line.alignment = Some(alignment.as_ratatui());
-                lines.push(line);
+                if is_assistant {
+                    line.style = line.style.bg(theme.panel);
+                    lines.push(box_content_line(
+                        0,
+                        assistant_inner_width,
+                        line,
+                        Style::default().fg(theme.border).bg(theme.panel),
+                        Style::default().bg(theme.panel),
+                    ));
+                } else {
+                    lines.push(line);
+                }
+            }
+            if is_assistant {
+                lines.push(box_bottom_line(
+                    0,
+                    assistant_box_width as usize,
+                    Style::default().fg(theme.border).bg(theme.panel),
+                    Style::default().bg(theme.panel),
+                ));
             }
             #[cfg(feature = "memory")]
             lines.extend(memory_after);
@@ -816,14 +920,14 @@ impl<'a> ChatTab<'a> {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.border))
+                .border_style(Style::default().fg(theme.muted))
                 .title(" Message ")
                 .title_style(Style::default().fg(theme.muted)),
         )
         .style(if self.state.input_content.is_empty() {
-            Style::default().fg(theme.muted).bg(theme.panel)
+            Style::default().fg(theme.muted).bg(theme.code_bg)
         } else {
-            Style::default().fg(theme.foreground).bg(theme.panel)
+            Style::default().fg(theme.foreground).bg(theme.code_bg)
         });
 
         f.render_widget(input, area);
@@ -898,7 +1002,7 @@ impl<'a> ChatTab<'a> {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
+                .border_style(Style::default().fg(theme.accent_alt))
                 .title(" Start a conversation ")
                 .title_style(
                     Style::default()
@@ -907,9 +1011,9 @@ impl<'a> ChatTab<'a> {
                 ),
         )
         .style(if self.state.input_content.is_empty() {
-            Style::default().fg(theme.muted).bg(theme.panel)
+            Style::default().fg(theme.muted).bg(theme.code_bg)
         } else {
-            Style::default().fg(theme.foreground).bg(theme.panel)
+            Style::default().fg(theme.foreground).bg(theme.code_bg)
         });
 
         f.render_widget(input, horizontal[1]);
@@ -1109,13 +1213,13 @@ fn clipped_label(label: &str, max_chars: usize) -> String {
     clipped
 }
 
-fn dropdown_width_for(labels: &[String], max_chars: usize, scrollbar_width: u16) -> u16 {
+fn dropdown_width_for(labels: &[String], min_chars: usize, scrollbar_width: u16) -> u16 {
     let content_width = labels
         .iter()
         .map(|label| UnicodeWidthStr::width(label.as_str()))
         .max()
         .unwrap_or(1)
-        .min(max_chars)
+        .max(min_chars)
         .max(1) as u16;
     content_width + 2 + scrollbar_width
 }
@@ -1198,6 +1302,98 @@ fn memory_activity_lines(
     (before, after)
 }
 
+fn box_top_line(
+    inset: usize,
+    width: usize,
+    title: &str,
+    title_style: Style,
+    border_style: Style,
+    fill_style: Style,
+) -> Line<'static> {
+    if width < 2 {
+        return Line::from(Span::styled(" ".repeat(inset), fill_style));
+    }
+
+    let inner_width = width - 2;
+    let mut title_text = format!(" {title} ");
+    while UnicodeWidthStr::width(title_text.as_str()) > inner_width {
+        title_text.pop();
+    }
+    let title_width = UnicodeWidthStr::width(title_text.as_str());
+    let rule_width = inner_width.saturating_sub(title_width);
+
+    let mut line = Line::from(vec![
+        Span::styled(" ".repeat(inset), fill_style),
+        Span::styled("┌", border_style),
+        Span::styled(title_text, title_style),
+        Span::styled("─".repeat(rule_width), border_style),
+        Span::styled("┐", border_style),
+    ]);
+    line.style = fill_style;
+    line
+}
+
+fn box_content_line(
+    inset: usize,
+    width: usize,
+    line: Line<'static>,
+    border_style: Style,
+    fill_style: Style,
+) -> Line<'static> {
+    let (left_pad, right_pad) = content_padding(width, &line);
+    let mut spans = Vec::with_capacity(line.spans.len() + 5);
+    spans.push(Span::styled(" ".repeat(inset), fill_style));
+    spans.push(Span::styled("│", border_style));
+    spans.push(Span::styled(" ".repeat(left_pad), fill_style));
+    spans.extend(line.spans.into_iter().map(|mut span| {
+        span.style = span.style.bg(fill_style.bg.unwrap_or(Color::Reset));
+        span
+    }));
+    spans.push(Span::styled(" ".repeat(right_pad), fill_style));
+    spans.push(Span::styled("│", border_style));
+    let mut line = Line::from(spans);
+    line.style = fill_style;
+    line
+}
+
+fn box_bottom_line(
+    inset: usize,
+    width: usize,
+    border_style: Style,
+    fill_style: Style,
+) -> Line<'static> {
+    if width < 2 {
+        return Line::from(Span::styled(" ".repeat(inset), fill_style));
+    }
+
+    let mut line = Line::from(vec![
+        Span::styled(" ".repeat(inset), fill_style),
+        Span::styled("└", border_style),
+        Span::styled("─".repeat(width - 2), border_style),
+        Span::styled("┘", border_style),
+    ]);
+    line.style = fill_style;
+    line
+}
+
+fn content_padding(width: usize, line: &Line<'_>) -> (usize, usize) {
+    let text_width = line.width();
+    let left_pad =
+        alignment_padding_for(width, text_width, line.alignment.unwrap_or(Alignment::Left));
+    let remaining = width.saturating_sub(text_width.min(width));
+    (left_pad, remaining.saturating_sub(left_pad))
+}
+
+fn alignment_padding_for(width: usize, text_width: usize, alignment: Alignment) -> usize {
+    let text_width = text_width.min(width);
+    let remaining = width.saturating_sub(text_width);
+    match alignment {
+        Alignment::Left => 0,
+        Alignment::Center => remaining / 2,
+        Alignment::Right => remaining,
+    }
+}
+
 fn aligned_line_x(area: Rect, line: &Line<'_>) -> u16 {
     let remaining = area.width.saturating_sub(line.width() as u16);
     area.x
@@ -1260,8 +1456,8 @@ mod tests {
         assert_eq!(chat.state.link_hit_areas[1].1, "skill:save");
         assert_eq!(chat.state.link_hit_areas[0].0.width, 8);
         assert_eq!(chat.state.link_hit_areas[1].0.width, 5);
-        assert_eq!(chat.state.link_hit_areas[0].0.x, 60);
-        assert_eq!(chat.state.link_hit_areas[1].0.x, 74);
+        assert_eq!(chat.state.link_hit_areas[0].0.x, 59);
+        assert_eq!(chat.state.link_hit_areas[1].0.x, 73);
         assert!(
             chat.state.link_hit_areas[0].0.x + chat.state.link_hit_areas[0].0.width
                 <= chat.state.link_hit_areas[1].0.x
@@ -1318,7 +1514,107 @@ mod tests {
         let rendered = chat.build_messages(Rect::new(0, 0, 40, 12));
         let anchor = rendered.answer_anchor_lines[0].1;
 
-        assert_eq!(rendered.lines[anchor].to_string().trim(), "four");
+        assert!(rendered.lines[anchor].to_string().contains("four"));
+    }
+
+    #[test]
+    fn transcript_styles_assistant_box_and_user_clean_text() {
+        let theme = crate::theme::active_theme();
+        let mut ui = crate::ui::UI::new();
+        ui.tabs[0].messages.push(crate::app::message::Message::new(
+            1,
+            "user".to_string(),
+            "Question".to_string(),
+        ));
+        ui.tabs[0].messages.push(crate::app::message::Message::new(
+            1,
+            "assistant".to_string(),
+            "Answer".to_string(),
+        ));
+        let chat = ChatTab::new(
+            &mut ui.tabs[0],
+            ChatTabProps {
+                user_alignment: TextAlignment::Left,
+                ai_alignment: TextAlignment::Left,
+                markdown_mode: MarkdownMode::Off,
+                collapse_thinking: true,
+                show_chat_scrollbar: true,
+                kitty_enhanced_text: false,
+                kitty_heading_downscale: HeadingDownscale::None,
+                image_protocol: "off",
+                terminal_capabilities: TerminalCapabilities {
+                    terminal: TerminalKind::Unknown,
+                    multiplexer: None,
+                    kitty_graphics: false,
+                    kitty_text_sizing: false,
+                    tmux_passthrough: false,
+                },
+                frame_tick: 0,
+                providers: &[],
+                models: &[],
+                reasoning_options: &[],
+            },
+        );
+
+        let rendered = chat.build_messages(Rect::new(0, 0, 60, 12));
+        let screen = rendered
+            .lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!screen.contains("You"));
+        assert!(screen.contains("Question"));
+        let assistant_line = rendered
+            .lines
+            .iter()
+            .find(|line| line.to_string().contains("Answer"))
+            .expect("assistant answer line");
+        assert_eq!(assistant_line.style.bg, Some(theme.assistant_bubble));
+    }
+
+    #[test]
+    fn thinking_fold_uses_darker_box_style() {
+        let theme = crate::theme::active_theme();
+        let mut ui = crate::ui::UI::new();
+        let mut assistant =
+            crate::app::message::Message::new(1, "assistant".to_string(), "Answer".to_string());
+        assistant.thinking_content = Some("Reason".to_string());
+        ui.tabs[0].messages.push(assistant);
+        let chat = ChatTab::new(
+            &mut ui.tabs[0],
+            ChatTabProps {
+                user_alignment: TextAlignment::Left,
+                ai_alignment: TextAlignment::Left,
+                markdown_mode: MarkdownMode::Off,
+                collapse_thinking: true,
+                show_chat_scrollbar: true,
+                kitty_enhanced_text: false,
+                kitty_heading_downscale: HeadingDownscale::None,
+                image_protocol: "off",
+                terminal_capabilities: TerminalCapabilities {
+                    terminal: TerminalKind::Unknown,
+                    multiplexer: None,
+                    kitty_graphics: false,
+                    kitty_text_sizing: false,
+                    tmux_passthrough: false,
+                },
+                frame_tick: 0,
+                providers: &[],
+                models: &[],
+                reasoning_options: &[],
+            },
+        );
+
+        let rendered = chat.build_messages(Rect::new(0, 0, 60, 12));
+        let thinking = rendered
+            .lines
+            .iter()
+            .find(|line| line.to_string().contains("thinking"))
+            .expect("thinking fold line");
+
+        assert_eq!(thinking.spans[0].style.bg, Some(theme.code_bg));
     }
 
     #[test]
@@ -1335,7 +1631,7 @@ mod tests {
         assistant.thinking_content = Some("reason".to_string());
         ui.tabs[0].messages.push(assistant);
         ui.tabs[0].scroll_offset = usize::MAX;
-        let mut terminal = Terminal::new(TestBackend::new(20, 4)).expect("test terminal");
+        let mut terminal = Terminal::new(TestBackend::new(20, 8)).expect("test terminal");
         let mut chat = ChatTab::new(
             &mut ui.tabs[0],
             ChatTabProps {
@@ -1363,7 +1659,7 @@ mod tests {
 
         // When
         terminal
-            .draw(|frame| chat.render_messages(frame, Rect::new(0, 0, 20, 4)))
+            .draw(|frame| chat.render_messages(frame, Rect::new(0, 0, 20, 8)))
             .expect("render messages");
         let screen = terminal.backend().to_string();
 
@@ -1371,7 +1667,7 @@ mod tests {
         assert!(screen.contains("final tail"), "{screen}");
         let toggle_row = screen
             .lines()
-            .position(|line| line.contains("> show thinking"))
+            .position(|line| line.contains("show think"))
             .expect("visible thinking toggle") as u16;
         assert_eq!(chat.state.thinking_hit_areas[0].1.y, toggle_row);
     }
@@ -1611,14 +1907,12 @@ mod tests {
     }
 
     #[test]
-    fn dropdown_width_caps_long_provider_and_model_labels() {
-        let provider_labels = vec![clipped_label("VeryLongProviderName", 12)];
-        let model_labels = vec![clipped_label("deepseek-v4-flash", 16)];
+    fn dropdown_width_keeps_full_provider_and_model_labels_clickable() {
+        let provider_labels = vec!["VeryLongProviderName".to_string()];
+        let model_labels = vec!["deepseek-v4-flash-with-long-suffix".to_string()];
 
-        assert_eq!(provider_labels[0], "VeryLongPro~");
-        assert_eq!(model_labels[0], "deepseek-v4-fla~");
-        assert_eq!(dropdown_width_for(&provider_labels, 12, 1), 15);
-        assert_eq!(dropdown_width_for(&model_labels, 16, 1), 19);
+        assert_eq!(dropdown_width_for(&provider_labels, 30, 1), 33);
+        assert_eq!(dropdown_width_for(&model_labels, 30, 1), 37);
     }
 
     #[cfg(feature = "memory")]
@@ -1702,7 +1996,7 @@ mod tests {
         let recalled = screen
             .find("> recalled 1 memory")
             .expect("recalled activity");
-        let thinking = screen.find("> show thinking").expect("thinking activity");
+        let thinking = screen.find("show thinking").expect("thinking activity");
         let answer = screen.find("Answer").expect("answer");
         let saved = screen
             .find("> saved memory: Concise answers")

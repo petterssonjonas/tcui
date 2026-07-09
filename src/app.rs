@@ -66,6 +66,11 @@ impl TuiApp {
         ui.image_protocol = config_snapshot.image_protocol.clone();
         ui.web_search_enabled = config_snapshot.web_search.enabled;
         ui.db_providers = Self::provider_entries_with_local(&config_snapshot, None);
+        ui.panel_state = crate::tui::shell::PanelState::from_config(&config_snapshot.tui);
+        ui.sidebar_open = ui.panel_state.left != crate::tui::shell::PanelMode::Closed;
+        ui.artifact_sidebar_open = ui.panel_state.right != crate::tui::shell::PanelMode::Closed;
+        ui.tui_config = config_snapshot.tui.clone();
+        ui.keybinding_overrides = config_snapshot.tui.keybinding_overrides.clone();
         ui.disabled_providers = config_snapshot.disabled_providers.iter().cloned().collect();
         ui.disabled_models = config_snapshot.disabled_models.iter().cloned().collect();
         let _ = storage.sync_providers(&config_snapshot.providers);
