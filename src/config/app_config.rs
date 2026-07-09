@@ -271,6 +271,8 @@ pub struct AppConfig {
     pub notifications: NotificationConfig,
     pub local_inference: LocalInferenceConfig,
     pub web_search: WebSearchConfig,
+    #[serde(default, deserialize_with = "crate::config::tui::deserialize_tui")]
+    pub tui: crate::config::tui::TuiConfig,
     #[cfg(feature = "memory")]
     pub memory: crate::memory::MemoryConfig,
     pub providers: Vec<ProviderConfig>,
@@ -439,6 +441,7 @@ impl Default for AppConfig {
             notifications: NotificationConfig::default(),
             local_inference: LocalInferenceConfig::default(),
             web_search: WebSearchConfig::default(),
+            tui: crate::config::tui::TuiConfig::default(),
             #[cfg(feature = "memory")]
             memory: crate::memory::MemoryConfig::default(),
             providers: default_providers(),
