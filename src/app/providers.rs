@@ -35,10 +35,7 @@ impl TuiApp {
         format!("{provider}:{model}")
     }
 
-    pub(crate) fn visible_models_for_provider(
-        &self,
-        provider: &str,
-    ) -> Vec<crate::ui::settings_tab::ModelInfo> {
+    pub(crate) fn visible_models_for_provider(&self, provider: &str) -> Vec<crate::ui::ModelInfo> {
         let mut models = self.cached_models_for_provider(provider);
         models.retain(|model| {
             !self
@@ -65,21 +62,18 @@ impl TuiApp {
         Vec::new()
     }
 
-    pub(crate) fn cached_models_for_provider(
-        &self,
-        provider: &str,
-    ) -> Vec<crate::ui::settings_tab::ModelInfo> {
+    pub(crate) fn cached_models_for_provider(&self, provider: &str) -> Vec<crate::ui::ModelInfo> {
         let mut models = match self.storage.get_models(provider) {
             Ok(models) => models
                 .into_iter()
-                .map(|(id, input_price, output_price, context_window)| {
-                    crate::ui::settings_tab::ModelInfo {
+                .map(
+                    |(id, input_price, output_price, context_window)| crate::ui::ModelInfo {
                         id,
                         input_price,
                         output_price,
                         context_window,
-                    }
-                })
+                    },
+                )
                 .collect::<Vec<_>>(),
             Err(_) => Vec::new(),
         };
@@ -158,14 +152,14 @@ impl TuiApp {
 
             let model_infos = models
                 .into_iter()
-                .map(|(id, input_price, output_price, context_window)| {
-                    crate::ui::settings_tab::ModelInfo {
+                .map(
+                    |(id, input_price, output_price, context_window)| crate::ui::ModelInfo {
                         id,
                         input_price,
                         output_price,
                         context_window,
-                    }
-                })
+                    },
+                )
                 .collect();
             let _ = action_tx.send(Action::SetProviderModels(provider, model_infos));
         });
