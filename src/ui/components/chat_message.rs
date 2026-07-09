@@ -18,24 +18,45 @@ impl<'a> ChatMessage<'a> {
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
-        let role_indicator = match self.role {
-            "user" => "👤 You",
-            "assistant" => "🤖 Assistant",
-            _ => "•",
-        };
+        let theme = crate::theme::active_theme();
 
-        let mut spans = vec![
-            Span::styled(role_indicator, Style::default().fg(Color::Cyan).bold()),
-            Span::raw(": "),
-        ];
+        if self.role == "assistant" {
+            let mut lines = vec![Line::from(Span::styled(
+                "Assistant",
+                Style::default().fg(Color::Cyan).bold(),
+            ))];
+            lines.extend(self.content.lines().map(Line::from));
 
-        for line in self.content.lines() {
-            spans.push(Span::raw(line));
-            spans.push(Span::raw("\n"));
+            let paragraph = Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(theme.border).bg(theme.panel))
+                        .style(Style::default().fg(theme.foreground).bg(theme.panel)),
+                )
+                .style(Style::default().fg(theme.foreground).bg(theme.panel))
+                .wrap(Wrap { trim: true });
+
+            f.render_widget(paragraph, area);
+            return;
         }
 
-        let paragraph = Paragraph::new(Line::from(spans))
-            .block(Block::default().borders(Borders::ALL))
+        if self.role == "user" {
+            let paragraph = Paragraph::new(self.content)
+                .block(
+                    Block::default()
+                        .borders(Borders::LEFT)
+                        .border_style(Style::default().fg(theme.accent_alt)),
+                )
+                .style(Style::default().fg(theme.foreground))
+                .wrap(Wrap { trim: true });
+
+            f.render_widget(paragraph, area);
+            return;
+        }
+
+        let paragraph = Paragraph::new(self.content)
+            .style(Style::default().fg(theme.foreground))
             .wrap(Wrap { trim: true });
 
         f.render_widget(paragraph, area);

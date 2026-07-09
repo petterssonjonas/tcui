@@ -113,7 +113,7 @@ const THEMES: [ThemeSpec; 14] = [
         accent_alt: Color::Rgb(215, 153, 33),
         border: Color::Rgb(102, 92, 84),
         panel: Color::Rgb(50, 48, 47),
-        sidebar: Color::Rgb(60, 56, 54),
+        sidebar: Color::Rgb(35, 33, 32),
         error: Color::Rgb(251, 73, 52),
         warning: Color::Rgb(250, 189, 47),
         success: Color::Rgb(184, 187, 38),
@@ -137,7 +137,7 @@ const THEMES: [ThemeSpec; 14] = [
         accent_alt: Color::Rgb(94, 129, 172),
         border: Color::Rgb(76, 86, 106),
         panel: Color::Rgb(59, 66, 82),
-        sidebar: Color::Rgb(67, 76, 94),
+        sidebar: Color::Rgb(46, 52, 64),
         error: Color::Rgb(191, 97, 106),
         warning: Color::Rgb(235, 203, 139),
         success: Color::Rgb(163, 190, 140),
@@ -161,7 +161,7 @@ const THEMES: [ThemeSpec; 14] = [
         accent_alt: Color::Rgb(139, 233, 253),
         border: Color::Rgb(68, 71, 90),
         panel: Color::Rgb(50, 52, 66),
-        sidebar: Color::Rgb(56, 59, 77),
+        sidebar: Color::Rgb(35, 37, 49),
         error: Color::Rgb(255, 85, 85),
         warning: Color::Rgb(241, 250, 140),
         success: Color::Rgb(80, 250, 123),
@@ -445,10 +445,6 @@ pub fn find_theme(name: &str) -> Option<ThemeSpec> {
 
 pub fn theme_keys() -> Vec<&'static str> {
     THEMES.iter().map(|theme| theme.key).collect()
-}
-
-pub fn theme_labels() -> Vec<&'static str> {
-    THEMES.iter().map(|theme| theme.label).collect()
 }
 
 pub fn theme_label(name: &str) -> &'static str {
