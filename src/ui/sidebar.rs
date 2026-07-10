@@ -5,6 +5,8 @@ const TITLE_HEIGHT: u16 = 3;
 const NEW_CHAT_HEIGHT: u16 = 3;
 const SECTION_HEADER_HEIGHT: u16 = 1;
 const CHAT_CARD_HEIGHT: u16 = 5;
+const CHAT_CARD_GAP: u16 = 1;
+const CHAT_CARD_MARGIN_HORIZONTAL: u16 = 1;
 pub const SIDEBAR_WIDTH: u16 = 28;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,11 +73,7 @@ impl<'a> Sidebar<'a> {
                     .add_modifier(Modifier::BOLD),
             )
             .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::TOP | Borders::BOTTOM)
-                    .border_style(Style::default().fg(theme.border).bg(theme.panel)),
-            );
+            .block(Block::default().style(Style::default().bg(theme.panel)));
         f.render_widget(new_chat, new_chat_area);
 
         let pinned: Vec<&crate::ui::ConversationEntry> = self
@@ -163,7 +161,12 @@ impl<'a> Sidebar<'a> {
             let Some(card_area) = next_rect(list_area, cursor_y, CHAT_CARD_HEIGHT) else {
                 break;
             };
+            let card_area = card_area.inner(Margin {
+                vertical: 0,
+                horizontal: CHAT_CARD_MARGIN_HORIZONTAL,
+            });
             self.render_card(f, card_area, conversation, theme);
+            let _ = next_rect(list_area, cursor_y, CHAT_CARD_GAP);
         }
     }
 
@@ -185,7 +188,12 @@ impl<'a> Sidebar<'a> {
             let Some(card_area) = next_rect(list_area, cursor_y, CHAT_CARD_HEIGHT) else {
                 break;
             };
+            let card_area = card_area.inner(Margin {
+                vertical: 0,
+                horizontal: CHAT_CARD_MARGIN_HORIZONTAL,
+            });
             self.collect_card_hits(card_area, conversation, hits);
+            let _ = next_rect(list_area, cursor_y, CHAT_CARD_GAP);
         }
     }
 
@@ -224,7 +232,7 @@ impl<'a> Sidebar<'a> {
         );
         f.render_widget(
             Paragraph::new(elide(&status, status_area.width as usize))
-                .style(Style::default().fg(theme.muted).bg(theme.sidebar))
+                .style(body_style.fg(theme.muted))
                 .alignment(Alignment::Left),
             status_area,
         );
@@ -239,7 +247,7 @@ impl<'a> Sidebar<'a> {
         ];
         f.render_widget(
             Paragraph::new(Line::from(action_spans))
-                .style(Style::default().bg(theme.sidebar))
+                .style(body_style)
                 .alignment(Alignment::Left),
             action_area,
         );
@@ -414,6 +422,11 @@ mod tests {
         assert!(hits
             .iter()
             .any(|hit| hit.action == SidebarAction::DeleteConversation(2)));
+        let pinned_body = hits
+            .iter()
+            .find(|hit| hit.action == SidebarAction::LoadConversation(1))
+            .expect("pinned conversation hit area");
+        assert_eq!(pinned_body.area.x, 2);
     }
 
     #[test]

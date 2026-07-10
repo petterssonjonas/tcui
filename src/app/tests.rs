@@ -15,6 +15,10 @@ fn unique_temp_dir(label: &str) -> std::path::PathBuf {
 }
 
 fn with_test_app(label: &str, test: impl FnOnce(&mut TuiApp)) {
+    with_test_app_config(label, AppConfig::default(), test);
+}
+
+fn with_test_app_config(label: &str, config: AppConfig, test: impl FnOnce(&mut TuiApp)) {
     let _guard = env_lock().lock().expect("env lock poisoned");
     let root = unique_temp_dir(label);
     let data_home = root.join("data-home");
@@ -27,7 +31,7 @@ fn with_test_app(label: &str, test: impl FnOnce(&mut TuiApp)) {
     let storage = Storage::new().expect("create storage");
     let mut app = TuiApp::new(
         storage,
-        Arc::new(tokio::sync::RwLock::new(AppConfig::default())),
+        Arc::new(tokio::sync::RwLock::new(config)),
         Arc::new(LlmClient::new()),
         None,
     );
@@ -36,6 +40,47 @@ fn with_test_app(label: &str, test: impl FnOnce(&mut TuiApp)) {
     std::fs::remove_dir_all(&root).expect("cleanup temp dir");
     std::env::remove_var("XDG_DATA_HOME");
     std::env::remove_var("XDG_CONFIG_HOME");
+}
+
+#[test]
+fn app_disables_kitty_enhanced_text_even_when_saved_config_enables_it() {
+    let config = AppConfig {
+        kitty_enhanced_text: true,
+        ..AppConfig::default()
+    };
+
+    with_test_app_config("kitty-disabled", config, |app| {
+        assert!(!app.ui.kitty_enhanced_text);
+    });
+}
+
+#[test]
+fn wide_artifact_sidebar_header_click_toggles_section() {
+    with_test_app("wide-artifact-header", |app| {
+        app.ui.panel_state.right = crate::tui::shell::PanelMode::Wide;
+        app.ui.artifact_sidebar_open = true;
+        app.ui.tabs[0].temporary_artifacts.push(
+            crate::ui::artifact_sidebar::ArtifactEntry::temp_markdown(
+                1,
+                "notes.md".to_string(),
+                "content".to_string(),
+            ),
+        );
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30))
+            .expect("test terminal");
+        terminal
+            .draw(|frame| app.ui.render(frame))
+            .expect("render wide artifact sidebar");
+        assert!(!app.ui.artifact_sidebar_state.temp_collapsed);
+
+        app.handle_mouse_click(45, 1);
+
+        terminal
+            .draw(|frame| app.ui.render(frame))
+            .expect("rerender wide artifact sidebar");
+
+        assert!(app.ui.artifact_sidebar_state.temp_collapsed);
+    });
 }
 
 #[test]

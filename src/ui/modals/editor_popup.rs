@@ -8,7 +8,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, NativePtySystem, PtySize, P
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Clear, Paragraph},
     Frame,
 };
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -103,14 +103,17 @@ impl EditorPopupState {
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
+        let theme = crate::theme::active_theme();
         let popup_area = popup_area(area);
         f.render_widget(Clear, popup_area);
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
-            .style(Style::default().bg(Color::Black));
-        let inner = block.inner(popup_area);
+        let block = Block::default().style(Style::default().bg(theme.panel));
+        let inner = Rect::new(
+            popup_area.x,
+            popup_area.y + 1,
+            popup_area.width,
+            popup_area.height.saturating_sub(1),
+        );
         f.render_widget(block, popup_area);
         let rows = inner.height.max(1);
         let cols = inner.width.max(1);

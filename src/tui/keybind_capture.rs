@@ -86,14 +86,22 @@ impl KeybindCaptureState {
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
+        let theme = crate::theme::active_theme();
         let popup = centered_rect(54, 26, area);
         f.render_widget(Clear, popup);
         f.render_widget(
-            Block::default()
-                .title(" Capture Key ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow)),
+            Block::default().style(Style::default().bg(theme.panel)),
             popup,
+        );
+        f.render_widget(
+            Paragraph::new(
+                Line::from(" Capture Key ").style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ),
+            Rect::new(popup.x, popup.y, popup.width, 1),
         );
 
         let inner = popup.inner(Margin {

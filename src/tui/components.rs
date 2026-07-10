@@ -364,18 +364,15 @@ impl ConfirmModal {
         } else {
             Color::Yellow
         };
-        let block = Block::default()
-            .title(format!(" {} ", self.title))
-            .title_style(
+        let theme = crate::theme::active_theme();
+        let block = Block::default().style(Style::default().bg(theme.panel));
+
+        let text = vec![
+            Line::from(format!(" {} ", self.title)).style(
                 Style::default()
                     .fg(border_color)
                     .add_modifier(Modifier::BOLD),
-            )
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(border_color))
-            .style(Style::default().bg(Color::Black));
-
-        let text = vec![
+            ),
             Line::from(""),
             Line::from(self.body.clone()).alignment(Alignment::Center),
             Line::from(""),

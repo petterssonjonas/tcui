@@ -11,7 +11,10 @@ use ratatui::{
     Frame,
 };
 use ratatui_image::sliced::SignedPosition;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+const INPUT_MARGIN_HORIZONTAL: u16 = 2;
+const INPUT_MARGIN_VERTICAL: u16 = 1;
 
 pub struct ChatTab<'a> {
     pub state: &'a mut crate::ui::ChatTabState,
@@ -166,11 +169,7 @@ impl<'a> ChatTab<'a> {
                     .add_modifier(Modifier::BOLD),
             )
             .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::BOTTOM)
-                    .border_style(Style::default().fg(theme.border)),
-            );
+            .block(Block::default().style(Style::default().bg(theme.panel)));
 
         f.render_widget(title_widget, area);
     }
@@ -238,10 +237,7 @@ impl<'a> ChatTab<'a> {
                 let list = List::new(items).style(Style::default().bg(Color::Black));
                 f.render_widget(Clear, dropdown_area);
                 f.render_widget(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::Cyan))
-                        .style(Style::default().bg(Color::Black)),
+                    Block::default().style(Style::default().bg(Color::Black)),
                     dropdown_area,
                 );
                 f.render_widget(list, viewport);
@@ -330,10 +326,7 @@ impl<'a> ChatTab<'a> {
                 let list = List::new(items).style(Style::default().bg(Color::Black));
                 f.render_widget(Clear, dropdown_area);
                 f.render_widget(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::Cyan))
-                        .style(Style::default().bg(Color::Black)),
+                    Block::default().style(Style::default().bg(Color::Black)),
                     dropdown_area,
                 );
                 f.render_widget(list, viewport);
@@ -426,10 +419,7 @@ impl<'a> ChatTab<'a> {
                 let list = List::new(items).style(Style::default().bg(Color::Black));
                 f.render_widget(Clear, dropdown_area);
                 f.render_widget(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::Cyan))
-                        .style(Style::default().bg(Color::Black)),
+                    Block::default().style(Style::default().bg(Color::Black)),
                     dropdown_area,
                 );
                 f.render_widget(list, viewport);
@@ -561,9 +551,10 @@ impl<'a> ChatTab<'a> {
         let content_width = area.width.saturating_sub(2) as usize;
         let assistant_box_width = area.width.max(2);
         let assistant_inner_width = assistant_box_width.saturating_sub(2) as usize;
+        let user_inner_width = assistant_box_width.saturating_sub(4) as usize;
         let thinking_x_offset = area.width / 10;
         let thinking_box_width = area.width.saturating_mul(8).max(10) / 10;
-        let thinking_inner_width = thinking_box_width.saturating_sub(2) as usize;
+        let thinking_inner_width = thinking_box_width.saturating_sub(4) as usize;
 
         for (idx, m) in self.state.messages.iter().enumerate() {
             let is_user = m.role == "user";
@@ -620,7 +611,6 @@ impl<'a> ChatTab<'a> {
                             .fg(Color::Yellow)
                             .bg(theme.code_bg)
                             .add_modifier(Modifier::BOLD),
-                        Style::default().fg(theme.border).bg(theme.code_bg),
                         Style::default().bg(theme.code_bg),
                     ));
                     thinking_toggle_lines.push(ThinkingToggleLine {
@@ -655,7 +645,7 @@ impl<'a> ChatTab<'a> {
                         for mut target in rendered.link_targets {
                             let pad = content_pads.get(target.line).copied().unwrap_or_default();
                             target.line += content_start;
-                            target.column += thinking_x_offset as usize + 1 + pad;
+                            target.column += thinking_x_offset as usize + 2 + pad;
                             link_targets.push(target);
                         }
                         for mut line in rendered.lines {
@@ -665,14 +655,12 @@ impl<'a> ChatTab<'a> {
                                 thinking_x_offset as usize,
                                 thinking_inner_width,
                                 line,
-                                Style::default().fg(theme.border).bg(theme.code_bg),
                                 Style::default().bg(theme.code_bg),
                             ));
                         }
                         lines.push(box_bottom_line(
                             thinking_x_offset as usize,
                             thinking_box_width as usize,
-                            Style::default().fg(theme.border).bg(theme.code_bg),
                             Style::default().bg(theme.code_bg),
                         ));
                         answer_anchor = lines
@@ -693,7 +681,9 @@ impl<'a> ChatTab<'a> {
             let rendered = markdown.render(
                 &m.content,
                 self.markdown_mode,
-                if is_assistant {
+                if is_user {
+                    user_inner_width
+                } else if is_assistant {
                     assistant_inner_width
                 } else {
                     content_width
@@ -702,32 +692,39 @@ impl<'a> ChatTab<'a> {
                 self.kitty_heading_downscale,
                 self.image_protocol != "off",
             );
-            let assistant_content_start = if is_assistant {
+            let user_name = if is_user {
+                std::env::var("USER")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| std::env::var("USERNAME").ok())
+                    .unwrap_or_else(|| "User".to_string())
+            } else {
+                String::new()
+            };
+            let assistant_content_start = if is_user {
                 lines.push(box_top_line(
                     0,
                     assistant_box_width as usize,
-                    "Assistant",
+                    &user_name,
                     Style::default()
                         .fg(Color::Cyan)
-                        .bg(theme.panel)
+                        .bg(theme.user_bubble)
                         .add_modifier(Modifier::BOLD),
-                    Style::default().fg(theme.border).bg(theme.panel),
-                    Style::default().bg(theme.panel),
+                    Style::default().bg(theme.user_bubble),
                 ));
                 lines.len()
             } else {
                 lines.len()
             };
+            let inner_w = if is_user {
+                user_inner_width
+            } else {
+                assistant_inner_width
+            };
             let content_pads = rendered
                 .lines
                 .iter()
-                .map(|line| {
-                    alignment_padding_for(
-                        assistant_inner_width,
-                        line.width(),
-                        alignment.as_ratatui(),
-                    )
-                })
+                .map(|line| alignment_padding_for(inner_w, line.width(), alignment.as_ratatui()))
                 .collect::<Vec<_>>();
             for heading in rendered.kitty_headings {
                 kitty_headings.push(RenderedKittyHeading {
@@ -749,34 +746,32 @@ impl<'a> ChatTab<'a> {
                 });
             }
             for mut target in rendered.link_targets {
-                if is_assistant {
+                if is_user {
                     let pad = content_pads.get(target.line).copied().unwrap_or_default();
-                    target.column += 1 + pad;
+                    target.column += 2 + pad;
                 }
                 target.line += assistant_content_start;
                 link_targets.push(target);
             }
             for mut line in rendered.lines {
                 line.alignment = Some(alignment.as_ratatui());
-                if is_assistant {
-                    line.style = line.style.bg(theme.panel);
+                if is_user {
+                    line.style = line.style.bg(theme.user_bubble);
                     lines.push(box_content_line(
                         0,
-                        assistant_inner_width,
+                        user_inner_width,
                         line,
-                        Style::default().fg(theme.border).bg(theme.panel),
-                        Style::default().bg(theme.panel),
+                        Style::default().bg(theme.user_bubble),
                     ));
                 } else {
                     lines.push(line);
                 }
             }
-            if is_assistant {
+            if is_user {
                 lines.push(box_bottom_line(
                     0,
                     assistant_box_width as usize,
-                    Style::default().fg(theme.border).bg(theme.panel),
-                    Style::default().bg(theme.panel),
+                    Style::default().bg(theme.user_bubble),
                 ));
             }
             #[cfg(feature = "memory")]
@@ -887,26 +882,27 @@ impl<'a> ChatTab<'a> {
 
     fn render_input(&mut self, f: &mut Frame, area: Rect) {
         let theme = crate::theme::active_theme();
-        self.state.input_area = Some(area);
-        let max_body_lines = area.height.saturating_sub(2) as usize;
+        let box_area = input_box_area(area);
+        self.state.input_area = Some(box_area);
+        let max_body_lines = box_area.height.saturating_sub(2) as usize;
         let layout = input_layout(
             &self.state.input_content,
             self.state.input_cursor,
             self.state.input_scroll,
-            area.width.saturating_sub(2) as usize,
+            box_area.width.saturating_sub(2) as usize,
             max_body_lines,
             true,
         );
         self.state.input_scroll = layout.scroll;
-        let inner_width = area
+        let inner_width = box_area
             .width
             .saturating_sub(2)
             .saturating_sub(u16::from(layout.show_scrollbar));
         let inner = Rect::new(
-            area.x.saturating_add(1),
-            area.y.saturating_add(1),
+            box_area.x.saturating_add(1),
+            box_area.y.saturating_add(1),
             inner_width,
-            area.height.saturating_sub(2),
+            box_area.height.saturating_sub(2),
         );
         self.state.input_text_area = Some(inner);
 
@@ -919,8 +915,7 @@ impl<'a> ChatTab<'a> {
         )
         .block(
             Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.muted))
+                .style(Style::default().bg(theme.code_bg))
                 .title(" Message ")
                 .title_style(Style::default().fg(theme.muted)),
         )
@@ -930,9 +925,9 @@ impl<'a> ChatTab<'a> {
             Style::default().fg(theme.foreground).bg(theme.code_bg)
         });
 
-        f.render_widget(input, area);
+        f.render_widget(input, box_area);
         if layout.show_scrollbar {
-            let track = Rect::new(area.right().saturating_sub(2), inner.y, 1, inner.height);
+            let track = Rect::new(box_area.right().saturating_sub(2), inner.y, 1, inner.height);
             let thumb = scrollbar_thumb(
                 track,
                 layout.total_lines,
@@ -952,7 +947,7 @@ impl<'a> ChatTab<'a> {
         }
         if inner.width > 0 && inner.height > 0 {
             f.set_cursor_position((
-                inner.x.saturating_add(layout.cursor_x).saturating_add(1),
+                inner.x.saturating_add(layout.cursor_x),
                 inner.y.saturating_add(layout.cursor_y),
             ));
         }
@@ -968,27 +963,28 @@ impl<'a> ChatTab<'a> {
                 Constraint::Percentage(12),
             ])
             .split(area);
+        let box_area = input_box_area(horizontal[1]);
 
-        self.state.input_area = Some(horizontal[1]);
-        let max_body_lines = horizontal[1].height.saturating_sub(2) as usize;
+        self.state.input_area = Some(box_area);
+        let max_body_lines = box_area.height.saturating_sub(2) as usize;
         let layout = input_layout(
             &self.state.input_content,
             self.state.input_cursor,
             self.state.input_scroll,
-            horizontal[1].width.saturating_sub(2) as usize,
+            box_area.width.saturating_sub(2) as usize,
             max_body_lines,
             true,
         );
         self.state.input_scroll = layout.scroll;
-        let inner_width = horizontal[1]
+        let inner_width = box_area
             .width
             .saturating_sub(2)
             .saturating_sub(u16::from(layout.show_scrollbar));
         let inner = Rect::new(
-            horizontal[1].x.saturating_add(1),
-            horizontal[1].y.saturating_add(1),
+            box_area.x.saturating_add(1),
+            box_area.y.saturating_add(1),
             inner_width,
-            horizontal[1].height.saturating_sub(2),
+            box_area.height.saturating_sub(2),
         );
         self.state.input_text_area = Some(inner);
 
@@ -1001,8 +997,7 @@ impl<'a> ChatTab<'a> {
         )
         .block(
             Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent_alt))
+                .style(Style::default().bg(theme.code_bg))
                 .title(" Start a conversation ")
                 .title_style(
                     Style::default()
@@ -1016,14 +1011,9 @@ impl<'a> ChatTab<'a> {
             Style::default().fg(theme.foreground).bg(theme.code_bg)
         });
 
-        f.render_widget(input, horizontal[1]);
+        f.render_widget(input, box_area);
         if layout.show_scrollbar {
-            let track = Rect::new(
-                horizontal[1].right().saturating_sub(2),
-                inner.y,
-                1,
-                inner.height,
-            );
+            let track = Rect::new(box_area.right().saturating_sub(2), inner.y, 1, inner.height);
             let thumb = scrollbar_thumb(
                 track,
                 layout.total_lines,
@@ -1043,40 +1033,57 @@ impl<'a> ChatTab<'a> {
         }
         if inner.width > 0 && inner.height > 0 {
             f.set_cursor_position((
-                inner.x.saturating_add(layout.cursor_x).saturating_add(1),
+                inner.x.saturating_add(layout.cursor_x),
                 inner.y.saturating_add(layout.cursor_y),
             ));
         }
     }
 }
 
+fn input_box_area(area: Rect) -> Rect {
+    area.inner(Margin {
+        vertical: INPUT_MARGIN_VERTICAL,
+        horizontal: INPUT_MARGIN_HORIZONTAL,
+    })
+}
+
 fn bottom_input_height(state: &crate::ui::ChatTabState, area: Rect) -> u16 {
     let max_box_height = (area.height / 2).max(3);
-    let viewport_height = max_box_height.saturating_sub(2) as usize;
+    let margin_height = INPUT_MARGIN_VERTICAL.saturating_mul(2);
+    let viewport_height = max_box_height
+        .saturating_sub(2)
+        .saturating_sub(margin_height) as usize;
     let layout = input_layout(
         &state.input_content,
         state.input_cursor,
         state.input_scroll,
-        area.width.saturating_sub(3) as usize,
+        area.width
+            .saturating_sub(3)
+            .saturating_sub(INPUT_MARGIN_HORIZONTAL.saturating_mul(2)) as usize,
         viewport_height.max(1),
         true,
     );
-    (layout.visible_lines.len() as u16 + 2).clamp(3, max_box_height)
+    (layout.visible_lines.len() as u16 + 2 + margin_height).clamp(3, max_box_height)
 }
 
 fn centered_input_height(state: &crate::ui::ChatTabState, area: Rect) -> u16 {
     let width = area.width.saturating_mul(76) / 100;
     let max_box_height = (area.height / 2).max(5);
-    let viewport_height = max_box_height.saturating_sub(2) as usize;
+    let margin_height = INPUT_MARGIN_VERTICAL.saturating_mul(2);
+    let viewport_height = max_box_height
+        .saturating_sub(2)
+        .saturating_sub(margin_height) as usize;
     let layout = input_layout(
         &state.input_content,
         state.input_cursor,
         state.input_scroll,
-        width.saturating_sub(3) as usize,
+        width
+            .saturating_sub(3)
+            .saturating_sub(INPUT_MARGIN_HORIZONTAL.saturating_mul(2)) as usize,
         viewport_height.max(1),
         true,
     );
-    (layout.visible_lines.len() as u16 + 2).clamp(5, max_box_height)
+    (layout.visible_lines.len() as u16 + 2 + margin_height).clamp(5, max_box_height)
 }
 
 pub(crate) fn input_layout(
@@ -1101,7 +1108,7 @@ pub(crate) fn input_layout(
 
     if content.is_empty() {
         let placeholder = if show_placeholder {
-            "Type your message... (/quit to exit)"
+            "  Type your message... (/quit to exit)"
         } else {
             ""
         };
@@ -1307,7 +1314,6 @@ fn box_top_line(
     width: usize,
     title: &str,
     title_style: Style,
-    border_style: Style,
     fill_style: Style,
 ) -> Line<'static> {
     if width < 2 {
@@ -1324,10 +1330,10 @@ fn box_top_line(
 
     let mut line = Line::from(vec![
         Span::styled(" ".repeat(inset), fill_style),
-        Span::styled("┌", border_style),
+        Span::styled(" ", fill_style),
         Span::styled(title_text, title_style),
-        Span::styled("─".repeat(rule_width), border_style),
-        Span::styled("┐", border_style),
+        Span::styled(" ".repeat(rule_width), fill_style),
+        Span::styled(" ", fill_style),
     ]);
     line.style = fill_style;
     line
@@ -1337,40 +1343,52 @@ fn box_content_line(
     inset: usize,
     width: usize,
     line: Line<'static>,
-    border_style: Style,
     fill_style: Style,
 ) -> Line<'static> {
     let (left_pad, right_pad) = content_padding(width, &line);
     let mut spans = Vec::with_capacity(line.spans.len() + 5);
     spans.push(Span::styled(" ".repeat(inset), fill_style));
-    spans.push(Span::styled("│", border_style));
+    spans.push(Span::styled("  ", fill_style));
     spans.push(Span::styled(" ".repeat(left_pad), fill_style));
-    spans.extend(line.spans.into_iter().map(|mut span| {
+    let mut remaining = width.saturating_sub(left_pad + right_pad);
+    for mut span in line.spans {
+        if remaining == 0 {
+            break;
+        }
+        let mut clipped = String::new();
+        for ch in span.content.chars() {
+            let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if char_width > remaining {
+                remaining = 0;
+                break;
+            }
+            clipped.push(ch);
+            remaining = remaining.saturating_sub(char_width);
+        }
+        if clipped.is_empty() {
+            continue;
+        }
+        span.content = clipped.into();
         span.style = span.style.bg(fill_style.bg.unwrap_or(Color::Reset));
-        span
-    }));
+        spans.push(span);
+    }
     spans.push(Span::styled(" ".repeat(right_pad), fill_style));
-    spans.push(Span::styled("│", border_style));
+    spans.push(Span::styled("  ", fill_style));
     let mut line = Line::from(spans);
     line.style = fill_style;
     line
 }
 
-fn box_bottom_line(
-    inset: usize,
-    width: usize,
-    border_style: Style,
-    fill_style: Style,
-) -> Line<'static> {
+fn box_bottom_line(inset: usize, width: usize, fill_style: Style) -> Line<'static> {
     if width < 2 {
         return Line::from(Span::styled(" ".repeat(inset), fill_style));
     }
 
     let mut line = Line::from(vec![
         Span::styled(" ".repeat(inset), fill_style),
-        Span::styled("└", border_style),
-        Span::styled("─".repeat(width - 2), border_style),
-        Span::styled("┘", border_style),
+        Span::styled(" ", fill_style),
+        Span::styled(" ".repeat(width - 2), fill_style),
+        Span::styled(" ", fill_style),
     ]);
     line.style = fill_style;
     line
@@ -1456,8 +1474,8 @@ mod tests {
         assert_eq!(chat.state.link_hit_areas[1].1, "skill:save");
         assert_eq!(chat.state.link_hit_areas[0].0.width, 8);
         assert_eq!(chat.state.link_hit_areas[1].0.width, 5);
-        assert_eq!(chat.state.link_hit_areas[0].0.x, 59);
-        assert_eq!(chat.state.link_hit_areas[1].0.x, 73);
+        assert_eq!(chat.state.link_hit_areas[0].0.x, 60);
+        assert_eq!(chat.state.link_hit_areas[1].0.x, 74);
         assert!(
             chat.state.link_hit_areas[0].0.x + chat.state.link_hit_areas[0].0.width
                 <= chat.state.link_hit_areas[1].0.x
@@ -1471,6 +1489,135 @@ mod tests {
         assert_eq!(layout.scroll, 1);
         assert_eq!(layout.cursor_x, 5);
         assert_eq!(layout.visible_lines, vec!["fghij".to_string()]);
+    }
+
+    #[test]
+    fn empty_input_insets_placeholder_horizontally_without_extra_rows() {
+        let layout = input_layout("", 0, 0, 40, 3, true);
+
+        assert_eq!(
+            layout.visible_lines,
+            vec!["  Type your message... (/quit to exit)".to_string()]
+        );
+        assert_eq!(layout.cursor_y, 0);
+        assert_eq!(layout.total_lines, 1);
+    }
+
+    #[test]
+    fn typed_input_cursor_stays_on_last_character() {
+        let mut ui = crate::ui::UI::new();
+        ui.tabs[0].messages.push(crate::app::message::Message::new(
+            1,
+            "assistant".to_string(),
+            "ready".to_string(),
+        ));
+        ui.tabs[0].input_content = "a".to_string();
+        ui.tabs[0].input_cursor = 1;
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).expect("test terminal");
+        let mut chat = ChatTab::new(
+            &mut ui.tabs[0],
+            ChatTabProps {
+                user_alignment: TextAlignment::Left,
+                ai_alignment: TextAlignment::Left,
+                markdown_mode: MarkdownMode::Off,
+                collapse_thinking: true,
+                show_chat_scrollbar: true,
+                kitty_enhanced_text: false,
+                kitty_heading_downscale: HeadingDownscale::None,
+                image_protocol: "off",
+                terminal_capabilities: TerminalCapabilities {
+                    terminal: TerminalKind::Unknown,
+                    multiplexer: None,
+                    kitty_graphics: false,
+                    kitty_text_sizing: false,
+                    tmux_passthrough: false,
+                },
+                frame_tick: 0,
+                providers: &[],
+                models: &[],
+                reasoning_options: &[],
+            },
+        );
+
+        terminal
+            .draw(|frame| chat.render(frame, Rect::new(0, 0, 40, 12)))
+            .expect("render input");
+
+        let input_area = chat.state.input_text_area.expect("input text area");
+        terminal
+            .backend_mut()
+            .assert_cursor_position((input_area.x + 1, input_area.y));
+    }
+
+    #[test]
+    fn bottom_input_block_has_outer_margin() {
+        let mut ui = crate::ui::UI::new();
+        ui.tabs[0].messages.push(crate::app::message::Message::new(
+            1,
+            "assistant".to_string(),
+            "ready".to_string(),
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).expect("test terminal");
+        let mut chat = ChatTab::new(
+            &mut ui.tabs[0],
+            ChatTabProps {
+                user_alignment: TextAlignment::Left,
+                ai_alignment: TextAlignment::Left,
+                markdown_mode: MarkdownMode::Off,
+                collapse_thinking: true,
+                show_chat_scrollbar: true,
+                kitty_enhanced_text: false,
+                kitty_heading_downscale: HeadingDownscale::None,
+                image_protocol: "off",
+                terminal_capabilities: TerminalCapabilities {
+                    terminal: TerminalKind::Unknown,
+                    multiplexer: None,
+                    kitty_graphics: false,
+                    kitty_text_sizing: false,
+                    tmux_passthrough: false,
+                },
+                frame_tick: 0,
+                providers: &[],
+                models: &[],
+                reasoning_options: &[],
+            },
+        );
+
+        terminal
+            .draw(|frame| chat.render(frame, Rect::new(0, 0, 40, 12)))
+            .expect("render input");
+
+        let input_area = chat.state.input_area.expect("input area");
+        assert_eq!(input_area.x, 2);
+        assert_eq!(input_area.right(), 38);
+        assert!(input_area.y > 0);
+        assert!(input_area.bottom() < 12);
+    }
+
+    #[test]
+    fn boxed_content_clips_styled_spans_to_inner_width() {
+        let line = Line::from(vec![
+            Span::styled("1234", Style::default().fg(Color::Red)),
+            Span::styled("5678", Style::default().fg(Color::Green)),
+        ]);
+
+        let boxed = box_content_line(1, 5, line, Style::default().bg(Color::Blue));
+
+        assert_eq!(boxed.width(), 10);
+        assert_eq!(boxed.to_string(), "   12345  ");
+    }
+
+    #[test]
+    fn boxed_content_background_stops_at_box_boundary() {
+        let boxed = box_content_line(1, 5, Line::from("12345"), Style::default().bg(Color::Blue));
+        let mut terminal = Terminal::new(TestBackend::new(20, 1)).expect("test terminal");
+
+        terminal
+            .draw(|frame| frame.render_widget(Paragraph::new(boxed), frame.area()))
+            .expect("render boxed content");
+
+        assert_eq!(terminal.backend().buffer()[(9, 0)].bg, Color::Blue);
+        assert_eq!(terminal.backend().buffer()[(10, 0)].bg, Color::Reset);
     }
 
     #[test]
@@ -1564,14 +1711,19 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(!screen.contains("You"));
-        assert!(screen.contains("Question"));
+        assert!(screen.contains("Answer"));
+        let user_line = rendered
+            .lines
+            .iter()
+            .find(|line| line.to_string().contains("Question"))
+            .expect("user answer line");
+        assert_eq!(user_line.style.bg, Some(theme.user_bubble));
         let assistant_line = rendered
             .lines
             .iter()
             .find(|line| line.to_string().contains("Answer"))
             .expect("assistant answer line");
-        assert_eq!(assistant_line.style.bg, Some(theme.assistant_bubble));
+        assert_eq!(assistant_line.style.bg, None);
     }
 
     #[test]

@@ -896,6 +896,12 @@ impl TuiApp {
                     crate::tui::keybind_capture::KeybindCaptureState::new(action_id, action_label),
                 );
             }
+            crate::tui::settings_panel::EnterResult::SelectTheme(theme) => {
+                self.apply_theme_selection(theme)?;
+            }
+            crate::tui::settings_panel::EnterResult::SelectToastPosition(position) => {
+                self.apply_toast_position_selection(position)?;
+            }
             crate::tui::settings_panel::EnterResult::ToggledBool => match selected_id {
                 Some("web_search") => {
                     self.toggle_web_search().await?;

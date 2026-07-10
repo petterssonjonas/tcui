@@ -4,6 +4,18 @@ use super::{Action, Tab, TuiApp};
 use crate::app::action::MouseClickAction;
 
 impl TuiApp {
+    fn action_for_slash_command(&self, text: &str) -> Option<Action> {
+        match text.trim() {
+            "/quit" | "/exit" | "/q" => Some(self.quit_action()),
+            "/skills" => Some(Action::ShowSkillsPopup),
+            "/mcp" => Some(Action::ShowMcpPopup),
+            "/settings" => Some(Action::OpenSettingsPanel),
+            "/help" => Some(Action::ShowHelp),
+            "/web" => Some(Action::ToggleWebSearch),
+            _ => None,
+        }
+    }
+
     pub(crate) fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> Option<Action> {
         use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -127,6 +139,12 @@ impl TuiApp {
                                     action_id,
                                     action_label,
                                 ));
+                        }
+                        crate::tui::settings_panel::EnterResult::SelectTheme(theme) => {
+                            let _ = self.apply_theme_selection(theme);
+                        }
+                        crate::tui::settings_panel::EnterResult::SelectToastPosition(position) => {
+                            let _ = self.apply_toast_position_selection(position);
                         }
                         crate::tui::settings_panel::EnterResult::ToggledBool => match selected_id {
                             Some("web_search") => return Some(Action::ToggleWebSearch),
@@ -320,11 +338,19 @@ impl TuiApp {
                     self.ui.list_popup = None;
                     match action {
                         Some(crate::ui::modals::list_popup::ListPopupAction::InsertText(text)) => {
+                            if let Some(action) = self.action_for_slash_command(&text) {
+                                self.replace_input_content(String::new());
+                                return Some(action);
+                            }
                             self.insert_input_text(&text);
                         }
                         Some(crate::ui::modals::list_popup::ListPopupAction::ReplaceInput(
                             text,
                         )) => {
+                            if let Some(action) = self.action_for_slash_command(&text) {
+                                self.replace_input_content(String::new());
+                                return Some(action);
+                            }
                             self.replace_input_content(text);
                         }
                         Some(crate::ui::modals::list_popup::ListPopupAction::SetTheme(theme)) => {
@@ -335,7 +361,20 @@ impl TuiApp {
                     None
                 }
                 KeyCode::Up => {
-                    if live_input && self.browse_input_history(false) {
+                    if live_input {
+                        if key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL)
+                            && self.browse_input_history(false)
+                        {
+                            return None;
+                        }
+                        if let Some(popup) = &mut self.ui.list_popup {
+                            popup.move_up();
+                        }
+                        return None;
+                    }
+                    if self.browse_input_history(false) {
                         return None;
                     }
                     if let Some(popup) = &mut self.ui.list_popup {
@@ -344,7 +383,20 @@ impl TuiApp {
                     None
                 }
                 KeyCode::Down => {
-                    if live_input && self.browse_input_history(true) {
+                    if live_input {
+                        if key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL)
+                            && self.browse_input_history(true)
+                        {
+                            return None;
+                        }
+                        if let Some(popup) = &mut self.ui.list_popup {
+                            popup.move_down(visible_rows);
+                        }
+                        return None;
+                    }
+                    if self.browse_input_history(true) {
                         return None;
                     }
                     if let Some(popup) = &mut self.ui.list_popup {
@@ -562,6 +614,12 @@ impl TuiApp {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.handle_mouse_click(mouse.column, mouse.row)
+            }
+            MouseEventKind::Down(MouseButton::Right) => {
+                self.handle_key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Esc,
+                    crossterm::event::KeyModifiers::NONE,
+                ))
             }
             MouseEventKind::ScrollUp => {
                 if self.ui.editor_popup.is_some() {
@@ -876,6 +934,20 @@ impl TuiApp {
 
         if self.ui.show_help {
             return Some(Action::DismissHelp);
+        }
+
+        if self.ui.palette.is_some()
+            && !crate::tui::components::centered_rect(70, 60, area).contains(pos)
+        {
+            self.ui.palette = None;
+            return None;
+        }
+
+        if self.ui.settings_v2.is_some()
+            && !crate::tui::components::centered_rect(70, 60, area).contains(pos)
+        {
+            self.ui.settings_v2 = None;
+            return None;
         }
 
         if let Some((_, mouse_action)) = self

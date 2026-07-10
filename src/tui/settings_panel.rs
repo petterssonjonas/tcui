@@ -82,6 +82,8 @@ pub enum SettingType {
     Text,
     Number,
     Choice(&'static [&'static str]),
+    Theme(&'static str),
+    ToastPosition(crate::config::ToastPosition),
     DestructiveAction,
 }
 
@@ -105,6 +107,8 @@ pub enum EnterResult {
         action_id: &'static str,
         action_label: &'static str,
     },
+    SelectTheme(&'static str),
+    SelectToastPosition(crate::config::ToastPosition),
     RequestConfirm,
 }
 
@@ -181,6 +185,8 @@ impl SettingsPanelState {
                 action_id,
                 action_label: setting.title,
             },
+            SettingType::Theme(key) => EnterResult::SelectTheme(key),
+            SettingType::ToastPosition(position) => EnterResult::SelectToastPosition(position),
             SettingType::DestructiveAction => {
                 self.confirm = Some(
                     ConfirmModal::new(setting.title, setting.description)
@@ -341,16 +347,17 @@ impl SettingsPanelState {
         keybinding_overrides: &BTreeMap<String, String>,
     ) {
         let _focus = Focus::SettingsPanel;
+        let theme = crate::theme::active_theme();
         let popup = centered_rect(70, 60, area);
         f.render_widget(Clear, popup);
         f.render_widget(
-            Block::default().style(Style::default().bg(Color::Black)),
+            Block::default().style(Style::default().bg(theme.panel)),
             popup,
         );
         f.render_widget(
             Paragraph::new(" Settings ").style(
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
             Rect::new(popup.x + 1, popup.y, popup.width.saturating_sub(2), 1),
@@ -362,12 +369,8 @@ impl SettingsPanelState {
         });
         f.render_widget(
             Paragraph::new(format!("> {}", self.search.query()))
-                .style(Style::default().fg(Color::Yellow)),
+                .style(Style::default().fg(theme.warning)),
             Rect::new(inner.x, inner.y, inner.width, 1),
-        );
-        f.render_widget(
-            Block::default().borders(Borders::TOP),
-            Rect::new(inner.x, inner.y + 1, inner.width, 1),
         );
         self.render_results(
             f,
@@ -386,6 +389,7 @@ impl SettingsPanelState {
     }
 
     fn render_confirm(&self, f: &mut Frame, area: Rect, confirm: &ConfirmModal) {
+        let theme = crate::theme::active_theme();
         let popup = centered_rect(42, 22, area);
         f.render_widget(Clear, popup);
 
@@ -423,7 +427,7 @@ impl SettingsPanelState {
         ];
         f.render_widget(
             Paragraph::new(text)
-                .block(Block::default().style(Style::default().bg(Color::Black)))
+                .block(Block::default().style(Style::default().bg(theme.panel)))
                 .alignment(Alignment::Center),
             popup,
         );
@@ -451,12 +455,51 @@ impl SettingsPanelState {
         let bottom = area.y + area.height;
         let mut last_group = None;
         let visible_rows = area.height as usize;
+
+        let show_headers = self.current_category().is_none();
+        let mut sim_y = 0;
+        let mut sim_last_cat = None;
+        let mut last_visible = self.scroll_offset;
+        for (idx, (_, setting)) in rows.iter().enumerate().skip(self.scroll_offset) {
+            if sim_y >= visible_rows {
+                break;
+            }
+            if show_headers && Some(setting.category) != sim_last_cat {
+                sim_last_cat = Some(setting.category);
+                sim_y += 1;
+                if sim_y >= visible_rows {
+                    break;
+                }
+            }
+            last_visible = idx;
+            sim_y += 1;
+        }
+
         let scroll_offset = if visible_rows == 0 {
             0
         } else if self.selected < self.scroll_offset {
             self.selected
-        } else if self.selected >= self.scroll_offset + visible_rows {
-            self.selected.saturating_sub(visible_rows - 1)
+        } else if self.selected > last_visible {
+            let mut new_offset = self.selected;
+            let mut fill = 1;
+            let mut prev_cat = None;
+            let mut check = self.selected;
+            while check > 0 && fill < visible_rows {
+                check -= 1;
+                if show_headers {
+                    if let Some((_, s)) = rows.get(check) {
+                        if Some(s.category) != prev_cat {
+                            prev_cat = Some(s.category);
+                            fill += 1;
+                        }
+                    }
+                }
+                fill += 1;
+                if fill < visible_rows {
+                    new_offset = check;
+                }
+            }
+            new_offset
         } else {
             self.scroll_offset
         };
@@ -522,6 +565,8 @@ impl SettingsPanelState {
             }
             SettingType::Keybind { .. } => "⌘",
             SettingType::Text | SettingType::Number | SettingType::Choice(_) => "•",
+            SettingType::Theme(_) => "◉",
+            SettingType::ToastPosition(_) => "◉",
             SettingType::DestructiveAction => "!",
         };
         let binding = match setting.setting_type {
@@ -545,6 +590,8 @@ impl SettingsPanelState {
             | SettingType::Text
             | SettingType::Number
             | SettingType::Choice(_)
+            | SettingType::Theme(_)
+            | SettingType::ToastPosition(_)
             | SettingType::DestructiveAction => String::new(),
         };
         let danger = match setting.danger {
@@ -616,7 +663,20 @@ pub fn all_settings() -> Vec<Setting> {
         setting("reasoning_effort", "Reasoning Effort", "Default reasoning mode when available", C::Model, T::Choice(&["low", "medium", "high"]), &["thinking"], D::Safe),
         setting("local_endpoint", "Local Endpoint", "URL for the local inference server", C::Local, T::Text, &["ollama", "server"], D::Safe),
         setting("local_auto_start", "Auto-start Local Server", "Start local inference when TCUI launches", C::Local, T::Bool { enabled: false }, &["ollama", "daemon"], D::Safe),
-        setting("theme_name", "Theme", "Pick the active color theme", C::Theme, T::Choice(&["default", "dark", "light"]), &["color", "palette", "theme"], D::Safe),
+        setting("theme_system", "System", "Use terminal default colors", C::Theme, T::Theme("system"), &["theme", "default"], D::Safe),
+        setting("theme_gruvbox", "Gruvbox", "Warm retro palette", C::Theme, T::Theme("gruvbox"), &["theme", "color"], D::Safe),
+        setting("theme_nord", "Nord", "Arctic blue palette", C::Theme, T::Theme("nord"), &["theme", "color"], D::Safe),
+        setting("theme_dracula", "Dracula", "Purple dark palette", C::Theme, T::Theme("dracula"), &["theme", "color"], D::Safe),
+        setting("theme_github", "GitHub", "GitHub dark palette", C::Theme, T::Theme("github"), &["theme", "color"], D::Safe),
+        setting("theme_kanagawa", "Kanagawa", "Japanese ink palette", C::Theme, T::Theme("kanagawa"), &["theme", "color"], D::Safe),
+        setting("theme_catppuccin", "Catppuccin", "Pastel dark palette", C::Theme, T::Theme("catppuccin"), &["theme", "color"], D::Safe),
+        setting("theme_material", "Material", "Material dark palette", C::Theme, T::Theme("material"), &["theme", "color"], D::Safe),
+        setting("theme_matrix", "Matrix", "Green terminal palette", C::Theme, T::Theme("matrix"), &["theme", "color"], D::Safe),
+        setting("theme_monokai", "Monokai", "Monokai dark palette", C::Theme, T::Theme("monokai"), &["theme", "color"], D::Safe),
+        setting("theme_zenburn", "Zenburn", "Low-contrast green palette", C::Theme, T::Theme("zenburn"), &["theme", "color"], D::Safe),
+        setting("theme_solarized", "Solarized", "Solarized dark palette", C::Theme, T::Theme("solarized"), &["theme", "color"], D::Safe),
+        setting("theme_tokyo_night", "Tokyo Night", "Tokyo Night palette", C::Theme, T::Theme("tokyo-night"), &["theme", "color"], D::Safe),
+        setting("theme_opencode", "OpenCode", "OpenCode-inspired palette", C::Theme, T::Theme("opencode"), &["theme", "color"], D::Safe),
         keybind("open_palette", "Open Palette", "Open the command palette", "ctrl+p", false, &["shortcut", "command", "ctrl-p"]),
         keybind("open_settings", "Open Settings", "Open the settings panel", "ctrl+,", false, &["settings", "slash"]),
         keybind("quit", "Quit", "Quit TCUI", "ctrl+q", false, &["exit", "close"]),
@@ -630,6 +690,11 @@ pub fn all_settings() -> Vec<Setting> {
         setting("vault_index", "Index Vault", "Enable local vault search", C::Obsidian, T::Bool { enabled: false }, &["notes", "search"], D::Safe),
         setting("left_sidebar", "Left Sidebar", "Default left sidebar mode", C::UiLayout, T::Choice(&["closed", "thin", "wide"]), &["layout", "panel"], D::Safe),
         setting("right_sidebar", "Right Sidebar", "Default artifact sidebar mode", C::UiLayout, T::Choice(&["closed", "thin", "wide"]), &["layout", "artifact"], D::Safe),
+        setting("toast_top_right", "Toast: Top Right", "Show toast notifications at the top right", C::UiLayout, T::ToastPosition(crate::config::ToastPosition::TopRight), &["toast", "notification", "position"], D::Safe),
+        setting("toast_top_center", "Toast: Top Center", "Show toast notifications at the top center", C::UiLayout, T::ToastPosition(crate::config::ToastPosition::TopCenter), &["toast", "notification", "position"], D::Safe),
+        setting("toast_top_left", "Toast: Top Left", "Show toast notifications at the top left", C::UiLayout, T::ToastPosition(crate::config::ToastPosition::TopLeft), &["toast", "notification", "position"], D::Safe),
+        setting("toast_center", "Toast: Center", "Show toast notifications in the center", C::UiLayout, T::ToastPosition(crate::config::ToastPosition::Center), &["toast", "notification", "position"], D::Safe),
+        setting("toast_off", "Toast: Off", "Disable toast notifications", C::UiLayout, T::ToastPosition(crate::config::ToastPosition::Off), &["toast", "notification", "position"], D::Safe),
         setting("web_search", "Web Search", "Enable web search for prompts", C::ChatBehavior, T::Bool { enabled: false }, &["search", "prompt"], D::Safe),
         setting("collapse_thinking", "Collapse Thinking", "Fold assistant thinking by default", C::ChatBehavior, T::Bool { enabled: true }, &["reasoning", "fold"], D::Safe),
         setting("local_history", "Local History", "Keep conversation history on disk", C::Privacy, T::Bool { enabled: true }, &["storage", "database"], D::Warning),
@@ -714,7 +779,7 @@ mod tests {
             .filter(|setting| setting.setting_type == SettingType::Subsection)
             .count();
 
-        assert_eq!(settings.len(), 37);
+        assert_eq!(settings.len(), 55);
         assert_eq!(subsections, 12);
         assert_eq!(SettingCategory::ALL.len(), 12);
     }
@@ -726,7 +791,23 @@ mod tests {
 
         let results = panel.results(&settings);
 
-        assert_eq!(results.len(), 37);
+        assert_eq!(results.len(), 55);
+    }
+
+    #[test]
+    fn theme_subsection_lists_selectable_real_themes() {
+        let settings = all_settings();
+        let mut panel = SettingsPanelState::new();
+        panel.depth_stack.push(SettingCategory::Theme);
+
+        let results = panel.results(&settings);
+
+        assert!(results.iter().any(|(_, setting)| {
+            matches!(setting.setting_type, SettingType::Theme("opencode"))
+        }));
+        assert!(results
+            .iter()
+            .all(|(_, setting)| { matches!(setting.setting_type, SettingType::Theme(_)) }));
     }
 
     #[test]

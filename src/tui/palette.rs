@@ -280,19 +280,22 @@ impl PaletteState {
 
     #[rustfmt::skip]
     pub fn render(&self, f: &mut Frame, area: Rect) {
+        let theme = crate::theme::active_theme();
         let popup = centered_rect(70, 60, area);
         f.render_widget(Clear, popup);
         f.render_widget(
-            Block::default().title(" Settings ").borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan)),
+            Block::default().style(Style::default().bg(theme.panel)),
             popup,
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(" Settings ").style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))),
+            Rect::new(popup.x, popup.y, popup.width, 1),
         );
         let inner = popup.inner(Margin { vertical: 1, horizontal: 1 });
         f.render_widget(
             Paragraph::new(format!("> {}", self.search.query())).style(Style::default().fg(Color::Yellow)),
             Rect::new(inner.x, inner.y, inner.width, 1),
         );
-        f.render_widget(Block::default().borders(Borders::TOP), Rect::new(inner.x, inner.y + 1, inner.width, 1));
         let list_area = Rect::new(inner.x, inner.y + 2, inner.width, inner.height.saturating_sub(2));
         let items = self.list.items();
         let selected = self.list.selected();
@@ -306,12 +309,75 @@ impl PaletteState {
         let mut y = list_area.y;
         let mut last_group: Option<&str> = None;
         let visible_rows = list_area.height as usize;
+
+        // Pre-pass: simulate rendering from current scroll_offset to find the
+        // actual last visible item index, accounting for group header rows.
+        // Group headers consume vertical space, reducing effective item capacity.
+        let header_overhead = if empty_q { 1 } else { 0 }; // hint line
+        let mut sim_y = header_overhead;
+        let mut sim_last_group: Option<&str> = None;
+        let mut last_visible = self.scroll_offset;
+        for (idx, id) in items.iter().enumerate().skip(self.scroll_offset) {
+            if sim_y >= visible_rows {
+                break;
+            }
+            if empty_q {
+                if let Some(cmd) = self.find_command(id) {
+                    let g = if cmd.curated {
+                        "Curated"
+                    } else if self.is_pinned(&cmd.id) {
+                        "Pinned"
+                    } else {
+                        cmd.category.label()
+                    };
+                    if Some(g) != sim_last_group {
+                        sim_last_group = Some(g);
+                        sim_y += 1;
+                        if sim_y >= visible_rows {
+                            break;
+                        }
+                    }
+                }
+            }
+            last_visible = idx;
+            sim_y += 1;
+        }
+
         let scroll_offset = if visible_rows == 0 {
             0
         } else if selected < self.scroll_offset {
+            // Selected went above viewport — scroll up to show it
             selected
-        } else if selected >= self.scroll_offset + visible_rows {
-            selected.saturating_sub(visible_rows - 1)
+        } else if selected > last_visible {
+            // Selected went below viewport — scroll down so it's near the bottom
+            // Walk backwards from selected to find an offset that fits
+            let mut new_offset = selected;
+            let mut fill = 1; // selected itself takes 1 row
+            let mut prev_group: Option<&str> = None;
+            let mut check_idx = selected;
+            while check_idx > 0 && fill < visible_rows.saturating_sub(header_overhead) {
+                check_idx -= 1;
+                if let Some(cmd) = self.find_command(&items[check_idx]) {
+                    if empty_q {
+                        let g = if cmd.curated {
+                            "Curated"
+                        } else if self.is_pinned(&cmd.id) {
+                            "Pinned"
+                        } else {
+                            cmd.category.label()
+                        };
+                        if Some(g) != prev_group {
+                            prev_group = Some(g);
+                            fill += 1; // header row
+                        }
+                    }
+                }
+                fill += 1;
+                if fill < visible_rows.saturating_sub(header_overhead) {
+                    new_offset = check_idx;
+                }
+            }
+            new_offset
         } else {
             self.scroll_offset
         };
@@ -403,7 +469,7 @@ pub fn has_duplicate_ids(commands: &[Command]) -> bool {
 #[allow(clippy::type_complexity)]
 pub fn all_commands() -> Vec<Command> {
     let rows: Vec<(&str, &str, CommandCategory, Option<&str>, Action, bool)> = vec![
-        ("open_settings", "Open Settings", C::System, Some("Ctrl+,"), Action::ShowSettings, true),
+        ("open_settings", "/settings", C::System, Some("Ctrl+,"), Action::ShowSettings, true),
         ("open_settings_panel", "Open Settings Panel", C::System, None, Action::OpenSettingsPanel, false),
         ("toggle_settings", "Toggle Settings", C::System, Some("Ctrl+S"), Action::ToggleSettings, false),
         ("new_chat", "New Chat", C::Session, Some("Ctrl+N"), Action::NewChat, true),
@@ -416,7 +482,7 @@ pub fn all_commands() -> Vec<Command> {
         ("export_conversation", "Export Conversation", C::Session, None, Action::ExportConversation, false),
         ("show_skills", "Show Skills", C::Agent, None, Action::ShowSkillsPopup, false),
         ("show_mcp", "Show MCP", C::Mcps, None, Action::ShowMcpPopup, false),
-        ("show_help", "Show Help", C::System, None, Action::ShowHelp, false),
+        ("show_help", "/help", C::System, None, Action::ShowHelp, false),
         ("quit", "Quit", C::System, Some("Ctrl+Q"), Action::Quit, false),
         ("show_local_search", "Search Vault", C::Prompt, None, Action::ShowLocalSearch(String::new()), false),
         ("focus_input", "Focus Input", C::System, None, Action::FocusInput, false),

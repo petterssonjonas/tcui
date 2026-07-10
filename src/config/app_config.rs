@@ -428,7 +428,7 @@ impl Default for AppConfig {
             show_selector: true,
             show_chat_scrollbar: true,
             collapse_thinking: true,
-            kitty_enhanced_text: true,
+            kitty_enhanced_text: false,
             kitty_heading_downscale: HeadingDownscale::None,
             quit_confirmation: true,
             use_env_keys: false,

@@ -61,7 +61,7 @@ impl TuiApp {
         ui.show_selector = config_snapshot.show_selector;
         ui.show_chat_scrollbar = config_snapshot.show_chat_scrollbar;
         ui.collapse_thinking = config_snapshot.collapse_thinking;
-        ui.kitty_enhanced_text = config_snapshot.kitty_enhanced_text;
+        ui.kitty_enhanced_text = false;
         ui.kitty_heading_downscale = config_snapshot.kitty_heading_downscale;
         ui.image_protocol = config_snapshot.image_protocol.clone();
         ui.web_search_enabled = config_snapshot.web_search.enabled;
@@ -397,6 +397,8 @@ impl TuiApp {
 
         let filter = trimmed.trim_start_matches('/').to_ascii_lowercase();
         let commands = [
+            ("/settings", "Open the Settings panel"),
+            ("/help", "Show commands and keybindings"),
             ("/theme ", "Select and apply a theme"),
             ("/skills", "Show installed skills"),
             ("/mcp", "Show MCP servers"),

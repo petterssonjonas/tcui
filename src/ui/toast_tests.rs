@@ -157,3 +157,28 @@ fn top_left_and_top_center_positions_use_expected_columns() {
     assert!(center.x > left.x);
     assert!(center.x < 45);
 }
+
+#[test]
+fn center_position_stacks_multiple_toasts_without_overwriting() {
+    let mut stack = ToastStack::new();
+    stack.push_message("first center toast".to_string(), 0);
+    stack.push_message("second center toast".to_string(), 1);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+
+    terminal
+        .draw(|frame| {
+            render(
+                frame,
+                Rect::new(0, 0, 80, 24),
+                &mut stack,
+                2,
+                ToastPosition::Center,
+                0,
+            );
+        })
+        .expect("render centered toasts");
+
+    let screen = terminal.backend().to_string();
+    assert!(screen.contains("first center toast"));
+    assert!(screen.contains("second center toast"));
+}

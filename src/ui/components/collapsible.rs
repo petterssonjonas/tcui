@@ -38,22 +38,28 @@ impl<'a> Collapsible<'a> {
             },
         );
 
-        let text = if self.collapsed { "" } else { self.content };
+        let text_lines: Vec<Line> = if self.collapsed {
+            vec![Line::from(title).style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+                    .bg(theme.code_bg),
+            )]
+        } else {
+            let mut v = vec![Line::from(title).style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+                    .bg(theme.code_bg),
+            )];
+            v.extend(self.content.lines().map(|l| {
+                Line::from(l).style(Style::default().fg(theme.foreground).bg(theme.code_bg))
+            }));
+            v
+        };
 
-        let paragraph = Paragraph::new(text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(title)
-                    .title_style(
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                    .border_style(Style::default().fg(theme.border).bg(theme.code_bg))
-                    .style(Style::default().fg(theme.foreground).bg(theme.code_bg)),
-            )
-            .style(Style::default().fg(theme.foreground).bg(theme.code_bg))
+        let paragraph = Paragraph::new(text_lines)
+            .style(Style::default().bg(theme.code_bg))
             .wrap(Wrap { trim: true });
 
         f.render_widget(paragraph, block_area);

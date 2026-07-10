@@ -1,6 +1,6 @@
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Clear, Paragraph},
     Frame,
 };
 use std::collections::VecDeque;
@@ -112,7 +112,21 @@ pub fn render(
         return;
     }
 
-    let mut y = area.y.saturating_add(TOAST_MARGIN);
+    let stack_height = stack
+        .len()
+        .saturating_mul(TOAST_HEIGHT as usize)
+        .saturating_add(
+            stack
+                .len()
+                .saturating_sub(1)
+                .saturating_mul(TOAST_GAP as usize),
+        );
+    let mut y = if position == ToastPosition::Center {
+        area.y
+            .saturating_add(area.height.saturating_sub(stack_height as u16) / 2)
+    } else {
+        area.y.saturating_add(TOAST_MARGIN)
+    };
     for toast in stack.visible() {
         let Some(toast_area) = toast_rect(area, toast, position, right_sidebar_width, y) else {
             break;
@@ -129,12 +143,20 @@ fn render_one(f: &mut Frame, toast_area: Rect, toast: &Toast) {
     let theme = crate::theme::active_theme();
     f.render_widget(Clear, toast_area);
     f.render_widget(
-        Block::default()
-            .title(toast_title(toast.level))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(level_color(toast.level)))
-            .style(Style::default().bg(theme.panel)),
+        Block::default().style(Style::default().bg(theme.panel)),
         toast_area,
+    );
+    let title_area = Rect::new(toast_area.x, toast_area.y, toast_area.width, 1);
+    f.render_widget(
+        Paragraph::new(toast_title(toast.level))
+            .style(
+                Style::default()
+                    .fg(level_color(toast.level))
+                    .bg(theme.panel)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .alignment(Alignment::Left),
+        title_area,
     );
     let inner = Rect::new(
         toast_area.x + 1,
@@ -147,7 +169,7 @@ fn render_one(f: &mut Frame, toast_area: Rect, toast: &Toast) {
             &toast.message,
             toast_area.width.saturating_sub(4) as usize,
         ))
-        .style(Style::default().fg(theme.foreground)),
+        .style(Style::default().fg(theme.foreground).bg(theme.panel)),
         inner,
     );
 }
@@ -174,7 +196,7 @@ pub(super) fn toast_rect(
     let width = (message_width as u16).min(available_width);
     let x = match position {
         ToastPosition::TopLeft => area.x.saturating_add(TOAST_MARGIN),
-        ToastPosition::TopCenter => area.x.saturating_add(
+        ToastPosition::TopCenter | ToastPosition::Center => area.x.saturating_add(
             area.width
                 .saturating_sub(right_sidebar_width)
                 .saturating_sub(width)

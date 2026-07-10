@@ -18,6 +18,7 @@ pub enum ToastPosition {
     TopCenter,
     #[default]
     TopRight,
+    Center,
     Off,
 }
 
@@ -288,6 +289,7 @@ toast_position = "off"
             ToastPosition::TopLeft,
             ToastPosition::TopCenter,
             ToastPosition::TopRight,
+            ToastPosition::Center,
             ToastPosition::Off,
         ] {
             let config = TuiConfig {

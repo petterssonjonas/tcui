@@ -57,31 +57,35 @@ impl PanelState {
     }
 
     pub fn toggle_left(&mut self) {
-        self.left = next_mode(self.left);
+        self.left = next_mode_left(self.left);
     }
 
     pub fn toggle_right(&mut self) {
         self.right = next_mode(self.right);
     }
 
+    #[allow(dead_code)]
     pub fn expand_left(&mut self) {
         self.left = PanelMode::Wide;
     }
 
+    #[allow(dead_code)]
     pub fn expand_right(&mut self) {
         self.right = PanelMode::Wide;
     }
 
+    #[allow(dead_code)]
     pub fn collapse_left(&mut self) {
         self.left = PanelMode::Closed;
     }
 
+    #[allow(dead_code)]
     pub fn collapse_right(&mut self) {
         self.right = PanelMode::Closed;
     }
 
     pub fn clamped_for_area(mut self, area: Rect) -> Self {
-        if area.width < 80 {
+        if area.width < 100 {
             self.right = PanelMode::Closed;
         }
         self
@@ -129,6 +133,14 @@ const fn next_mode(mode: PanelMode) -> PanelMode {
     }
 }
 
+const fn next_mode_left(mode: PanelMode) -> PanelMode {
+    match mode {
+        PanelMode::Closed => PanelMode::Thin,
+        PanelMode::Thin => PanelMode::Closed,
+        PanelMode::Wide => PanelMode::Closed,
+    }
+}
+
 fn midpoint_y(area: Rect) -> u16 {
     area.y.saturating_add(area.height / 2)
 }
@@ -167,13 +179,14 @@ mod tests {
     #[test]
     fn toggles_cycle_closed_to_thin_to_wide_to_closed() {
         let mut panels = PanelState::new();
+
         panels.left = PanelMode::Closed;
         panels.toggle_left();
         assert_eq!(panels.left, PanelMode::Thin);
         panels.toggle_left();
-        assert_eq!(panels.left, PanelMode::Wide);
-        panels.toggle_left();
         assert_eq!(panels.left, PanelMode::Closed);
+        panels.toggle_left();
+        assert_eq!(panels.left, PanelMode::Thin);
 
         panels.right = PanelMode::Closed;
         panels.toggle_right();
@@ -227,7 +240,17 @@ mod tests {
     fn narrow_terminal_forces_right_sidebar_closed() {
         let mut panels = PanelState::new();
         panels.right = PanelMode::Wide;
-        let clamped = panels.clamped_for_area(Rect::new(0, 0, 79, 24));
+        let clamped = panels.clamped_for_area(Rect::new(0, 0, 99, 24));
         assert_eq!(clamped.right, PanelMode::Closed);
+    }
+
+    #[test]
+    fn terminal_at_one_hundred_columns_keeps_right_sidebar_available() {
+        let mut panels = PanelState::new();
+        panels.right = PanelMode::Thin;
+
+        let clamped = panels.clamped_for_area(Rect::new(0, 0, 100, 24));
+
+        assert_eq!(clamped.right, PanelMode::Thin);
     }
 }

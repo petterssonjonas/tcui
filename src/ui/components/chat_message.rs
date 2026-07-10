@@ -1,4 +1,19 @@
 use ratatui::{layout::Rect, prelude::*, widgets::*, Frame};
+use std::env;
+
+fn user_display_name() -> String {
+    if let Ok(user) = env::var("USER") {
+        if !user.is_empty() {
+            return user;
+        }
+    }
+    if let Ok(user) = env::var("USERNAME") {
+        if !user.is_empty() {
+            return user;
+        }
+    }
+    "User".to_string()
+}
 
 pub struct ChatMessage<'a> {
     pub role: &'a str,
@@ -20,34 +35,24 @@ impl<'a> ChatMessage<'a> {
     pub fn render(&self, f: &mut Frame, area: Rect) {
         let theme = crate::theme::active_theme();
 
-        if self.role == "assistant" {
+        if self.role == "user" {
+            let username = user_display_name();
             let mut lines = vec![Line::from(Span::styled(
-                "Assistant",
+                username,
                 Style::default().fg(Color::Cyan).bold(),
             ))];
             lines.extend(self.content.lines().map(Line::from));
 
             let paragraph = Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(theme.border).bg(theme.panel))
-                        .style(Style::default().fg(theme.foreground).bg(theme.panel)),
-                )
-                .style(Style::default().fg(theme.foreground).bg(theme.panel))
+                .style(Style::default().fg(theme.foreground).bg(theme.user_bubble))
                 .wrap(Wrap { trim: true });
 
             f.render_widget(paragraph, area);
             return;
         }
 
-        if self.role == "user" {
+        if self.role == "assistant" {
             let paragraph = Paragraph::new(self.content)
-                .block(
-                    Block::default()
-                        .borders(Borders::LEFT)
-                        .border_style(Style::default().fg(theme.accent_alt)),
-                )
                 .style(Style::default().fg(theme.foreground))
                 .wrap(Wrap { trim: true });
 

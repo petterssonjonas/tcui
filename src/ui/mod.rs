@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Clear, Paragraph, Wrap},
     Frame,
 };
 
@@ -294,7 +294,7 @@ impl UI {
             show_selector: true,
             show_chat_scrollbar: true,
             collapse_thinking: true,
-            kitty_enhanced_text: true,
+            kitty_enhanced_text: false,
             kitty_heading_downscale: HeadingDownscale::None,
             image_protocol: "auto".to_string(),
             terminal_capabilities: TerminalCapabilities::detect(),
@@ -363,34 +363,7 @@ impl UI {
         let top_bar = TopBar::new(&self.tabs, self.active_tab, false, false);
         top_bar.render(f, main_layout[0]);
 
-        let mut panels = self.panel_state;
-        panels.left = if self.sidebar_open {
-            match panels.left {
-                crate::tui::shell::PanelMode::Closed => crate::tui::shell::PanelMode::Thin,
-                crate::tui::shell::PanelMode::Thin => crate::tui::shell::PanelMode::Thin,
-                crate::tui::shell::PanelMode::Wide => {
-                    panels.expand_left();
-                    crate::tui::shell::PanelMode::Wide
-                }
-            }
-        } else {
-            panels.collapse_left();
-            crate::tui::shell::PanelMode::Closed
-        };
-        panels.right = if self.artifact_sidebar_open {
-            match panels.right {
-                crate::tui::shell::PanelMode::Closed => crate::tui::shell::PanelMode::Thin,
-                crate::tui::shell::PanelMode::Thin => crate::tui::shell::PanelMode::Thin,
-                crate::tui::shell::PanelMode::Wide => {
-                    panels.expand_right();
-                    crate::tui::shell::PanelMode::Wide
-                }
-            }
-        } else {
-            panels.collapse_right();
-            crate::tui::shell::PanelMode::Closed
-        };
-        panels = panels.clamped_for_area(main_layout[1]);
+        let panels = self.panel_state.clamped_for_area(main_layout[1]);
 
         let left_actual_width = panels.left_width();
         let artifact_actual_width = panels.right_width();
@@ -467,7 +440,7 @@ impl UI {
         if let Some(tab_state) = self.tabs.get_mut(self.active_tab) {
             if artifact_actual_width > 0 && !right_overlays_chat {
                 f.render_widget(
-                    Block::default().style(theme.panel_style()),
+                    Block::default().style(Style::default().fg(theme.foreground).bg(theme.sidebar)),
                     right_sidebar_area,
                 );
                 let mut artifact_sidebar = ArtifactSidebar::new(
@@ -479,7 +452,7 @@ impl UI {
                     &mut self.artifact_sidebar_state,
                 );
                 artifact_sidebar.render(f, right_sidebar_area);
-            } else {
+            } else if artifact_actual_width == 0 {
                 self.artifact_sidebar_state = ArtifactSidebarState::default();
             }
         }
@@ -575,6 +548,7 @@ impl UI {
         }
 
         if self.sidebar_open && left_overlays_chat {
+            f.render_widget(Clear, left_sidebar_area);
             f.render_widget(
                 Block::default().style(Style::default().fg(theme.foreground).bg(theme.sidebar)),
                 left_sidebar_area,
@@ -587,8 +561,10 @@ impl UI {
         if right_overlays_chat {
             if let Some(tab_state) = self.tabs.get_mut(self.active_tab) {
                 if artifact_actual_width > 0 {
+                    f.render_widget(Clear, right_sidebar_area);
                     f.render_widget(
-                        Block::default().style(theme.panel_style()),
+                        Block::default()
+                            .style(Style::default().fg(theme.foreground).bg(theme.sidebar)),
                         right_sidebar_area,
                     );
                     let mut artifact_sidebar = ArtifactSidebar::new(
@@ -725,16 +701,18 @@ impl UI {
         let theme = crate::theme::active_theme();
         let popup = centered_rect(68, 62, area);
         f.render_widget(Clear, popup);
-        let block = Block::default()
-            .title(" Help ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.border))
-            .style(Style::default().fg(theme.foreground).bg(theme.panel));
+        let block = Block::default().style(Style::default().fg(theme.foreground).bg(theme.panel));
         let commands = crate::tui::palette::all_commands();
-        let mut lines = vec![Line::styled(
-            "Available commands",
-            Style::default().fg(theme.accent),
-        )];
+        let mut lines = vec![
+            Line::styled(
+                " Help ",
+                Style::default()
+                    .fg(theme.accent)
+                    .bg(theme.panel)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::styled("Available commands", Style::default().fg(theme.accent)),
+        ];
         lines.push(Line::from(
             "  Slash commands: /help /settings /theme /mcp /skills /web",
         ));

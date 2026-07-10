@@ -47,7 +47,7 @@ impl<'a> TopBar<'a> {
             .alignment(Alignment::Center);
         f.render_widget(title, chunks[1]);
 
-        let close = Paragraph::new("[X]")
+        let close = Paragraph::new("X")
             .style(Style::default().fg(theme.error).bg(theme.sidebar))
             .alignment(Alignment::Center);
         f.render_widget(close, chunks[2]);

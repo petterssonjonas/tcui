@@ -20,6 +20,25 @@ impl TuiApp {
         Ok(())
     }
 
+    pub(crate) fn apply_toast_position_selection(
+        &mut self,
+        position: crate::config::ToastPosition,
+    ) -> color_eyre::Result<()> {
+        let mut config = self
+            .config
+            .try_read()
+            .map(|config| config.clone())
+            .unwrap_or_default();
+        config.tui.toast_position = position;
+        config.save()?;
+        if let Ok(mut live_config) = self.config.try_write() {
+            *live_config = config.clone();
+        }
+        self.ui.tui_config.toast_position = position;
+        self.ui.show_toast(format!("Toast position: {position:?}"));
+        Ok(())
+    }
+
     pub(crate) async fn toggle_web_search(&mut self) -> color_eyre::Result<()> {
         let mut config = self
             .config

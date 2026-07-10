@@ -31,6 +31,7 @@ impl QuitConfirmModal {
     }
 
     pub fn render(&self, f: &mut Frame) -> QuitConfirmAreas {
+        let theme = crate::theme::active_theme();
         let area = f.area();
         let popup_area = Self::centered_rect(40, 20, area);
 
@@ -39,12 +40,7 @@ impl QuitConfirmModal {
             area,
         );
 
-        let block = Block::default()
-            .title(format!(" {} ", self.title))
-            .title_style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Red))
-            .style(Style::default().bg(Color::Black));
+        let block = Block::default().style(Style::default().bg(theme.panel));
 
         let text = vec![
             Line::from(""),
@@ -64,12 +60,22 @@ impl QuitConfirmModal {
             Line::from(""),
         ];
 
-        let paragraph = Paragraph::new(text)
-            .block(block)
-            .alignment(Alignment::Center);
-
         f.render_widget(Clear, popup_area);
-        f.render_widget(paragraph, popup_area);
+        f.render_widget(block, popup_area);
+        f.render_widget(
+            Paragraph::new(Line::from(format!(" {} ", self.title)))
+                .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Rect::new(popup_area.x, popup_area.y, popup_area.width, 1),
+        );
+
+        let content_area = Rect::new(
+            popup_area.x,
+            popup_area.y + 1,
+            popup_area.width,
+            popup_area.height.saturating_sub(1),
+        );
+        let paragraph = Paragraph::new(text).alignment(Alignment::Center);
+        f.render_widget(paragraph, content_area);
 
         let yes_width = 7u16;
         let no_width = 6u16;
