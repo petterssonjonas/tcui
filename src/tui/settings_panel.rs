@@ -1,3 +1,6 @@
+// TODO: Infrastructure for provider/model/local/MCP/keybind settings is preserved
+// here (SettingType variants, confirm modals, keybind helpers) but not yet wired
+// to live data. Revisit when adding those setting categories back.
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, HashMap};
@@ -645,24 +648,9 @@ pub fn all_settings() -> Vec<Setting> {
     use SettingType as T;
 
     vec![
-        subsection("provider", "Provider", "API providers and credentials", C::Provider),
-        subsection("model", "Model", "Default model and reasoning", C::Model),
-        subsection("local", "Local", "Local inference server", C::Local),
         subsection("theme", "Theme", "Colors and visual style", C::Theme),
-        subsection("keybind", "Keybind", "Keyboard shortcuts", C::Keybind),
-        subsection("mcp", "MCP", "Tool server connections", C::Mcp),
-        subsection("obsidian", "Obsidian", "Vault search and notes", C::Obsidian),
         subsection("ui_layout", "UI Layout", "Panels and status widgets", C::UiLayout),
         subsection("chat_behavior", "Chat Behavior", "Chat input and output defaults", C::ChatBehavior),
-        subsection("privacy", "Privacy", "Local data and telemetry", C::Privacy),
-        subsection("experimental", "Experimental", "Preview features", C::Experimental),
-        subsection("reset", "Reset", "Restore defaults and clear state", C::Reset),
-        setting("default_provider", "Default Provider", "Choose the default chat provider", C::Provider, T::Choice(&["OpenAI", "Anthropic", "Ollama"]), &["api", "credentials"], D::Safe),
-        setting("provider_api_key", "Provider API Key", "Manage stored provider credentials", C::Provider, T::Text, &["secret", "token"], D::Warning),
-        setting("default_model", "Default Model", "Choose the model for new chats", C::Model, T::Text, &["llm", "chat"], D::Safe),
-        setting("reasoning_effort", "Reasoning Effort", "Default reasoning mode when available", C::Model, T::Choice(&["low", "medium", "high"]), &["thinking"], D::Safe),
-        setting("local_endpoint", "Local Endpoint", "URL for the local inference server", C::Local, T::Text, &["ollama", "server"], D::Safe),
-        setting("local_auto_start", "Auto-start Local Server", "Start local inference when TCUI launches", C::Local, T::Bool { enabled: false }, &["ollama", "daemon"], D::Safe),
         setting("theme_system", "System", "Use terminal default colors", C::Theme, T::Theme("system"), &["theme", "default"], D::Safe),
         setting("theme_gruvbox", "Gruvbox", "Warm retro palette", C::Theme, T::Theme("gruvbox"), &["theme", "color"], D::Safe),
         setting("theme_nord", "Nord", "Arctic blue palette", C::Theme, T::Theme("nord"), &["theme", "color"], D::Safe),
@@ -677,19 +665,6 @@ pub fn all_settings() -> Vec<Setting> {
         setting("theme_solarized", "Solarized", "Solarized dark palette", C::Theme, T::Theme("solarized"), &["theme", "color"], D::Safe),
         setting("theme_tokyo_night", "Tokyo Night", "Tokyo Night palette", C::Theme, T::Theme("tokyo-night"), &["theme", "color"], D::Safe),
         setting("theme_opencode", "OpenCode", "OpenCode-inspired palette", C::Theme, T::Theme("opencode"), &["theme", "color"], D::Safe),
-        keybind("open_palette", "Open Palette", "Open the command palette", "ctrl+p", false, &["shortcut", "command", "ctrl-p"]),
-        keybind("open_settings", "Open Settings", "Open the settings panel", "ctrl+,", false, &["settings", "slash"]),
-        keybind("quit", "Quit", "Quit TCUI", "ctrl+q", false, &["exit", "close"]),
-        keybind("toggle_sidebar", "Toggle Sidebar", "Show or hide the left sidebar", "ctrl+b", false, &["panel", "left"]),
-        keybind("new_chat", "New Chat", "Start a new chat", "ctrl+n", false, &["conversation", "tab"]),
-        keybind("clear_chat", "Clear Chat", "Clear the current chat", "ctrl+l", false, &["reset", "conversation"]),
-        keybind("send_message", "Send Message", "Enter is reserved for sending messages", "enter", true, &["reserved", "submit"]),
-        keybind("external_editor", "External Editor", "Open the external editor", "ctrl+e", false, &["editor", "compose"]),
-        setting("mcp_enabled", "Enable MCP", "Allow configured MCP servers", C::Mcp, T::Bool { enabled: true }, &["tools", "servers"], D::Safe),
-        setting("vault_path", "Vault Path", "Path to the Obsidian vault", C::Obsidian, T::Text, &["notes", "search"], D::Safe),
-        setting("vault_index", "Index Vault", "Enable local vault search", C::Obsidian, T::Bool { enabled: false }, &["notes", "search"], D::Safe),
-        setting("left_sidebar", "Left Sidebar", "Default left sidebar mode", C::UiLayout, T::Choice(&["closed", "thin", "wide"]), &["layout", "panel"], D::Safe),
-        setting("right_sidebar", "Right Sidebar", "Default artifact sidebar mode", C::UiLayout, T::Choice(&["closed", "thin", "wide"]), &["layout", "artifact"], D::Safe),
         setting("toast_top_right", "Toast: Top Right", "Show toast notifications at the top right", C::UiLayout, T::ToastPosition(crate::config::ToastPosition::TopRight), &["toast", "notification", "position"], D::Safe),
         setting("toast_top_center", "Toast: Top Center", "Show toast notifications at the top center", C::UiLayout, T::ToastPosition(crate::config::ToastPosition::TopCenter), &["toast", "notification", "position"], D::Safe),
         setting("toast_top_left", "Toast: Top Left", "Show toast notifications at the top left", C::UiLayout, T::ToastPosition(crate::config::ToastPosition::TopLeft), &["toast", "notification", "position"], D::Safe),
@@ -697,9 +672,6 @@ pub fn all_settings() -> Vec<Setting> {
         setting("toast_off", "Toast: Off", "Disable toast notifications", C::UiLayout, T::ToastPosition(crate::config::ToastPosition::Off), &["toast", "notification", "position"], D::Safe),
         setting("web_search", "Web Search", "Enable web search for prompts", C::ChatBehavior, T::Bool { enabled: false }, &["search", "prompt"], D::Safe),
         setting("collapse_thinking", "Collapse Thinking", "Fold assistant thinking by default", C::ChatBehavior, T::Bool { enabled: true }, &["reasoning", "fold"], D::Safe),
-        setting("local_history", "Local History", "Keep conversation history on disk", C::Privacy, T::Bool { enabled: true }, &["storage", "database"], D::Warning),
-        setting("preview_features", "Preview Features", "Enable experimental UI behavior", C::Experimental, T::Bool { enabled: false }, &["beta", "preview"], D::Warning),
-        setting("reset_all", "Reset All Settings", "Clear settings and restore defaults", C::Reset, T::DestructiveAction, &["factory", "defaults"], D::Danger),
     ]
 }
 
@@ -779,8 +751,8 @@ mod tests {
             .filter(|setting| setting.setting_type == SettingType::Subsection)
             .count();
 
-        assert_eq!(settings.len(), 55);
-        assert_eq!(subsections, 12);
+        assert_eq!(settings.len(), 24);
+        assert_eq!(subsections, 3);
         assert_eq!(SettingCategory::ALL.len(), 12);
     }
 
@@ -791,7 +763,7 @@ mod tests {
 
         let results = panel.results(&settings);
 
-        assert_eq!(results.len(), 55);
+        assert_eq!(results.len(), 24);
     }
 
     #[test]
@@ -814,16 +786,18 @@ mod tests {
     fn search_filters_title_description_and_keywords() {
         let settings = all_settings();
         let mut panel = SettingsPanelState::new();
-        for c in "factory".chars() {
+        for c in "gruvbox".chars() {
             panel.insert_char(c);
         }
 
         let results = panel.results(&settings);
 
-        assert!(results.iter().any(|(_, setting)| setting.id == "reset_all"));
         assert!(results
             .iter()
-            .all(|(_, setting)| setting_matches(setting, "factory")));
+            .any(|(_, setting)| setting.id == "theme_gruvbox"));
+        assert!(results
+            .iter()
+            .all(|(_, setting)| setting_matches(setting, "gruvbox")));
     }
 
     #[test]
@@ -834,10 +808,10 @@ mod tests {
         assert_eq!(panel.enter(&settings), EnterResult::EnteredSubsection);
         let results = panel.results(&settings);
 
-        assert_eq!(panel.current_category(), Some(SettingCategory::Provider));
-        assert_eq!(results.len(), 2);
+        assert_eq!(panel.current_category(), Some(SettingCategory::Theme));
+        assert_eq!(results.len(), 14);
         assert!(results.iter().all(|(_, setting)| {
-            setting.category == SettingCategory::Provider
+            setting.category == SettingCategory::Theme
                 && setting.setting_type != SettingType::Subsection
         }));
     }
@@ -851,30 +825,5 @@ mod tests {
         assert!(!panel.esc());
         assert_eq!(panel.current_category(), None);
         assert!(panel.esc());
-    }
-
-    #[test]
-    fn destructive_action_requests_confirmation() {
-        let settings = all_settings();
-        let mut panel = SettingsPanelState::new();
-        panel.depth_stack.push(SettingCategory::Reset);
-
-        assert_eq!(panel.enter(&settings), EnterResult::RequestConfirm);
-        assert!(panel.confirm.is_some());
-    }
-
-    #[test]
-    fn enter_keybind_requests_capture_for_selected_action() {
-        let settings = all_settings();
-        let mut panel = SettingsPanelState::new();
-        panel.depth_stack.push(SettingCategory::Keybind);
-
-        assert_eq!(
-            panel.enter(&settings),
-            EnterResult::OpenKeybind {
-                action_id: "open_palette",
-                action_label: "Open Palette",
-            }
-        );
     }
 }

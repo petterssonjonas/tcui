@@ -46,7 +46,7 @@ impl TuiApp {
                     if let Some(editor) = self.ui.editor_popup.as_mut() {
                         let done = editor.poll_output();
                         if done {
-                            let chat_draft_path = editor.chat_draft_path().map(std::path::PathBuf::from);
+                            let chat_draft_path = editor.take_chat_draft_path();
                             self.ui.editor_popup = None;
                             if let Some(path) = chat_draft_path {
                                 self.apply_chat_draft_from_path(&path);

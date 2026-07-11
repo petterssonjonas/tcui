@@ -46,7 +46,6 @@ clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 model2vec-rs = { version = "0.2.1", optional = true, default-features = false, features = ["local-only", "onig"] }
 sqlite-vec = { version = "=0.1.7", optional = true }
-nucleo-matcher = "0.3"
 
 [profile.dev]
 opt-level = 3

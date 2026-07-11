@@ -222,6 +222,11 @@ impl EditorPopupState {
     pub fn chat_draft_path(&self) -> Option<&Path> {
         self.chat_draft_path.as_deref()
     }
+
+    /// Takes the draft path so `Drop` will not delete the file before the caller reads it.
+    pub fn take_chat_draft_path(&mut self) -> Option<PathBuf> {
+        self.chat_draft_path.take()
+    }
 }
 
 impl Drop for EditorPopupState {

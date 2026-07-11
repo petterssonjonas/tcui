@@ -2,6 +2,8 @@
 //!
 //! Plain structs and free functions -- no trait abstractions. Each primitive
 //! is a building block for later todos (command palette, settings panel, etc.).
+// TODO: Building-block primitives preserved for future TUI surfaces. Prune
+// unused items as they are superseded by integrated implementations.
 #![allow(dead_code)]
 
 use crossterm::event::KeyCode;

@@ -23,6 +23,10 @@ impl TuiApp {
             return None;
         }
 
+        // TODO: Keybind editing is disabled in the settings UI (no keybind entries in
+        // all_settings). This capture flow is preserved and persisted to config, but
+        // normal key dispatch does not yet consult keybinding_overrides. Re-enable
+        // keybind entries in all_settings() once dispatch is wired through the binding map.
         if let Some(mut capture) = self.ui.keybind_capture.take() {
             let mut effective_bindings = std::collections::BTreeMap::new();
             for setting in crate::tui::settings_panel::all_settings() {
@@ -49,6 +53,7 @@ impl TuiApp {
                             .show_toast(format!("Bound {action_label} → {binding}"));
                         if let Ok(mut config) = self.config.try_write() {
                             config.tui.keybinding_overrides = self.ui.keybinding_overrides.clone();
+                            let _ = config.save();
                         }
                     }
                 }
@@ -57,6 +62,7 @@ impl TuiApp {
                     self.ui.keybinding_overrides.remove(&action_id);
                     if let Ok(mut config) = self.config.try_write() {
                         config.tui.keybinding_overrides = self.ui.keybinding_overrides.clone();
+                        let _ = config.save();
                     }
                 }
                 crate::tui::keybind_capture::CaptureResult::Conflict(_)
@@ -95,7 +101,13 @@ impl TuiApp {
                     None
                 }
                 KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    palette.toggle_pin();
+                    if palette.toggle_pin() {
+                        let pinned = palette.pinned().to_vec();
+                        if let Ok(mut config) = self.config.try_write() {
+                            config.tui.pinned_commands = pinned;
+                            let _ = config.save();
+                        }
+                    }
                     None
                 }
                 KeyCode::Char(c)

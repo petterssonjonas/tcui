@@ -1,9 +1,10 @@
 //! Settings palette: registry, fuzzy search, grouping, pin/unpin, overlay render.
+// TODO: Some palette infrastructure (categories, helpers) is preserved for
+// future command additions. Prune as the command set stabilizes.
 #![allow(dead_code)]
 
 use crate::app::Action;
 use crate::tui::components::{centered_rect, GroupHeader, SearchField, SelectList};
-use nucleo_matcher::{Config, Matcher, Utf32Str};
 use ratatui::{prelude::*, widgets::*, Frame};
 
 use CommandCategory as C;
@@ -168,12 +169,9 @@ impl PaletteState {
         if query.trim().is_empty() {
             return self.commands.iter().map(|c| c.id.clone()).collect();
         }
-        let qchars: Vec<char> = query.to_lowercase().chars().collect();
-        let needle = Utf32Str::Unicode(&qchars);
-        let mut matcher = Matcher::new(Config::DEFAULT);
         let mut scored: Vec<(f64, String)> = Vec::new();
         for c in &self.commands {
-            let s = fuzzy_score(needle, c, &mut matcher);
+            let s = fuzzy_score(query, c);
             if s > 0.0 {
                 scored.push((s, c.id.clone()));
             }
@@ -425,39 +423,38 @@ impl PaletteState {
     }
 }
 
-fn fuzzy_score(needle: Utf32Str, cmd: &Command, m: &mut Matcher) -> f64 {
-    let title: Vec<char> = cmd.title.to_lowercase().chars().collect();
-    let t = m
-        .fuzzy_match(Utf32Str::Unicode(&title), needle)
-        .map(|s| s as f64)
-        .unwrap_or(0.0);
-    let desc: Vec<char> = cmd.description.to_lowercase().chars().collect();
-    let d = m
-        .fuzzy_match(Utf32Str::Unicode(&desc), needle)
-        .map(|s| s as f64)
-        .unwrap_or(0.0);
-    let mut best_kw = 0.0;
-    for kw in &cmd.keywords {
-        let k: Vec<char> = kw.to_lowercase().chars().collect();
-        let s = m
-            .fuzzy_match(Utf32Str::Unicode(&k), needle)
-            .map(|s| s as f64)
-            .unwrap_or(0.0);
-        if s > best_kw {
-            best_kw = s;
+fn fuzzy_score(query: &str, cmd: &Command) -> f64 {
+    let q = query.to_lowercase();
+    let title = cmd.title.to_lowercase();
+    let desc = cmd.description.to_lowercase();
+
+    if title.contains(&q) {
+        return 100.0;
+    }
+    if desc.contains(&q) {
+        return 50.0;
+    }
+    if cmd.keywords.iter().any(|k| k.to_lowercase().contains(&q)) {
+        return 30.0;
+    }
+
+    let q_chars: Vec<char> = q.chars().collect();
+    let title_chars: Vec<char> = title.chars().collect();
+    if subsequence_match(&q_chars, &title_chars) {
+        return 10.0;
+    }
+
+    0.0
+}
+
+fn subsequence_match(needle: &[char], haystack: &[char]) -> bool {
+    let mut ni = 0;
+    for &h in haystack {
+        if ni < needle.len() && h == needle[ni] {
+            ni += 1;
         }
     }
-    let mut best: f64 = 0.0;
-    if t > 0.0 {
-        best = best.max(3.0 + t);
-    }
-    if d > 0.0 {
-        best = best.max(2.0 + d);
-    }
-    if best_kw > 0.0 {
-        best = best.max(1.0 + best_kw);
-    }
-    best
+    ni == needle.len()
 }
 
 pub fn has_duplicate_ids(commands: &[Command]) -> bool {
