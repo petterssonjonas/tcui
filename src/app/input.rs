@@ -10,6 +10,55 @@ impl TuiApp {
             .and_then(|tab| tab.input_area)
     }
 
+    pub(crate) fn open_chat_draft_editor(&mut self) {
+        let content = self
+            .ui
+            .tabs
+            .get(self.ui.active_tab)
+            .map(|tab| tab.input_content.as_str())
+            .unwrap_or_default();
+        let path = chat_draft_path();
+        if let Err(error) = std::fs::write(&path, content) {
+            self.ui
+                .show_toast(format!("Could not prepare chat draft editor: {error}"));
+            return;
+        }
+        match crate::ui::modals::editor_popup::EditorPopupState::new_chat_draft(&path) {
+            Ok(editor) => self.ui.editor_popup = Some(editor),
+            Err(error) => {
+                let _ = std::fs::remove_file(&path);
+                self.ui.show_toast(error);
+            }
+        }
+    }
+
+    pub(crate) fn apply_chat_draft_from_path(&mut self, path: &std::path::Path) {
+        match std::fs::read_to_string(path) {
+            Ok(content) => self.replace_input_content(content),
+            Err(error) => self
+                .ui
+                .show_toast(format!("Could not read edited chat draft: {error}")),
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    pub(crate) fn take_input_submission(&mut self) -> Option<String> {
+        let tab = self.ui.tabs.get_mut(self.ui.active_tab)?;
+        if tab.input_content.is_empty() {
+            return None;
+        }
+        let content = std::mem::take(&mut tab.input_content);
+        tab.input_history_index = None;
+        tab.input_history_draft = None;
+        tab.input_cursor = 0;
+        tab.input_scroll = 0;
+        Some(content)
+    }
+
+    pub(crate) fn insert_input_newline(&mut self) {
+        self.insert_input_char('\n');
+    }
+
     pub(crate) fn insert_input_text(&mut self, text: &str) {
         if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
             let cursor = tab.input_cursor.min(tab.input_content.chars().count());
@@ -139,9 +188,9 @@ impl TuiApp {
         self.refresh_input_popup();
     }
 
-    pub(crate) fn browse_input_history(&mut self, forward: bool) {
+    pub(crate) fn browse_input_history(&mut self, forward: bool) -> bool {
         let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) else {
-            return;
+            return false;
         };
         let history: Vec<String> = tab
             .messages
@@ -150,7 +199,7 @@ impl TuiApp {
             .map(|message| message.content.clone())
             .collect();
         if history.is_empty() {
-            return;
+            return false;
         }
 
         if tab.input_history_index.is_none() {
@@ -178,6 +227,7 @@ impl TuiApp {
         tab.input_cursor = tab.input_content.chars().count();
         tab.input_scroll = 0;
         self.refresh_input_popup();
+        true
     }
 }
 
@@ -189,6 +239,14 @@ pub(crate) fn char_to_byte_index(text: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(idx, _)| idx)
         .unwrap_or(text.len())
+}
+
+fn chat_draft_path() -> std::path::PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!("tcui-chat-draft-{}-{stamp}.md", std::process::id()))
 }
 
 #[cfg(test)]

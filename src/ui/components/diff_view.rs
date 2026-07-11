@@ -43,8 +43,9 @@ impl<'a> DiffView<'a> {
             }))
             .collect();
 
+        let theme = crate::theme::active_theme();
         let paragraph = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL))
+            .style(Style::default().bg(theme.code_bg))
             .wrap(Wrap { trim: true });
 
         f.render_widget(paragraph, area);

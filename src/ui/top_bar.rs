@@ -1,14 +1,9 @@
-#![allow(dead_code)]
-use std::rc::Rc;
-
 use ratatui::{prelude::*, widgets::*, Frame};
 use unicode_width::UnicodeWidthStr;
 
 pub struct TopBar<'a> {
     pub tabs: &'a [crate::ui::ChatTabState],
     pub active: usize,
-    pub sidebar_open: bool,
-    pub artifact_sidebar_open: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -18,196 +13,125 @@ pub struct TabHitArea {
 }
 
 const NAV_BUTTON_WIDTH: u16 = 3;
-const SETTINGS_BUTTON_WIDTH: u16 = 12;
+const BRAND_WIDTH: u16 = 8;
 
 impl<'a> TopBar<'a> {
     pub fn new(
         tabs: &'a [crate::ui::ChatTabState],
         active: usize,
-        sidebar_open: bool,
-        artifact_sidebar_open: bool,
+        _sidebar_open: bool,
+        _artifact_sidebar_open: bool,
     ) -> Self {
-        Self {
-            tabs,
-            active,
-            sidebar_open,
-            artifact_sidebar_open,
-        }
+        Self { tabs, active }
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
         let theme = crate::theme::active_theme();
         let chunks = top_bar_chunks(area);
 
-        // Hamburger button
-        let hamburger_text = if self.sidebar_open { "<" } else { ">" };
-        let hamburger = Paragraph::new(hamburger_text)
-            .style(Style::default().fg(theme.foreground).bg(theme.sidebar))
-            .alignment(Alignment::Center)
-            .block(Block::default());
-        f.render_widget(hamburger, chunks[0]);
+        let bar_style = Style::default().fg(theme.foreground).bg(theme.background);
+        f.render_widget(Block::default().style(bar_style), area);
 
-        // Tabs - render manually to track widths
-        self.render_tabs(f, chunks[1]);
+        let brand = Paragraph::new("TCUI")
+            .style(
+                Style::default()
+                    .fg(theme.accent)
+                    .bg(theme.background)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .alignment(Alignment::Left);
+        f.render_widget(brand, chunks[0]);
 
-        let settings = Paragraph::new(" ⚙ Settings ")
-            .style(Style::default().fg(theme.muted).bg(theme.sidebar))
-            .alignment(Alignment::Center)
-            .block(Block::default());
-        f.render_widget(settings, chunks[2]);
+        let title = Paragraph::new(fit_label(&self.active_title(), chunks[1].width))
+            .style(Style::default().fg(theme.foreground).bg(theme.background))
+            .alignment(Alignment::Center);
+        f.render_widget(title, chunks[1]);
 
-        let artifact_toggle_text = if self.artifact_sidebar_open { ">" } else { "<" };
-        let artifact_toggle = Paragraph::new(artifact_toggle_text)
-            .style(Style::default().fg(theme.foreground).bg(theme.sidebar))
-            .alignment(Alignment::Center)
-            .block(Block::default());
-        f.render_widget(artifact_toggle, chunks[3]);
-
-        // Close button
-        let close = Paragraph::new(" x ")
+        let close = Paragraph::new("X")
             .style(Style::default().fg(theme.error).bg(theme.sidebar))
-            .alignment(Alignment::Center)
-            .block(Block::default());
-        f.render_widget(close, chunks[4]);
-    }
-
-    fn render_tabs(&self, f: &mut Frame, area: Rect) {
-        let theme = crate::theme::active_theme();
-        let mut current_x = area.x;
-        let divider = Span::styled("│", Style::default().fg(theme.border));
-        let divider_width = 1u16;
-
-        for (i, tab) in self.tabs.iter().enumerate() {
-            let display_name = tab
-                .generated_title
-                .as_ref()
-                .map(|gt| {
-                    if gt.len() > 12 {
-                        format!("{}...", &gt[..12])
-                    } else {
-                        gt.clone()
-                    }
-                })
-                .unwrap_or_else(|| {
-                    let name = &tab.tab.name;
-                    if name.len() > 12 {
-                        format!("{}...", &name[..12])
-                    } else {
-                        name.clone()
-                    }
-                });
-
-            let label = if i == self.active {
-                format!("[{}]", display_name)
-            } else {
-                format!(" {} ", display_name)
-            };
-            let width = label.width() as u16;
-
-            let style = if i == self.active {
-                theme.selected_style()
-            } else {
-                Style::default().fg(theme.muted).bg(theme.sidebar)
-            };
-
-            let tab_area = Rect::new(current_x, area.y, width, area.height);
-            let paragraph = Paragraph::new(label)
-                .style(style)
-                .alignment(Alignment::Left);
-            f.render_widget(paragraph, tab_area);
-
-            current_x += width;
-
-            // Render divider after each tab except the last
-            if i < self.tabs.len() - 1 {
-                let div_area = Rect::new(current_x, area.y, divider_width, area.height);
-                let div_para = Paragraph::new(divider.clone().content)
-                    .style(Style::default().fg(theme.border).bg(theme.sidebar));
-                f.render_widget(div_para, div_area);
-                current_x += divider_width;
-            }
-        }
+            .alignment(Alignment::Center);
+        f.render_widget(close, chunks[2]);
     }
 
     pub fn hamburger_area(&self, area: Rect) -> Rect {
-        let chunks = top_bar_chunks(area);
-        chunks[0]
+        empty_rect(area)
     }
 
     pub fn settings_area(&self, area: Rect) -> Rect {
-        let chunks = top_bar_chunks(area);
-        chunks[2]
+        empty_rect(area)
     }
 
     pub fn artifact_toggle_area(&self, area: Rect) -> Rect {
-        let chunks = top_bar_chunks(area);
-        chunks[3]
+        empty_rect(area)
     }
 
     pub fn close_area(&self, area: Rect) -> Rect {
         let chunks = top_bar_chunks(area);
-        chunks[4]
+        chunks[2]
     }
 
     pub fn tab_hit_areas(&self, area: Rect) -> Vec<TabHitArea> {
         let chunks = top_bar_chunks(area);
-        let tab_area = chunks[1];
+        vec![TabHitArea {
+            index: self.active,
+            area: chunks[1],
+        }]
+    }
 
-        let mut current_x = tab_area.x;
-        let divider_width = 1u16;
-        let mut hit_areas = Vec::new();
-
-        for (i, tab) in self.tabs.iter().enumerate() {
-            let display_name = tab
-                .generated_title
-                .as_ref()
-                .map(|gt| {
-                    if gt.len() > 12 {
-                        format!("{}...", &gt[..12])
-                    } else {
-                        gt.clone()
-                    }
-                })
-                .unwrap_or_else(|| {
-                    let name = &tab.tab.name;
-                    if name.len() > 12 {
-                        format!("{}...", &name[..12])
-                    } else {
-                        name.clone()
-                    }
-                });
-
-            let label = if i == self.active {
-                format!("[{}]", display_name)
-            } else {
-                format!(" {} ", display_name)
-            };
-            let width = label.width() as u16;
-
-            hit_areas.push(TabHitArea {
-                index: i,
-                area: Rect::new(current_x, tab_area.y, width, tab_area.height),
-            });
-
-            current_x += width;
-            if i < self.tabs.len() - 1 {
-                current_x += divider_width;
-            }
-        }
-
-        hit_areas
+    fn active_title(&self) -> String {
+        self.tabs
+            .get(self.active)
+            .map(|tab| {
+                tab.generated_title
+                    .as_deref()
+                    .unwrap_or(tab.tab.name.as_str())
+                    .to_string()
+            })
+            .unwrap_or_else(|| "Chat".to_string())
     }
 }
 
-fn top_bar_chunks(area: Rect) -> Rc<[Rect]> {
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(NAV_BUTTON_WIDTH),
-            Constraint::Min(0),
-            Constraint::Length(SETTINGS_BUTTON_WIDTH),
-            Constraint::Length(NAV_BUTTON_WIDTH),
-            Constraint::Length(NAV_BUTTON_WIDTH),
-        ])
-        .split(area)
+fn top_bar_chunks(area: Rect) -> [Rect; 3] {
+    let close_x = area.right().saturating_sub(NAV_BUTTON_WIDTH);
+    let brand_width = BRAND_WIDTH.min(area.width.saturating_sub(NAV_BUTTON_WIDTH));
+    let center_x = area.x.saturating_add(brand_width);
+    let center_width = close_x.saturating_sub(center_x);
+    [
+        Rect::new(area.x, area.y, brand_width, area.height),
+        Rect::new(center_x, area.y, center_width, area.height),
+        Rect::new(
+            close_x,
+            area.y,
+            NAV_BUTTON_WIDTH.min(area.width),
+            area.height,
+        ),
+    ]
+}
+
+fn empty_rect(area: Rect) -> Rect {
+    Rect::new(area.x, area.y, 0, 0)
+}
+
+fn fit_label(input: &str, width: u16) -> String {
+    let width = usize::from(width);
+    if input.width() <= width {
+        return input.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return "…".to_string();
+    }
+
+    let mut output = String::new();
+    for ch in input.chars() {
+        let next_width = output.width() + ch.to_string().width() + 1;
+        if next_width > width {
+            break;
+        }
+        output.push(ch);
+    }
+    output.push('…');
+    output
 }

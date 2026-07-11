@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use ratatui::{prelude::*, widgets::*, Frame};
 
 const ROW_HEIGHT: u16 = 3;
+const ROW_GAP: u16 = 1;
+const ROW_STRIDE: u16 = ROW_HEIGHT + ROW_GAP;
+const ROW_MARGIN_HORIZONTAL: u16 = 1;
 const FLAT_SECTION_MAX_ROWS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -331,11 +334,7 @@ impl<'a> ArtifactSidebar<'a> {
         self.clear_hit_state();
 
         let theme = crate::theme::active_theme();
-        let block = Block::default()
-            .title(" Right Sidebar ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.border))
-            .style(theme.panel_style());
+        let block = Block::default().style(theme.sidebar_style());
         let inner = block.inner(area);
         f.render_widget(block, area);
 
@@ -420,7 +419,7 @@ impl<'a> ArtifactSidebar<'a> {
     }
 
     pub fn visible_rows(area: Rect) -> usize {
-        usize::from(area.height / ROW_HEIGHT).max(1)
+        usize::from(area.height.saturating_add(ROW_GAP) / ROW_STRIDE).max(1)
     }
 
     pub fn visible_vault_rows(area: Rect) -> usize {
@@ -519,7 +518,7 @@ impl<'a> ArtifactSidebar<'a> {
         section: ArtifactSection,
     ) {
         let theme = crate::theme::active_theme();
-        f.render_widget(Paragraph::new("").style(theme.panel_style()), area);
+        f.render_widget(Paragraph::new("").style(theme.sidebar_style()), area);
         if entries.is_empty() {
             f.render_widget(
                 Paragraph::new(" No items")
@@ -532,8 +531,11 @@ impl<'a> ArtifactSidebar<'a> {
 
         let visible = Self::visible_rows(area);
         for (row_idx, entry) in entries.iter().skip(scroll).take(visible).enumerate() {
-            let row_y = area.y + row_idx as u16 * ROW_HEIGHT;
-            let row_area = Rect::new(area.x, row_y, area.width, ROW_HEIGHT);
+            let row_y = area.y + row_idx as u16 * ROW_STRIDE;
+            let row_area = Rect::new(area.x, row_y, area.width, ROW_HEIGHT).inner(Margin {
+                vertical: 0,
+                horizontal: ROW_MARGIN_HORIZONTAL,
+            });
             self.render_flat_row(f, row_area, entry, section);
         }
     }
@@ -549,10 +551,7 @@ impl<'a> ArtifactSidebar<'a> {
         if area.height < 3 || area.width == 0 {
             return;
         }
-        f.render_widget(
-            Paragraph::new("").style(Style::default().bg(theme.sidebar).fg(theme.foreground)),
-            area,
-        );
+        f.render_widget(Paragraph::new("").style(theme.card_style()), area);
 
         let title = truncate_label(&entry.name, area.width.saturating_sub(1) as usize);
         let meta = truncate_label(
@@ -571,18 +570,19 @@ impl<'a> ArtifactSidebar<'a> {
                     format!(" {meta}"),
                     Style::default().fg(theme.muted),
                 )),
-            ]),
+            ])
+            .style(theme.card_style()),
             Rect::new(area.x, area.y, area.width, 2),
         );
 
         let mut x = area.x;
         let y = area.y + 2;
         let open = button_area(&mut x, y, "View");
-        f.render_widget(button("View", theme.info), open);
+        f.render_widget(button("View", theme.info, theme.card_bg), open);
 
         let edit = if matches!(entry.origin, ArtifactOrigin::Saved) {
             let rect = button_area(&mut x, y, "Edit");
-            f.render_widget(button("Edit", theme.warning), rect);
+            f.render_widget(button("Edit", theme.warning, theme.card_bg), rect);
             Some(rect)
         } else {
             None
@@ -591,7 +591,7 @@ impl<'a> ArtifactSidebar<'a> {
         let save = if entry.can_save(self.has_vault) {
             let label = entry.save_label(self.has_vault);
             let rect = button_area(&mut x, y, label);
-            f.render_widget(button(label, theme.success), rect);
+            f.render_widget(button(label, theme.success, theme.card_bg), rect);
             Some(rect)
         } else {
             None
@@ -599,7 +599,7 @@ impl<'a> ArtifactSidebar<'a> {
 
         let delete = if entry.can_delete() {
             let rect = button_area(&mut x, y, "Del");
-            f.render_widget(button("Del", theme.error), rect);
+            f.render_widget(button("Del", theme.error, theme.card_bg), rect);
             Some(rect)
         } else {
             None
@@ -616,7 +616,7 @@ impl<'a> ArtifactSidebar<'a> {
 
     fn render_vault_body(&mut self, f: &mut Frame, area: Rect, nodes: &[VaultNode], scroll: usize) {
         let theme = crate::theme::active_theme();
-        f.render_widget(Paragraph::new("").style(theme.panel_style()), area);
+        f.render_widget(Paragraph::new("").style(theme.sidebar_style()), area);
         if nodes.is_empty() {
             f.render_widget(
                 Paragraph::new(" No items")
@@ -800,7 +800,8 @@ fn section_body_height(
         available.min(1)
     } else {
         let rows = entry_count.min(max_rows) as u16;
-        available.min(rows.saturating_mul(ROW_HEIGHT))
+        let gaps = rows.saturating_sub(1).saturating_mul(ROW_GAP);
+        available.min(rows.saturating_mul(ROW_HEIGHT).saturating_add(gaps))
     }
 }
 
@@ -815,8 +816,8 @@ fn kind_label(kind: ArtifactKind) -> &'static str {
     }
 }
 
-fn button(label: &str, color: Color) -> Paragraph<'static> {
-    Paragraph::new(format!("[{label}]")).style(Style::default().fg(color))
+fn button(label: &str, color: Color, background: Color) -> Paragraph<'static> {
+    Paragraph::new(format!("[{label}]")).style(Style::default().fg(color).bg(background))
 }
 
 fn button_area(x: &mut u16, y: u16, label: &str) -> Rect {
@@ -886,7 +887,7 @@ mod tests {
     };
     use ratatui::{backend::TestBackend, layout::Position, layout::Rect, Terminal};
     use std::collections::HashSet;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn entry(name: &str, origin: ArtifactOrigin) -> ArtifactEntry {
         ArtifactEntry {
@@ -912,28 +913,24 @@ mod tests {
         ];
 
         let expanded = build_vault_nodes(&entries, &HashSet::new());
+        assert!(expanded.iter().any(|node| node.path == Path::new("notes")));
         assert!(expanded
             .iter()
-            .any(|node| node.path == PathBuf::from("notes")));
+            .any(|node| node.path == Path::new("notes/projects")));
         assert!(expanded
             .iter()
-            .any(|node| node.path == PathBuf::from("notes/projects")));
-        assert!(expanded
-            .iter()
-            .any(|node| node.path == PathBuf::from("notes/projects/b.md")));
+            .any(|node| node.path == Path::new("notes/projects/b.md")));
 
         let mut collapsed_dirs = HashSet::new();
         collapsed_dirs.insert(PathBuf::from("notes"));
         let collapsed = build_vault_nodes(&entries, &collapsed_dirs);
-        assert!(collapsed
-            .iter()
-            .any(|node| node.path == PathBuf::from("notes")));
+        assert!(collapsed.iter().any(|node| node.path == Path::new("notes")));
         assert!(!collapsed
             .iter()
-            .any(|node| node.path == PathBuf::from("notes/projects")));
+            .any(|node| node.path == Path::new("notes/projects")));
         assert!(!collapsed
             .iter()
-            .any(|node| node.path == PathBuf::from("notes/a.md")));
+            .any(|node| node.path == Path::new("notes/a.md")));
     }
 
     #[test]
@@ -946,7 +943,7 @@ mod tests {
             .draw(|frame| sidebar.render(frame, Rect::new(0, 0, 32, 20)))
             .expect("render");
 
-        let action = state.action_at(Position::new(1, 1));
+        let action = state.action_at(Position::new(1, 0));
         assert!(matches!(
             action,
             Some(ArtifactSidebarAction::ToggleSection(
@@ -1014,9 +1011,32 @@ mod tests {
             .draw(|frame| sidebar.render(frame, Rect::new(0, 0, 40, 40)))
             .expect("render");
 
-        assert_eq!(state.temp_body.expect("temp body").height, 6);
-        assert_eq!(state.saved_body.expect("saved body").height, 9);
+        assert_eq!(state.temp_body.expect("temp body").height, 7);
+        assert_eq!(state.saved_body.expect("saved body").height, 11);
         assert_eq!(state.memory_body.expect("memory body").height, 3);
         assert!(state.vault_body.expect("vault body").height > 1);
+    }
+
+    #[test]
+    fn flat_rows_use_card_background_with_sidebar_gap() {
+        let temporary = vec![
+            entry("one.md", ArtifactOrigin::Temporary),
+            entry("two.md", ArtifactOrigin::Temporary),
+        ];
+        let mut state = ArtifactSidebarState::default();
+        let mut sidebar = ArtifactSidebar::new(&temporary, &[], &[], &[], false, &mut state);
+        let mut terminal = Terminal::new(TestBackend::new(32, 20)).expect("terminal");
+
+        terminal
+            .draw(|frame| sidebar.render(frame, Rect::new(0, 0, 32, 20)))
+            .expect("render");
+
+        let theme = crate::theme::active_theme();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 1)].bg, theme.sidebar);
+        assert_eq!(buffer[(1, 1)].bg, theme.card_bg);
+        assert_eq!(buffer[(1, 3)].bg, theme.card_bg);
+        assert_eq!(buffer[(1, 4)].bg, theme.sidebar);
+        assert_eq!(buffer[(1, 5)].bg, theme.card_bg);
     }
 }

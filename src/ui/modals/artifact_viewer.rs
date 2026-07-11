@@ -51,12 +51,15 @@ impl ArtifactViewerState {
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect, props: ArtifactViewerProps<'_>) {
+        let theme = crate::theme::active_theme();
         let popup_area = popup_area(area);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
-            .style(Style::default().bg(Color::Black));
-        let inner = block.inner(popup_area);
+        let block = Block::default().style(Style::default().bg(theme.code_bg));
+        let inner = Rect::new(
+            popup_area.x,
+            popup_area.y + 1,
+            popup_area.width,
+            popup_area.height.saturating_sub(1),
+        );
         f.render_widget(Clear, popup_area);
         f.render_widget(block, popup_area);
         let title_y = popup_area.y;
@@ -201,9 +204,9 @@ pub fn popup_area(area: Rect) -> Rect {
     Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(25),
-            Constraint::Percentage(75),
-            Constraint::Percentage(0),
+            Constraint::Percentage(10),
+            Constraint::Percentage(80),
+            Constraint::Percentage(10),
         ])
         .split(popup_layout[1])[1]
 }

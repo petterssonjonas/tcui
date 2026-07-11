@@ -5,6 +5,8 @@ const TITLE_HEIGHT: u16 = 3;
 const NEW_CHAT_HEIGHT: u16 = 3;
 const SECTION_HEADER_HEIGHT: u16 = 1;
 const CHAT_CARD_HEIGHT: u16 = 5;
+const CHAT_CARD_GAP: u16 = 1;
+const CHAT_CARD_MARGIN_HORIZONTAL: u16 = 1;
 pub const SIDEBAR_WIDTH: u16 = 28;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +44,11 @@ impl<'a> Sidebar<'a> {
         let theme = crate::theme::active_theme();
         let [title_area, new_chat_area, list_area] = sidebar_chunks(area);
 
+        f.render_widget(
+            Block::default().style(Style::default().bg(theme.sidebar)),
+            area,
+        );
+
         let title = Paragraph::new(Line::from(vec![
             Span::styled(
                 " Terminal Chat UI",
@@ -55,25 +62,18 @@ impl<'a> Sidebar<'a> {
             ),
         ]))
         .alignment(Alignment::Left)
-        .block(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(theme.border)),
-        );
+        .style(Style::default().bg(theme.sidebar));
         f.render_widget(title, title_area);
 
         let new_chat = Paragraph::new(" New Chat ")
             .style(
                 Style::default()
                     .fg(theme.success)
+                    .bg(theme.panel)
                     .add_modifier(Modifier::BOLD),
             )
             .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::BOTTOM)
-                    .border_style(Style::default().fg(theme.border)),
-            );
+            .block(Block::default().style(Style::default().bg(theme.panel)));
         f.render_widget(new_chat, new_chat_area);
 
         let pinned: Vec<&crate::ui::ConversationEntry> = self
@@ -93,7 +93,7 @@ impl<'a> Sidebar<'a> {
 
         if self.conversations.is_empty() {
             let empty = Paragraph::new(" No saved chats yet")
-                .style(Style::default().fg(theme.muted))
+                .style(Style::default().fg(theme.muted).bg(theme.sidebar))
                 .alignment(Alignment::Left);
             f.render_widget(empty, list_area);
         }
@@ -140,6 +140,7 @@ impl<'a> Sidebar<'a> {
             .style(
                 Style::default()
                     .fg(theme.muted)
+                    .bg(theme.sidebar)
                     .add_modifier(Modifier::BOLD),
             )
             .alignment(Alignment::Left);
@@ -150,7 +151,7 @@ impl<'a> Sidebar<'a> {
                 return;
             };
             let empty = Paragraph::new("  None")
-                .style(Style::default().fg(theme.muted))
+                .style(Style::default().fg(theme.muted).bg(theme.sidebar))
                 .alignment(Alignment::Left);
             f.render_widget(empty, empty_area);
             return;
@@ -160,7 +161,12 @@ impl<'a> Sidebar<'a> {
             let Some(card_area) = next_rect(list_area, cursor_y, CHAT_CARD_HEIGHT) else {
                 break;
             };
+            let card_area = card_area.inner(Margin {
+                vertical: 0,
+                horizontal: CHAT_CARD_MARGIN_HORIZONTAL,
+            });
             self.render_card(f, card_area, conversation, theme);
+            let _ = next_rect(list_area, cursor_y, CHAT_CARD_GAP);
         }
     }
 
@@ -182,7 +188,12 @@ impl<'a> Sidebar<'a> {
             let Some(card_area) = next_rect(list_area, cursor_y, CHAT_CARD_HEIGHT) else {
                 break;
             };
+            let card_area = card_area.inner(Margin {
+                vertical: 0,
+                horizontal: CHAT_CARD_MARGIN_HORIZONTAL,
+            });
             self.collect_card_hits(card_area, conversation, hits);
+            let _ = next_rect(list_area, cursor_y, CHAT_CARD_GAP);
         }
     }
 
@@ -194,22 +205,18 @@ impl<'a> Sidebar<'a> {
         theme: crate::theme::ThemeSpec,
     ) {
         let active = conversation.id == self.active_conversation;
-        let border_style = if active {
-            Style::default().fg(theme.accent)
-        } else {
-            Style::default().fg(theme.border)
-        };
         let body_style = if active {
             theme.selected_style()
         } else {
             Style::default().fg(theme.foreground).bg(theme.sidebar)
         };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .style(body_style);
-        let inner = block.inner(area);
-        f.render_widget(block, area);
+        let inner = Rect::new(
+            area.x.saturating_add(1),
+            area.y,
+            area.width.saturating_sub(2),
+            area.height,
+        );
+        f.render_widget(Block::default().style(body_style), area);
 
         if inner.height == 0 || inner.width == 0 {
             return;
@@ -225,7 +232,7 @@ impl<'a> Sidebar<'a> {
         );
         f.render_widget(
             Paragraph::new(elide(&status, status_area.width as usize))
-                .style(Style::default().fg(theme.muted).bg(theme.sidebar))
+                .style(body_style.fg(theme.muted))
                 .alignment(Alignment::Left),
             status_area,
         );
@@ -240,7 +247,7 @@ impl<'a> Sidebar<'a> {
         ];
         f.render_widget(
             Paragraph::new(Line::from(action_spans))
-                .style(Style::default().bg(theme.sidebar))
+                .style(body_style)
                 .alignment(Alignment::Left),
             action_area,
         );
@@ -252,7 +259,12 @@ impl<'a> Sidebar<'a> {
         conversation: &crate::ui::ConversationEntry,
         hits: &mut Vec<SidebarHitTarget>,
     ) {
-        let inner = Block::default().borders(Borders::ALL).inner(area);
+        let inner = Rect::new(
+            area.x.saturating_add(1),
+            area.y,
+            area.width.saturating_sub(2),
+            area.height,
+        );
         if inner.height == 0 || inner.width == 0 {
             return;
         }
@@ -410,6 +422,11 @@ mod tests {
         assert!(hits
             .iter()
             .any(|hit| hit.action == SidebarAction::DeleteConversation(2)));
+        let pinned_body = hits
+            .iter()
+            .find(|hit| hit.action == SidebarAction::LoadConversation(1))
+            .expect("pinned conversation hit area");
+        assert_eq!(pinned_body.area.x, 2);
     }
 
     #[test]

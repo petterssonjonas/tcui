@@ -15,18 +15,22 @@ impl<'a> SessionList<'a> {
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self
-            .conversations
-            .iter()
-            .map(|c| ListItem::new(c.title.clone()))
-            .collect();
+        let theme = crate::theme::active_theme();
+        let mut items: Vec<ListItem> = vec![ListItem::new(Line::styled(
+            "Sessions [Ctrl+S]",
+            Style::default()
+                .fg(theme.accent)
+                .bg(theme.panel)
+                .add_modifier(Modifier::BOLD),
+        ))];
+        items.extend(
+            self.conversations
+                .iter()
+                .map(|c| ListItem::new(c.title.clone())),
+        );
 
         let list = List::new(items)
-            .block(
-                Block::default()
-                    .title("Sessions [Ctrl+S]")
-                    .borders(Borders::ALL),
-            )
+            .block(Block::default().style(Style::default().bg(theme.panel)))
             .highlight_style(Style::default().bg(Color::DarkGray));
 
         f.render_widget(list, area);

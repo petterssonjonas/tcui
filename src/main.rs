@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 use color_eyre::Result;
 use crossterm::{
-    event::DisableFocusChange,
-    event::DisableMouseCapture,
-    event::EnableFocusChange,
-    event::EnableMouseCapture,
+    event::{
+        DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{
         disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
@@ -36,6 +36,7 @@ mod storage;
 #[cfg(test)]
 mod test_support;
 mod theme;
+mod tui;
 mod ui;
 mod updater;
 
@@ -106,6 +107,10 @@ fn setup_terminal() -> Result<TerminalType> {
         let _ = execute!(terminal.backend_mut(), SetTitle("TermChatUI"));
         let _ = execute!(terminal.backend_mut(), EnableMouseCapture);
         let _ = execute!(terminal.backend_mut(), EnableFocusChange);
+        let _ = execute!(
+            terminal.backend_mut(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
+        );
     }
 
     Ok(terminal)
@@ -115,6 +120,7 @@ fn restore_terminal() {
     let is_tty = interactive_terminal_available();
 
     if is_tty {
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
         let _ = execute!(io::stdout(), DisableFocusChange);
         let _ = execute!(io::stdout(), DisableMouseCapture);
         let _ = execute!(io::stdout(), LeaveAlternateScreen);

@@ -1,4 +1,4 @@
-use crate::{llm::auth::read_provider_api_key, ui::settings_tab::ModelInfo};
+use crate::{llm::auth::read_provider_api_key, ui::ModelInfo};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]

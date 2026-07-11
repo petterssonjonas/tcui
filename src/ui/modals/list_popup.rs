@@ -108,15 +108,24 @@ impl ListPopup {
     pub fn render(&self, f: &mut Frame, area: Rect) {
         let theme = crate::theme::active_theme();
         let popup_area = self.popup_area_in(area);
-        let block = Block::default()
-            .title(format!(" {} ", self.title))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.border))
-            .style(theme.panel_style());
-        let inner = block.inner(popup_area);
+        let block = Block::default().style(theme.panel_style());
+        let inner = Rect::new(
+            popup_area.x,
+            popup_area.y + 1,
+            popup_area.width,
+            popup_area.height.saturating_sub(1),
+        );
 
         f.render_widget(Clear, popup_area);
         f.render_widget(block, popup_area);
+        f.render_widget(
+            Paragraph::new(Line::from(format!(" {} ", self.title))).style(
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Rect::new(popup_area.x, popup_area.y, popup_area.width, 1),
+        );
 
         if self.items.is_empty() {
             f.render_widget(
@@ -215,9 +224,13 @@ impl ListPopup {
     }
 
     pub fn action_at(&mut self, area: Rect, position: Position) -> Option<ListPopupAction> {
-        let inner = Block::default()
-            .borders(Borders::ALL)
-            .inner(self.popup_area_in(area));
+        let popup_area = self.popup_area_in(area);
+        let inner = Rect::new(
+            popup_area.x,
+            popup_area.y + 1,
+            popup_area.width,
+            popup_area.height.saturating_sub(1),
+        );
         if !inner.contains(position) {
             return None;
         }
