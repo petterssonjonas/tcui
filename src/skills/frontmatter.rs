@@ -64,7 +64,7 @@ pub(crate) fn parse_metadata(source: &str, fallback_name: &str) -> ParsedMetadat
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_metadata, ParsedMetadata};
+    use super::{ParsedMetadata, parse_metadata};
 
     #[test]
     fn metadata_uses_directory_name_when_frontmatter_name_is_missing() {

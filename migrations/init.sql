@@ -55,6 +55,8 @@ CREATE TABLE IF NOT EXISTS models (
     input_price REAL,
     output_price REAL,
     context_window INTEGER,
+    default_reasoning_effort TEXT,
+    supported_reasoning_efforts TEXT NOT NULL DEFAULT '[]',
     fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(provider, model_id)
 );

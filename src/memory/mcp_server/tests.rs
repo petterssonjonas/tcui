@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use rmcp::{model::CallToolRequestParams, ServiceExt};
+use rmcp::{ServiceExt, model::CallToolRequestParams};
 
 use super::{MemoryMcp, MemoryStore};
 use crate::memory::WriteOutcome;

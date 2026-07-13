@@ -14,7 +14,11 @@ fn unique_temp_dir(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("tcui-{label}-{}-{nanos}", std::process::id()))
 }
 
-fn with_test_app(label: &str, test: impl FnOnce(&mut TuiApp)) {
+pub(super) fn with_test_app(label: &str, test: impl FnOnce(&mut TuiApp)) {
+    with_test_app_config(label, AppConfig::default(), test);
+}
+
+fn with_test_app_config(label: &str, config: AppConfig, test: impl FnOnce(&mut TuiApp)) {
     let _guard = env_lock().lock().expect("env lock poisoned");
     let root = unique_temp_dir(label);
     let data_home = root.join("data-home");
@@ -27,7 +31,7 @@ fn with_test_app(label: &str, test: impl FnOnce(&mut TuiApp)) {
     let storage = Storage::new().expect("create storage");
     let mut app = TuiApp::new(
         storage,
-        Arc::new(tokio::sync::RwLock::new(AppConfig::default())),
+        Arc::new(tokio::sync::RwLock::new(config)),
         Arc::new(LlmClient::new()),
         None,
     );
@@ -39,11 +43,52 @@ fn with_test_app(label: &str, test: impl FnOnce(&mut TuiApp)) {
 }
 
 #[test]
+fn app_disables_kitty_enhanced_text_even_when_saved_config_enables_it() {
+    let config = AppConfig {
+        kitty_enhanced_text: true,
+        ..AppConfig::default()
+    };
+
+    with_test_app_config("kitty-disabled", config, |app| {
+        assert!(!app.ui.kitty_enhanced_text);
+    });
+}
+
+#[test]
+fn wide_artifact_sidebar_header_click_toggles_section() {
+    with_test_app("wide-artifact-header", |app| {
+        app.ui.panel_state.right = crate::tui::shell::PanelMode::Wide;
+        app.ui.artifact_sidebar_open = true;
+        app.ui.tabs[0].temporary_artifacts.push(
+            crate::ui::artifact_sidebar::ArtifactEntry::temp_markdown(
+                1,
+                "notes.md".to_string(),
+                "content".to_string(),
+            ),
+        );
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30))
+            .expect("test terminal");
+        terminal
+            .draw(|frame| app.ui.render(frame))
+            .expect("render wide artifact sidebar");
+        assert!(!app.ui.artifact_sidebar_state.temp_collapsed);
+
+        app.handle_mouse_click(45, 1);
+
+        terminal
+            .draw(|frame| app.ui.render(frame))
+            .expect("rerender wide artifact sidebar");
+
+        assert!(app.ui.artifact_sidebar_state.temp_collapsed);
+    });
+}
+
+#[test]
 fn mouse_wheel_moves_open_list_popup_before_settings() {
     with_test_app("popup-wheel", |app| {
         // Given
         app.ui.last_area = Some(Rect::new(0, 0, 80, 24));
-        app.ui.show_settings = true;
+        app.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
         app.ui.list_popup = Some(crate::ui::modals::list_popup::ListPopup::selectable(
             "Skills",
             "Empty",
@@ -122,22 +167,19 @@ fn skills_popup_labels_description_and_origin_but_inserts_only_name() {
                 "@save ".to_string()
             ))
         );
-        assert!(popup
-            .items
-            .iter()
-            .any(|item| item.label.starts_with("@research ")));
+        assert!(
+            popup
+                .items
+                .iter()
+                .any(|item| item.label.starts_with("@research "))
+        );
     });
 }
 
 #[test]
-fn settings_vault_path_accepts_space_key() {
-    with_test_app("settings-vault-space", |app| {
-        app.ui.show_settings = true;
-        app.ui.settings_popup = Some(app.load_settings_popup_state(&AppConfig::default()));
-        let settings = app.ui.settings_popup.as_mut().expect("settings popup");
-        settings.active_tab = crate::ui::settings_tab::SettingsTab::General;
-        settings.general_focus = crate::ui::settings_tab::GeneralFocus::VaultPath;
-        settings.vault_path = "/home/jp/My".to_string();
+fn settings_panel_search_accepts_space_key() {
+    with_test_app("settings-search-space", |app| {
+        app.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
 
         let action = app.handle_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char(' '),
@@ -146,12 +188,8 @@ fn settings_vault_path_accepts_space_key() {
 
         assert!(action.is_none());
         assert_eq!(
-            app.ui
-                .settings_popup
-                .as_ref()
-                .expect("settings popup")
-                .vault_path,
-            "/home/jp/My "
+            app.ui.settings_v2.as_ref().expect("settings panel").query(),
+            " "
         );
     });
 }
@@ -209,10 +247,12 @@ fn inline_at_completion_discovers_research_skill() {
 
         // Then
         let popup = app.ui.list_popup.as_ref().expect("skill completion popup");
-        assert!(popup
-            .items
-            .iter()
-            .any(|item| item.label.contains("@research")));
+        assert!(
+            popup
+                .items
+                .iter()
+                .any(|item| item.label.contains("@research"))
+        );
     });
 }
 
@@ -357,18 +397,43 @@ default_model = "deepseek-v4-flash"
 
     assert_eq!(app.ui.tabs[0].tab.provider, "OpenCode Go");
     assert_eq!(app.ui.tabs[0].tab.model, "deepseek-v4-flash");
-    app.ui.show_settings = true;
+    app.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
     assert!(matches!(
         app.handle_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Esc,
             crossterm::event::KeyModifiers::NONE,
         )),
-        Some(Action::CloseSettings)
+        None
     ));
+    assert!(app.ui.settings_v2.is_none());
 
     std::fs::remove_dir_all(&root).expect("cleanup temp dir");
     std::env::remove_var("XDG_DATA_HOME");
     std::env::remove_var("XDG_CONFIG_HOME");
+}
+
+#[test]
+fn startup_uses_migrated_codex_provider_from_storage() {
+    let mut config = AppConfig::default();
+    let codex = config
+        .providers
+        .iter_mut()
+        .find(|provider| provider.name == "Codex")
+        .expect("Codex provider");
+    codex.endpoint = "https://api.openai.com/v1".to_owned();
+    codex.backend_type = "openai".to_owned();
+
+    with_test_app_config("startup-codex-provider-migration", config, |app| {
+        let codex = app
+            .ui
+            .db_providers
+            .iter()
+            .find(|(name, _, _, _, _)| name == "Codex")
+            .expect("Codex provider");
+
+        assert_eq!(codex.1, "https://chatgpt.com/backend-api/codex");
+        assert_eq!(codex.3, "codex");
+    });
 }
 
 #[test]
@@ -410,11 +475,12 @@ selected_model = "llama3.1"
         None,
     );
 
-    assert!(app
-        .ui
-        .db_providers
-        .iter()
-        .any(|(name, _, _, _, _)| name == crate::config::LOCAL_PROVIDER_NAME));
+    assert!(
+        app.ui
+            .db_providers
+            .iter()
+            .any(|(name, _, _, _, _)| name == crate::config::LOCAL_PROVIDER_NAME)
+    );
     assert_eq!(
         app.ui.tabs[0].tab.provider,
         crate::config::LOCAL_PROVIDER_NAME
@@ -488,10 +554,12 @@ fn typing_slash_opens_command_popup() {
         let popup = app.ui.list_popup.as_ref().expect("command popup");
         assert_eq!(popup.title, "Commands");
         assert!(popup.items.iter().any(|item| item.label.contains("/theme")));
-        assert!(popup
-            .items
-            .iter()
-            .any(|item| item.label.contains("/remindme")));
+        assert!(
+            popup
+                .items
+                .iter()
+                .any(|item| item.label.contains("/remindme"))
+        );
     });
 }
 
@@ -541,6 +609,63 @@ fn arrow_keys_move_cursor_and_insert_in_place() {
 }
 
 #[test]
+fn enter_sends_and_shift_enter_inserts_newline() {
+    with_test_app("input-enter-newline", |app| {
+        // Given
+        app.ui.tabs[0].input_content = "hello".to_string();
+        app.ui.tabs[0].input_cursor = 5;
+
+        // When
+        let newline_action = app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::SHIFT,
+        ));
+
+        // Then
+        assert!(newline_action.is_none());
+        assert_eq!(app.ui.tabs[0].input_content, "hello\n");
+        assert_eq!(app.ui.tabs[0].input_cursor, 6);
+
+        // When
+        let send_action = app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+
+        // Then
+        assert!(matches!(
+            send_action,
+            Some(Action::SendMessage(message)) if message == "hello\n"
+        ));
+        assert!(app.ui.tabs[0].input_content.is_empty());
+        assert_eq!(app.ui.tabs[0].input_cursor, 0);
+        assert_eq!(app.ui.tabs[0].input_scroll, 0);
+    });
+}
+
+#[test]
+fn ctrl_e_opens_chat_draft_editor_instead_of_exporting() {
+    with_test_app("ctrl-e-chat-editor", |app| {
+        // Given
+        std::env::set_var("EDITOR", "__tcui_missing_editor__");
+        app.ui.tabs[0].input_content = "draft".to_string();
+        app.ui.tabs[0].input_cursor = 5;
+
+        // When
+        let action = app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('e'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+
+        // Then
+        assert!(action.is_none());
+        assert!(app.ui.editor_popup.is_none());
+        assert_eq!(app.ui.tabs[0].input_content, "draft");
+        std::env::remove_var("EDITOR");
+    });
+}
+
+#[test]
 fn alt_scrolls_lines_and_shift_jumps_answers() {
     with_test_app("answer-jump", |app| {
         let tab = &mut app.ui.tabs[0];
@@ -583,10 +708,12 @@ fn inline_at_completion_discovers_memory_skills() {
         // Then
         let popup = app.ui.list_popup.as_ref().expect("skill completion popup");
         assert_eq!(popup.title, "Skills");
-        assert!(popup
-            .items
-            .iter()
-            .any(|item| item.label.contains("@remember")));
+        assert!(
+            popup
+                .items
+                .iter()
+                .any(|item| item.label.contains("@remember"))
+        );
     });
 }
 
@@ -613,13 +740,89 @@ fn theme_command_persists_selection() {
 }
 
 #[test]
+fn update_check_without_tokio_runtime_does_not_panic_or_queue_a_toast() {
+    with_test_app("update-check-no-runtime", |app| {
+        // Given
+        assert!(tokio::runtime::Handle::try_current().is_err());
+
+        // When
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            app.queue_update_check();
+        }));
+
+        // Then
+        assert!(result.is_ok());
+        assert!(matches!(
+            app.action_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    });
+}
+
+#[test]
+fn connection_check_without_tokio_runtime_does_not_panic_or_queue_a_probe() {
+    with_test_app("connection-check-no-runtime", |app| {
+        // Given
+        assert!(tokio::runtime::Handle::try_current().is_err());
+
+        // When
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            app.queue_connection_check_for_active_tab();
+        }));
+
+        // Then
+        assert!(result.is_ok());
+        assert!(matches!(
+            app.action_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    });
+}
+
+#[test]
+fn send_message_without_tokio_runtime_returns_error_without_persisting_or_queueing() {
+    with_test_app("send-message-no-runtime", |app| {
+        // Given
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let conversation_id = app.ui.tabs[0].active_conversation;
+        assert!(
+            app.storage
+                .get_messages(conversation_id)
+                .expect("read initial messages")
+                .is_empty()
+        );
+
+        // When
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            app.send_message("Hello from test".to_string())
+        }));
+
+        // Then
+        assert!(matches!(result, Ok(Err(_))));
+        assert!(
+            app.storage
+                .get_messages(conversation_id)
+                .expect("read messages after rejected send")
+                .is_empty()
+        );
+        assert!(app.ui.tabs[0].messages.is_empty());
+        assert!(matches!(
+            app.action_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    });
+}
+
+#[test]
 fn send_message_creates_conversation_and_saves_user_message() {
     with_test_app("send-message", |app| {
         // Given
         let initial_conversation = app.ui.tabs[0].active_conversation;
+        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
 
         // When
-        app.send_message("Hello from test".to_string())
+        runtime
+            .block_on(async { app.send_message("Hello from test".to_string()) })
             .expect("send message");
 
         // Then
@@ -646,84 +849,29 @@ fn send_message_creates_conversation_and_saves_user_message() {
 fn slash_remindme_is_handled_without_model_streaming() {
     with_test_app("slash-remindme", |app| {
         std::env::set_var("TCUI_REMINDER_SYSTEMD_RUN", "true");
+        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
 
-        app.send_message("/remindme in 10m | Stretch".to_string())
+        runtime
+            .block_on(async { app.send_message("/remindme in 10m | Stretch".to_string()) })
             .expect("schedule reminder");
 
         let tab = &app.ui.tabs[0];
         assert_eq!(tab.messages.len(), 2);
         assert_eq!(tab.messages[0].role, "user");
         assert_eq!(tab.messages[1].role, "assistant");
-        assert!(tab.messages[1]
-            .content
-            .contains("Scheduled one-shot reminder"));
+        assert!(
+            tab.messages[1]
+                .content
+                .contains("Scheduled one-shot reminder")
+        );
 
         std::env::remove_var("TCUI_REMINDER_SYSTEMD_RUN");
     });
 }
 
 #[test]
-fn settings_popup_state_loads_disabled_items_and_saves_local_fields() {
-    with_test_app("settings-state", |app| {
-        // Given
-        let mut config = AppConfig {
-            default_provider: "Custom".to_string(),
-            default_model: "custom-model".to_string(),
-            theme: "nord".to_string(),
-            providers: vec![crate::config::ProviderConfig {
-                name: "Custom".to_string(),
-                endpoint: "https://example.invalid/v1".to_string(),
-                env_var: "CUSTOM_API_KEY".to_string(),
-                backend_type: "openai".to_string(),
-                auth_type: "api_key".to_string(),
-            }],
-            disabled_providers: vec!["Custom".to_string()],
-            disabled_models: vec!["custom-model".to_string()],
-            ..AppConfig::default()
-        };
-        config.local_inference.enabled = true;
-        config.local_inference.port = 11434;
-
-        // When
-        let mut popup = app.load_settings_popup_state(&config);
-
-        // Then
-        assert!(popup.disabled_providers.contains("Custom"));
-        assert!(popup.disabled_models.contains("custom-model"));
-        assert_eq!(popup.local_port, "11434");
-
-        // When
-        popup.local_port = "12345".to_string();
-        popup.local_health_interval_seconds = "9".to_string();
-        popup.local_connect_timeout_ms = "700".to_string();
-        popup.local_request_timeout_ms = "1700".to_string();
-        popup.local_api_token_env = "LOCAL_TOKEN".to_string();
-        popup.theme = "dracula".to_string();
-        tokio::runtime::Runtime::new()
-            .expect("runtime")
-            .block_on(app.save_settings_popup_state(&popup))
-            .expect("save settings");
-
-        // Then
-        let saved = AppConfig::load().expect("load saved settings");
-        assert_eq!(saved.local_inference.port, 12345);
-        assert_eq!(saved.local_inference.health_check_interval_seconds, 9);
-        assert_eq!(saved.local_inference.connect_timeout_ms, 700);
-        assert_eq!(saved.local_inference.request_timeout_ms, 1700);
-        assert_eq!(
-            saved.local_inference.api_token_env.as_deref(),
-            Some("LOCAL_TOKEN")
-        );
-        assert_eq!(saved.theme, "dracula");
-    });
-}
-
-#[test]
 fn apply_theme_selection_updates_popup_and_saved_config() {
     with_test_app("theme-selection", |app| {
-        // Given
-        app.ui.settings_popup = Some(app.load_settings_popup_state(&AppConfig::default()));
-
         // When
         app.apply_theme_selection("nord").expect("apply theme");
 
@@ -734,25 +882,8 @@ fn apply_theme_selection_updates_popup_and_saved_config() {
             .map(|config| config.theme.clone())
             .expect("read live config");
         assert_eq!(live_theme, "nord");
-        assert_eq!(
-            app.ui
-                .settings_popup
-                .as_ref()
-                .map(|popup| popup.theme.as_str()),
-            Some("nord")
-        );
         assert_eq!(AppConfig::load().expect("load config").theme, "nord");
     });
-}
-
-#[tokio::test]
-async fn oauth_connection_check_skips_models_probe() {
-    let mut config = AppConfig::default();
-    config.default_provider = "Codex".to_string();
-
-    let result = TuiApp::check_cloud_connection("Codex", &config, Some("token")).await;
-
-    assert!(result.is_ok());
 }
 
 #[test]
@@ -929,14 +1060,18 @@ fn deleting_inactive_conversation_keeps_active_chat_loaded() {
             .expect("delete first conversation");
 
         assert_eq!(app.ui.tabs[0].active_conversation, second);
-        assert!(app.ui.tabs[0]
-            .conversations
-            .iter()
-            .all(|conversation| conversation.id != first));
-        assert!(app.ui.tabs[0]
-            .conversations
-            .iter()
-            .any(|conversation| conversation.id == second));
+        assert!(
+            app.ui.tabs[0]
+                .conversations
+                .iter()
+                .all(|conversation| conversation.id != first)
+        );
+        assert!(
+            app.ui.tabs[0]
+                .conversations
+                .iter()
+                .any(|conversation| conversation.id == second)
+        );
     });
 }
 
@@ -1072,6 +1207,34 @@ fn arrow_up_and_down_browse_previous_user_prompts() {
             crossterm::event::KeyModifiers::NONE,
         ));
         assert_eq!(app.ui.tabs[0].input_content, "draft");
+    });
+}
+
+#[test]
+fn edited_chat_draft_round_trip_replaces_hand_rolled_input_state() {
+    with_test_app("chat-draft-round-trip", |app| {
+        // Given
+        let root = unique_temp_dir("edited-chat-draft");
+        std::fs::create_dir_all(&root).expect("create draft dir");
+        let draft_path = root.join("draft.md");
+        std::fs::write(&draft_path, "edited\nmessage").expect("write edited draft");
+        app.ui.tabs[0].input_content = "original".to_string();
+        app.ui.tabs[0].input_cursor = 3;
+        app.ui.tabs[0].input_scroll = 8;
+        app.ui.tabs[0].input_history_index = Some(0);
+        app.ui.tabs[0].input_history_draft = Some("history draft".to_string());
+
+        // When
+        app.apply_chat_draft_from_path(&draft_path);
+
+        // Then
+        let tab = &app.ui.tabs[0];
+        assert_eq!(tab.input_content, "edited\nmessage");
+        assert_eq!(tab.input_cursor, "edited\nmessage".chars().count());
+        assert_eq!(tab.input_scroll, 0);
+        assert!(tab.input_history_index.is_none());
+        assert!(tab.input_history_draft.is_none());
+        std::fs::remove_dir_all(root).expect("cleanup draft dir");
     });
 }
 

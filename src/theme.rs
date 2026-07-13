@@ -15,6 +15,7 @@ pub struct ThemeSpec {
     pub border: Color,
     pub panel: Color,
     pub sidebar: Color,
+    pub card_bg: Color,
     pub error: Color,
     pub warning: Color,
     pub success: Color,
@@ -42,6 +43,14 @@ impl ThemeSpec {
 
     pub fn panel_style(self) -> Style {
         Style::default().bg(self.panel).fg(self.foreground)
+    }
+
+    pub fn sidebar_style(self) -> Style {
+        Style::default().bg(self.sidebar).fg(self.foreground)
+    }
+
+    pub fn card_style(self) -> Style {
+        Style::default().bg(self.card_bg).fg(self.foreground)
     }
 }
 
@@ -85,18 +94,19 @@ const SYSTEM: ThemeSpec = ThemeSpec {
     accent: Color::Cyan,
     accent_alt: Color::Blue,
     border: Color::Reset,
-    panel: Color::Reset,
-    sidebar: Color::Reset,
+    panel: Color::Rgb(24, 24, 28),
+    sidebar: Color::Rgb(16, 16, 20),
+    card_bg: Color::Rgb(20, 20, 24),
     error: Color::Red,
     warning: Color::Yellow,
     success: Color::Green,
     info: Color::Cyan,
-    code_bg: Color::Reset,
-    code_fg: Color::Reset,
-    selection_bg: Color::Reset,
-    selection_fg: Color::Reset,
-    user_bubble: Color::Reset,
-    assistant_bubble: Color::Reset,
+    code_bg: Color::Rgb(20, 20, 24),
+    code_fg: Color::White,
+    selection_bg: Color::DarkGray,
+    selection_fg: Color::White,
+    user_bubble: Color::Rgb(40, 40, 46),
+    assistant_bubble: Color::Rgb(32, 32, 36),
     ansi: SYSTEM_ANSI,
 };
 
@@ -113,7 +123,8 @@ const THEMES: [ThemeSpec; 14] = [
         accent_alt: Color::Rgb(215, 153, 33),
         border: Color::Rgb(102, 92, 84),
         panel: Color::Rgb(50, 48, 47),
-        sidebar: Color::Rgb(60, 56, 54),
+        sidebar: Color::Rgb(35, 33, 32),
+        card_bg: Color::Rgb(42, 40, 39),
         error: Color::Rgb(251, 73, 52),
         warning: Color::Rgb(250, 189, 47),
         success: Color::Rgb(184, 187, 38),
@@ -137,7 +148,8 @@ const THEMES: [ThemeSpec; 14] = [
         accent_alt: Color::Rgb(94, 129, 172),
         border: Color::Rgb(76, 86, 106),
         panel: Color::Rgb(59, 66, 82),
-        sidebar: Color::Rgb(67, 76, 94),
+        sidebar: Color::Rgb(46, 52, 64),
+        card_bg: Color::Rgb(52, 59, 73),
         error: Color::Rgb(191, 97, 106),
         warning: Color::Rgb(235, 203, 139),
         success: Color::Rgb(163, 190, 140),
@@ -161,7 +173,8 @@ const THEMES: [ThemeSpec; 14] = [
         accent_alt: Color::Rgb(139, 233, 253),
         border: Color::Rgb(68, 71, 90),
         panel: Color::Rgb(50, 52, 66),
-        sidebar: Color::Rgb(56, 59, 77),
+        sidebar: Color::Rgb(35, 37, 49),
+        card_bg: Color::Rgb(42, 44, 57),
         error: Color::Rgb(255, 85, 85),
         warning: Color::Rgb(241, 250, 140),
         success: Color::Rgb(80, 250, 123),
@@ -186,6 +199,7 @@ const THEMES: [ThemeSpec; 14] = [
         border: Color::Rgb(48, 54, 61),
         panel: Color::Rgb(22, 27, 34),
         sidebar: Color::Rgb(18, 22, 29),
+        card_bg: Color::Rgb(20, 24, 31),
         error: Color::Rgb(248, 81, 73),
         warning: Color::Rgb(210, 153, 34),
         success: Color::Rgb(63, 185, 80),
@@ -210,6 +224,7 @@ const THEMES: [ThemeSpec; 14] = [
         border: Color::Rgb(84, 84, 109),
         panel: Color::Rgb(42, 42, 55),
         sidebar: Color::Rgb(36, 36, 48),
+        card_bg: Color::Rgb(39, 39, 51),
         error: Color::Rgb(196, 85, 85),
         warning: Color::Rgb(255, 160, 102),
         success: Color::Rgb(135, 183, 101),
@@ -234,6 +249,7 @@ const THEMES: [ThemeSpec; 14] = [
         border: Color::Rgb(88, 91, 112),
         panel: Color::Rgb(49, 50, 68),
         sidebar: Color::Rgb(24, 24, 37),
+        card_bg: Color::Rgb(36, 37, 52),
         error: Color::Rgb(243, 139, 168),
         warning: Color::Rgb(250, 179, 135),
         success: Color::Rgb(166, 227, 161),
@@ -258,6 +274,7 @@ const THEMES: [ThemeSpec; 14] = [
         border: Color::Rgb(55, 71, 79),
         panel: Color::Rgb(45, 58, 64),
         sidebar: Color::Rgb(32, 42, 48),
+        card_bg: Color::Rgb(38, 50, 56),
         error: Color::Rgb(255, 83, 112),
         warning: Color::Rgb(255, 203, 107),
         success: Color::Rgb(195, 232, 141),
@@ -282,6 +299,7 @@ const THEMES: [ThemeSpec; 14] = [
         border: Color::Rgb(24, 64, 32),
         panel: Color::Rgb(10, 20, 12),
         sidebar: Color::Rgb(8, 16, 10),
+        card_bg: Color::Rgb(9, 18, 11),
         error: Color::Rgb(255, 85, 85),
         warning: Color::Rgb(204, 255, 102),
         success: Color::Rgb(0, 255, 102),
@@ -306,6 +324,7 @@ const THEMES: [ThemeSpec; 14] = [
         border: Color::Rgb(73, 72, 62),
         panel: Color::Rgb(49, 50, 42),
         sidebar: Color::Rgb(43, 44, 36),
+        card_bg: Color::Rgb(46, 47, 39),
         error: Color::Rgb(249, 38, 114),
         warning: Color::Rgb(253, 151, 31),
         success: Color::Rgb(166, 226, 46),
@@ -330,6 +349,7 @@ const THEMES: [ThemeSpec; 14] = [
         border: Color::Rgb(94, 94, 94),
         panel: Color::Rgb(58, 58, 58),
         sidebar: Color::Rgb(54, 54, 54),
+        card_bg: Color::Rgb(56, 56, 56),
         error: Color::Rgb(204, 147, 147),
         warning: Color::Rgb(240, 223, 175),
         success: Color::Rgb(127, 159, 127),
@@ -354,6 +374,7 @@ const THEMES: [ThemeSpec; 14] = [
         border: Color::Rgb(7, 54, 66),
         panel: Color::Rgb(0, 51, 63),
         sidebar: Color::Rgb(0, 46, 57),
+        card_bg: Color::Rgb(0, 48, 60),
         error: Color::Rgb(220, 50, 47),
         warning: Color::Rgb(181, 137, 0),
         success: Color::Rgb(133, 153, 0),
@@ -378,6 +399,7 @@ const THEMES: [ThemeSpec; 14] = [
         border: Color::Rgb(65, 72, 104),
         panel: Color::Rgb(36, 40, 59),
         sidebar: Color::Rgb(31, 35, 53),
+        card_bg: Color::Rgb(33, 37, 56),
         error: Color::Rgb(247, 118, 142),
         warning: Color::Rgb(224, 175, 104),
         success: Color::Rgb(158, 206, 106),
@@ -402,6 +424,7 @@ const THEMES: [ThemeSpec; 14] = [
         border: Color::Rgb(39, 49, 66),
         panel: Color::Rgb(20, 25, 34),
         sidebar: Color::Rgb(17, 22, 30),
+        card_bg: Color::Rgb(18, 23, 32),
         error: Color::Rgb(239, 68, 68),
         warning: Color::Rgb(245, 158, 11),
         success: Color::Rgb(16, 185, 129),
@@ -445,10 +468,6 @@ pub fn find_theme(name: &str) -> Option<ThemeSpec> {
 
 pub fn theme_keys() -> Vec<&'static str> {
     THEMES.iter().map(|theme| theme.key).collect()
-}
-
-pub fn theme_labels() -> Vec<&'static str> {
-    THEMES.iter().map(|theme| theme.label).collect()
 }
 
 pub fn theme_label(name: &str) -> &'static str {

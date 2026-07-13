@@ -1,4 +1,4 @@
-use ratatui::{layout::Rect, prelude::*, widgets::*, Frame};
+use ratatui::{Frame, layout::Rect, prelude::*, widgets::*};
 
 pub struct NewTabModal {
     pub name: String,
@@ -22,6 +22,7 @@ impl NewTabModal {
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
+        let theme = crate::theme::active_theme();
         let content = vec![
             Line::from(Span::raw("Create New Chat Tab")),
             Line::from(Span::raw("")),
@@ -32,11 +33,25 @@ impl NewTabModal {
             Line::from(Span::raw("[Enter] Save  [Esc] Cancel")),
         ];
 
-        let paragraph = Paragraph::new(content)
-            .block(Block::default().title("New Tab").borders(Borders::ALL))
-            .alignment(Alignment::Left);
+        let block = Block::default().style(Style::default().bg(theme.panel));
+        f.render_widget(block, area);
+        f.render_widget(
+            Paragraph::new(Line::from(" New Tab ")).style(
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Rect::new(area.x, area.y, area.width, 1),
+        );
 
-        f.render_widget(paragraph, area);
+        let content_area = Rect::new(
+            area.x,
+            area.y + 1,
+            area.width,
+            area.height.saturating_sub(1),
+        );
+        let paragraph = Paragraph::new(content).alignment(Alignment::Left);
+        f.render_widget(paragraph, content_area);
     }
 }
 

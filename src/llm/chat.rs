@@ -9,6 +9,7 @@ pub(crate) struct ChatRequest {
     pub(crate) endpoint: String,
     pub(crate) model: String,
     pub(crate) reasoning_effort: Option<String>,
+    pub(crate) supported_reasoning_efforts: Vec<String>,
     pub(crate) backend_type: String,
     pub(crate) api_key: Option<String>,
     pub(crate) system_prompt: String,
@@ -106,7 +107,7 @@ pub(crate) struct ChatStreamOutput {
 }
 
 impl ChatStreamOutput {
-    fn push(&mut self, event: &ChatStreamEvent) {
+    pub(super) fn push(&mut self, event: &ChatStreamEvent) {
         match event {
             ChatStreamEvent::Answer(content) => self.answer.push_str(content),
             ChatStreamEvent::Thinking(content) => self.thinking.push_str(content),
@@ -139,6 +140,10 @@ where
 
     match request.backend_type.trim() {
         "anthropic" => stream_anthropic(&client, &request, &mut on_event).await,
+        "codex" => {
+            crate::llm::codex_responses::stream_codex_responses(&client, &request, &mut on_event)
+                .await
+        }
         _ => stream_openai_compatible(&client, &request, &mut on_event).await,
     }
 }
@@ -151,6 +156,11 @@ async fn stream_openai_compatible<F>(
 where
     F: FnMut(ChatStreamEvent) + Send,
 {
+    if crate::llm::auth::canonical_provider_name(&request.provider) == "Codex" {
+        return Err(eyre!(
+            "Codex OAuth credentials must use the dedicated Codex Responses backend."
+        ));
+    }
     let url = format!(
         "{}/chat/completions",
         request.endpoint.trim_end_matches('/')
@@ -318,7 +328,10 @@ async fn provider_http_error<T>(
     Err(eyre!("{}", crate::llm::auth::redact_secrets(&message)))
 }
 
-async fn read_sse<F>(response: reqwest::Response, mut on_data: F) -> color_eyre::Result<()>
+pub(super) async fn read_sse<F>(
+    response: reqwest::Response,
+    mut on_data: F,
+) -> color_eyre::Result<()>
 where
     F: FnMut(&str) -> color_eyre::Result<bool>,
 {
@@ -469,7 +482,10 @@ fn push_if_present(
     }
 }
 
-fn push_title_filtered_content(events: &mut Vec<ChatStreamEvent>, chunk: TitleFilteredChunk) {
+pub(super) fn push_title_filtered_content(
+    events: &mut Vec<ChatStreamEvent>,
+    chunk: TitleFilteredChunk,
+) {
     if let Some(title) = chunk.title {
         events.push(ChatStreamEvent::Title(title));
     }
@@ -478,7 +494,7 @@ fn push_title_filtered_content(events: &mut Vec<ChatStreamEvent>, chunk: TitleFi
     }
 }
 
-fn flush_title_filter<F>(
+pub(super) fn flush_title_filter<F>(
     output: &mut ChatStreamOutput,
     on_event: &mut F,
     title_filter: TitleTagFilter,
@@ -498,7 +514,7 @@ fn flush_title_filter<F>(
     }
 }
 
-fn ensure_not_empty<F>(output: &mut ChatStreamOutput, on_event: &mut F, provider: &str)
+pub(super) fn ensure_not_empty<F>(output: &mut ChatStreamOutput, on_event: &mut F, provider: &str)
 where
     F: FnMut(ChatStreamEvent) + Send,
 {
@@ -511,14 +527,14 @@ where
 }
 
 #[derive(Debug, Default)]
-struct TitleTagFilter {
+pub(super) struct TitleTagFilter {
     buffer: String,
     title: String,
     capturing: bool,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
-struct TitleFilteredChunk {
+pub(super) struct TitleFilteredChunk {
     visible: String,
     title: Option<String>,
 }
@@ -527,7 +543,7 @@ impl TitleTagFilter {
     const START: &str = "<tcui:chat-title>";
     const END: &str = "</tcui:chat-title>";
 
-    fn push(&mut self, input: &str) -> TitleFilteredChunk {
+    pub(super) fn push(&mut self, input: &str) -> TitleFilteredChunk {
         let mut chunk = TitleFilteredChunk::default();
 
         self.buffer.push_str(input);

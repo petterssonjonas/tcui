@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use ratatui::{layout::Rect, prelude::*, widgets::*, Frame};
+use ratatui::{Frame, layout::Rect, prelude::*, widgets::*};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportDialogFocus {
@@ -49,16 +49,26 @@ impl ExportDialog {
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
+        let theme = crate::theme::active_theme();
         let popup_area = Self::popup_area(area);
-        let block = Block::default()
-            .title(" Export Cleartext ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
-            .style(Style::default().bg(Color::Black));
-        let inner = block.inner(popup_area);
+        let block = Block::default().style(Style::default().bg(theme.panel));
+        let inner = Rect::new(
+            popup_area.x,
+            popup_area.y + 1,
+            popup_area.width,
+            popup_area.height.saturating_sub(1),
+        );
 
         f.render_widget(Clear, popup_area);
         f.render_widget(block, popup_area);
+        f.render_widget(
+            Paragraph::new(Line::from(" Export Cleartext ")).style(
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Rect::new(popup_area.x, popup_area.y, popup_area.width, 1),
+        );
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -78,21 +88,26 @@ impl ExportDialog {
             chunks[0],
         );
 
-        let path_border = if self.focus == ExportDialogFocus::Path {
+        let path_color = if self.focus == ExportDialogFocus::Path {
             Color::Yellow
         } else {
             Color::DarkGray
         };
+        let path_area = chunks[1];
+        f.render_widget(
+            Paragraph::new(Line::from(" Directory "))
+                .style(Style::default().fg(path_color).add_modifier(Modifier::BOLD)),
+            Rect::new(path_area.x, path_area.y, path_area.width, 1),
+        );
         f.render_widget(
             Paragraph::new(self.directory_input.as_str())
-                .block(
-                    Block::default()
-                        .title(" Directory ")
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(path_border)),
-                )
-                .style(Style::default().fg(Color::White)),
-            chunks[1],
+                .style(Style::default().fg(Color::White).bg(theme.panel)),
+            Rect::new(
+                path_area.x,
+                path_area.y + 1,
+                path_area.width,
+                path_area.height.saturating_sub(1),
+            ),
         );
 
         let format_chunks = Layout::default()
@@ -178,40 +193,29 @@ impl ExportDialog {
 }
 
 fn render_format_button(f: &mut Frame, area: Rect, label: &str, selected: bool, focused: bool) {
-    let border = if focused {
+    let theme = crate::theme::active_theme();
+    let fg = if focused {
         Color::Yellow
+    } else if selected {
+        Color::Green
     } else {
-        Color::DarkGray
-    };
-    let style = if selected {
-        Style::default().fg(Color::Green)
-    } else {
-        Style::default().fg(Color::White)
+        Color::White
     };
     f.render_widget(
         Paragraph::new(format!(" {label} "))
             .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(border)),
-            )
-            .style(style),
+            .style(Style::default().fg(fg).bg(theme.panel)),
         area,
     );
 }
 
 fn render_action_button(f: &mut Frame, area: Rect, label: &str, focused: bool, color: Color) {
-    let border = if focused { Color::Yellow } else { color };
+    let theme = crate::theme::active_theme();
+    let fg = if focused { Color::Yellow } else { color };
     f.render_widget(
         Paragraph::new(format!(" {label} "))
             .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(border)),
-            )
-            .style(Style::default().fg(color)),
+            .style(Style::default().fg(fg).bg(theme.panel)),
         area,
     );
 }

@@ -1,5 +1,5 @@
 use crate::ui::artifact_sidebar::ArtifactEntry;
-use ratatui::{layout::Rect, prelude::*, widgets::*, Frame};
+use ratatui::{Frame, layout::Rect, prelude::*, widgets::*};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Default)]
@@ -29,16 +29,26 @@ impl SaveFileDialog {
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
+        let theme = crate::theme::active_theme();
         let popup_area = Self::popup_area(area);
-        let block = Block::default()
-            .title(" Save Artifact ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
-            .style(Style::default().bg(Color::Black));
-        let inner = block.inner(popup_area);
+        let block = Block::default().style(Style::default().bg(theme.panel));
+        let inner = Rect::new(
+            popup_area.x,
+            popup_area.y + 1,
+            popup_area.width,
+            popup_area.height.saturating_sub(1),
+        );
 
         f.render_widget(Clear, popup_area);
         f.render_widget(block, popup_area);
+        f.render_widget(
+            Paragraph::new(Line::from(" Save Artifact ")).style(
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Rect::new(popup_area.x, popup_area.y, popup_area.width, 1),
+        );
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -57,16 +67,24 @@ impl SaveFileDialog {
             chunks[0],
         );
 
+        let path_area = chunks[1];
+        f.render_widget(
+            Paragraph::new(Line::from(" Path ")).style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Rect::new(path_area.x, path_area.y, path_area.width, 1),
+        );
         f.render_widget(
             Paragraph::new(self.path_input.as_str())
-                .block(
-                    Block::default()
-                        .title(" Path ")
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::Yellow)),
-                )
-                .style(Style::default().fg(Color::White)),
-            chunks[1],
+                .style(Style::default().fg(Color::White).bg(theme.panel)),
+            Rect::new(
+                path_area.x,
+                path_area.y + 1,
+                path_area.width,
+                path_area.height.saturating_sub(1),
+            ),
         );
 
         let buttons = Layout::default()
@@ -79,23 +97,13 @@ impl SaveFileDialog {
         f.render_widget(
             Paragraph::new(format!(" {} ", self.save_label))
                 .alignment(Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::Green)),
-                )
-                .style(Style::default().fg(Color::Green)),
+                .style(Style::default().fg(Color::Green).bg(theme.panel)),
             save_area,
         );
         f.render_widget(
             Paragraph::new(" Cancel ")
                 .alignment(Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::DarkGray)),
-                )
-                .style(Style::default().fg(Color::White)),
+                .style(Style::default().fg(Color::White).bg(theme.panel)),
             cancel_area,
         );
         f.render_widget(

@@ -5,7 +5,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
 };
-use ratatui_image::picker::{cap_parser::QueryStdioOptions, Capability, Picker, ProtocolType};
+use ratatui_image::picker::{Capability, Picker, ProtocolType, cap_parser::QueryStdioOptions};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -97,6 +97,19 @@ pub fn render_kitty_heading(
     let sequence = build_kitty_heading_sequence(area.width, text, tier, style, caps);
     if sequence.is_empty() {
         return;
+    }
+
+    // Clear any existing diff options in this area first.
+    // This prevents stale Skip cells from previous scroll positions
+    // from causing visual artifacts (garbled / truncated Kitty text).
+    for y in area.y..area.y.saturating_add(2) {
+        for x in area.x..area.x.saturating_add(area.width) {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                if cell.diff_option == CellDiffOption::Skip {
+                    cell.diff_option = CellDiffOption::None;
+                }
+            }
+        }
     }
 
     let first = (area.x, area.y);
@@ -198,10 +211,8 @@ fn build_kitty_heading_sequence(
     for grapheme in clean_text.graphemes(true) {
         let grapheme_columns = UnicodeWidthStr::width(grapheme).max(1);
         let candidate_bytes = chunk.len() + grapheme.len();
-        let would_overflow_columns =
-            chunk_columns > 0 && chunk_columns + grapheme_columns > tier.chunk_column_limit();
         let would_overflow_bytes = candidate_bytes > 4000;
-        if would_overflow_columns || would_overflow_bytes {
+        if would_overflow_bytes {
             append_text_sizing_chunk(&mut sequence, &chunk, chunk_columns, tier, caps);
             chunk.clear();
             chunk_columns = 0;
@@ -346,6 +357,27 @@ mod tests {
         assert!(sequence.contains("\x1b]66;s=2:n=3:d=4"));
         assert!(sequence.contains("\x1b\\"));
         assert!(!sequence.contains('\u{7}'));
+    }
+
+    #[test]
+    fn kitty_heading_sequence_keeps_multi_word_heading_in_one_osc_payload() {
+        let heading = "Horizontal Rules";
+        let sequence = build_kitty_heading_sequence(
+            32,
+            heading,
+            KittyHeadingTier::H2,
+            Style::default().fg(Color::Green).bg(Color::Black),
+            TerminalCapabilities {
+                terminal: TerminalKind::Kitty,
+                multiplexer: None,
+                kitty_graphics: true,
+                kitty_text_sizing: true,
+                tmux_passthrough: false,
+            },
+        );
+
+        assert_eq!(sequence.matches("\x1b]66;").count(), 1);
+        assert!(sequence.contains(heading));
     }
 }
 

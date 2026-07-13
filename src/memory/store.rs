@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::embedding::{as_blob, embed, EmbeddingError, DIMENSIONS, MODEL_ID};
+use super::embedding::{DIMENSIONS, EmbeddingError, MODEL_ID, as_blob, embed};
 use super::index::{IndexError, MemoryIndex};
 use super::paths::{MemoryPaths, PathError};
 use super::sync::synchronize;
 use crate::storage::crypto::{
-    read_encrypted_document, write_encrypted_document, SharedKey, StorageCryptoError,
+    SharedKey, StorageCryptoError, read_encrypted_document, write_encrypted_document,
 };
 
 #[derive(Debug, Error)]
@@ -409,7 +409,7 @@ mod tests {
 
     use super::{MemoryDocument, MemoryStore};
     use crate::memory::WriteOutcome;
-    use crate::storage::crypto::{read_encrypted_document, SharedKey};
+    use crate::storage::crypto::{SharedKey, read_encrypted_document};
     use crate::storage::paths::TcuiDataPaths;
 
     fn env_lock() -> &'static std::sync::Mutex<()> {

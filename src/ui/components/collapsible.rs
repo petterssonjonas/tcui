@@ -1,4 +1,4 @@
-use ratatui::{layout::Rect, prelude::*, widgets::*, Frame};
+use ratatui::{Frame, layout::Rect, prelude::*, widgets::*};
 
 pub struct Collapsible<'a> {
     pub title: &'a str,
@@ -20,23 +20,52 @@ impl<'a> Collapsible<'a> {
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
+        let theme = crate::theme::active_theme();
         let indicator = if self.collapsed {
             self.char_collapsed
         } else {
             self.char_expanded
         };
-        let title = format!("{} {}", indicator, self.title);
+        let title = format!(" {indicator} {} ", self.title);
+        let block_area = Rect::new(
+            area.x.saturating_add(area.width / 10),
+            area.y,
+            area.width.saturating_mul(8) / 10,
+            if self.collapsed {
+                area.height.min(1)
+            } else {
+                area.height
+            },
+        );
 
-        let mut spans = vec![Span::raw(title), Span::raw("\n\n")];
+        let text_lines: Vec<Line> = if self.collapsed {
+            vec![
+                Line::from(title).style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(theme.code_bg),
+                ),
+            ]
+        } else {
+            let mut v = vec![
+                Line::from(title).style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(theme.code_bg),
+                ),
+            ];
+            v.extend(self.content.lines().map(|l| {
+                Line::from(l).style(Style::default().fg(theme.foreground).bg(theme.code_bg))
+            }));
+            v
+        };
 
-        if !self.collapsed {
-            spans.push(Span::raw(self.content));
-        }
-
-        let paragraph = Paragraph::new(Line::from(spans))
-            .block(Block::default().borders(Borders::ALL))
+        let paragraph = Paragraph::new(text_lines)
+            .style(Style::default().bg(theme.code_bg))
             .wrap(Wrap { trim: true });
 
-        f.render_widget(paragraph, area);
+        f.render_widget(paragraph, block_area);
     }
 }

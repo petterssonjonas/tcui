@@ -16,6 +16,14 @@ Configured providers live in the local SQLite database under the app data direct
 
 API keys are read from provider env vars, `.env`, saved settings, or supported OAuth token files. Provider diagnostics are written to the app data directory as `tcui.log` with secrets redacted.
 
+## Authentication
+
+TCUI recommends reusing Codex CLI-managed credentials and also supports
+OpenRouter's documented PKCE login. Its native Codex flow is explicitly
+experimental and non-endorsed. See [Authentication](docs/auth.md) for login,
+headless fallback, source-aware logout, storage, migration, and provider support
+details.
+
 ## Install
 
 Release assets for every published release:

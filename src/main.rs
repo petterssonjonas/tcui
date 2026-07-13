@@ -4,20 +4,22 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 use color_eyre::Result;
 use crossterm::{
-    event::DisableFocusChange,
-    event::DisableMouseCapture,
-    event::EnableFocusChange,
-    event::EnableMouseCapture,
+    cursor::SetCursorStyle,
+    event::{
+        DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{
-        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
+        EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode,
     },
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 mod app;
+mod auth_command;
 mod config;
 mod diagnostics;
 mod event;
@@ -36,6 +38,7 @@ mod storage;
 #[cfg(test)]
 mod test_support;
 mod theme;
+mod tui;
 mod ui;
 mod updater;
 
@@ -75,6 +78,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    Auth(auth_command::AuthCommandArgs),
     Upgrade,
     #[command(hide = true)]
     ReminderDispatch {
@@ -106,6 +110,11 @@ fn setup_terminal() -> Result<TerminalType> {
         let _ = execute!(terminal.backend_mut(), SetTitle("TermChatUI"));
         let _ = execute!(terminal.backend_mut(), EnableMouseCapture);
         let _ = execute!(terminal.backend_mut(), EnableFocusChange);
+        let _ = execute!(terminal.backend_mut(), SetCursorStyle::SteadyBlock);
+        let _ = execute!(
+            terminal.backend_mut(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
+        );
     }
 
     Ok(terminal)
@@ -115,8 +124,10 @@ fn restore_terminal() {
     let is_tty = interactive_terminal_available();
 
     if is_tty {
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
         let _ = execute!(io::stdout(), DisableFocusChange);
         let _ = execute!(io::stdout(), DisableMouseCapture);
+        let _ = execute!(io::stdout(), SetCursorStyle::DefaultUserShape);
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
         let _ = disable_raw_mode();
     }
@@ -134,6 +145,7 @@ async fn main() -> Result<()> {
     }
     if let Some(command) = cli.command {
         match command {
+            Command::Auth(auth) => return auth_command::run(auth).await,
             Command::Upgrade => {
                 println!("{}", updater::upgrade_to_latest().await?);
                 return Ok(());
@@ -166,11 +178,7 @@ async fn main() -> Result<()> {
             dirs::home_dir().as_deref(),
         );
         let v = Vault::new(expanded);
-        if v.exists() {
-            Some(Arc::new(v))
-        } else {
-            None
-        }
+        if v.exists() { Some(Arc::new(v)) } else { None }
     });
 
     let mut app = TuiApp::new(
@@ -180,6 +188,9 @@ async fn main() -> Result<()> {
         vault,
     );
     app.queue_update_check();
+
+    app.ui
+        .show_toast("Welcome to TCUI.\nType /help for instructions.".to_string());
 
     app.run(&mut terminal).await?;
 
@@ -222,7 +233,7 @@ impl OfflineAction {
             (true, true) => {
                 return Err(color_eyre::eyre::eyre!(
                     "--json and --markdown are mutually exclusive"
-                ))
+                ));
             }
             (true, false) => export::OutputFormat::Json,
             _ => export::OutputFormat::Markdown,
@@ -444,9 +455,7 @@ fn export_all_memories(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "memory")]
-    use super::Command;
-    use super::{Cli, OfflineAction};
+    use super::{Cli, Command, OfflineAction};
     use clap::Parser;
     #[cfg(feature = "memory")]
     use std::path::PathBuf;
@@ -466,6 +475,24 @@ mod tests {
             Some(OfflineAction::ExportAll { chats, .. }) => assert!(chats),
             _ => panic!("expected export action"),
         }
+    }
+
+    #[test]
+    fn cli_parses_upgrade_as_a_pre_tui_command() {
+        let cli = Cli::try_parse_from(["tcui", "upgrade"]).expect("upgrade command parses");
+
+        assert!(matches!(cli.command, Some(Command::Upgrade)));
+    }
+
+    #[test]
+    fn cli_leaves_offline_actions_empty_for_a_pre_tui_command() {
+        let cli = Cli::try_parse_from(["tcui", "upgrade"]).expect("upgrade command parses");
+
+        assert!(
+            OfflineAction::from_cli(&cli)
+                .expect("upgrade does not conflict with offline actions")
+                .is_none()
+        );
     }
 
     #[cfg(feature = "memory")]

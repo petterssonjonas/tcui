@@ -1,9 +1,11 @@
 use futures::StreamExt;
+use secrecy::ExposeSecret;
 use std::io::IsTerminal;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use super::{Action, Message, TuiApp};
+use crate::app::action::MouseClickAction;
 
 impl TuiApp {
     pub(crate) fn quit_requires_confirmation(&self) -> bool {
@@ -45,7 +47,11 @@ impl TuiApp {
                     if let Some(editor) = self.ui.editor_popup.as_mut() {
                         let done = editor.poll_output();
                         if done {
+                            let chat_draft_path = editor.take_chat_draft_path();
                             self.ui.editor_popup = None;
+                            if let Some(path) = chat_draft_path {
+                                self.apply_chat_draft_from_path(&path);
+                            }
                         }
                     }
                 }
@@ -114,7 +120,19 @@ impl TuiApp {
                 }
                 Ok(())
             }
-            Action::ToggleWebSearch => self.toggle_web_search().await,
+            Action::ToggleWebSearch => {
+                self.toggle_web_search().await?;
+                let state = if self.ui.web_search_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
+                self.ui
+                    .toast_stack
+                    .push_message(format!("Web Search {state}"), self.ui.frame_tick);
+                Ok(())
+            }
+            Action::ToggleCollapseThinking => self.toggle_collapse_thinking(),
             Action::ShowSkillsPopup => {
                 self.show_skills_popup();
                 Ok(())
@@ -127,16 +145,40 @@ impl TuiApp {
                 self.show_local_search_popup(&query);
                 Ok(())
             }
+            Action::ShowHelp => {
+                let artifact = crate::ui::artifact_sidebar::ArtifactEntry::temp_markdown(
+                    u64::MAX,
+                    "Help".to_string(),
+                    crate::ui::HELP_MARKDOWN.to_string(),
+                );
+                let mut viewer =
+                    crate::ui::modals::artifact_viewer::ArtifactViewerState::new(artifact);
+                viewer.view_only = true;
+                self.ui.artifact_viewer = Some(viewer);
+                Ok(())
+            }
+            Action::ShowKeybinds => {
+                self.ui.show_keybinds = true;
+                Ok(())
+            }
+            Action::DismissKeybinds => {
+                self.ui.show_keybinds = false;
+                Ok(())
+            }
             Action::CloseListPopup => {
                 self.ui.list_popup = None;
                 Ok(())
             }
             Action::ToggleSidebar => {
-                self.ui.sidebar_open = !self.ui.sidebar_open;
+                self.ui.panel_state.toggle_left();
+                self.ui.sidebar_open =
+                    self.ui.panel_state.left != crate::tui::shell::PanelMode::Closed;
                 Ok(())
             }
             Action::ToggleArtifactSidebar => {
-                self.ui.artifact_sidebar_open = !self.ui.artifact_sidebar_open;
+                self.ui.panel_state.toggle_right();
+                self.ui.artifact_sidebar_open =
+                    self.ui.panel_state.right != crate::tui::shell::PanelMode::Closed;
                 Ok(())
             }
             Action::RefreshArtifactSidebar => {
@@ -144,56 +186,19 @@ impl TuiApp {
                 Ok(())
             }
             Action::ShowSettings => {
-                let config = self.config.read().await;
-                let settings = self.load_settings_popup_state(&config);
-                self.ui.settings_popup = Some(settings);
-                self.ui.show_settings = true;
+                self.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
                 Ok(())
             }
             Action::CloseSettings => {
-                if let Some(settings) = self.ui.settings_popup.clone() {
-                    let _ = self.save_settings_popup_state(&settings).await;
-                    self.ui.user_alignment = settings.user_alignment;
-                    self.ui.ai_alignment = settings.ai_alignment;
-                    self.ui.markdown_mode = settings.markdown_mode;
-                    self.ui.show_selector = settings.show_selector;
-                    self.ui.show_chat_scrollbar = settings.show_chat_scrollbar;
-                    self.ui.collapse_thinking = settings.collapse_thinking;
-                    self.ui.kitty_enhanced_text = settings.kitty_enhanced_text;
-                    self.ui.kitty_heading_downscale = settings.kitty_heading_downscale;
-                    self.ui.web_search_enabled = settings.web_search_enabled;
-                    for tab in &mut self.ui.tabs {
-                        tab.thinking_fold_overrides.clear();
-                    }
-                }
-                self.ui.show_settings = false;
-                self.queue_connection_check_for_active_tab();
+                self.ui.settings_v2 = None;
                 Ok(())
             }
             Action::ToggleSettings => {
-                if self.ui.show_settings {
-                    if let Some(settings) = self.ui.settings_popup.clone() {
-                        let _ = self.save_settings_popup_state(&settings).await;
-                        self.ui.user_alignment = settings.user_alignment;
-                        self.ui.ai_alignment = settings.ai_alignment;
-                        self.ui.markdown_mode = settings.markdown_mode;
-                        self.ui.show_selector = settings.show_selector;
-                        self.ui.show_chat_scrollbar = settings.show_chat_scrollbar;
-                        self.ui.collapse_thinking = settings.collapse_thinking;
-                        self.ui.kitty_enhanced_text = settings.kitty_enhanced_text;
-                        self.ui.kitty_heading_downscale = settings.kitty_heading_downscale;
-                        self.ui.web_search_enabled = settings.web_search_enabled;
-                        for tab in &mut self.ui.tabs {
-                            tab.thinking_fold_overrides.clear();
-                        }
-                    }
-                    self.ui.show_settings = false;
-                    self.queue_connection_check_for_active_tab();
+                if self.ui.settings_v2.is_some() {
+                    self.ui.settings_v2 = None;
                 } else {
-                    let config = self.config.read().await;
-                    let settings = self.load_settings_popup_state(&config);
-                    self.ui.settings_popup = Some(settings);
-                    self.ui.show_settings = true;
+                    self.ui.settings_v2 =
+                        Some(crate::tui::settings_panel::SettingsPanelState::new());
                 }
                 Ok(())
             }
@@ -300,13 +305,13 @@ impl TuiApp {
             }
             Action::SwitchTab(idx) => {
                 self.ui.active_tab = idx;
-                self.ui.show_settings = false;
+                self.ui.settings_v2 = None;
                 self.refresh_visible_selectors();
                 Ok(())
             }
             Action::AddTab(tab) => {
                 self.ui.add_tab(tab);
-                self.ui.show_settings = false;
+                self.ui.settings_v2 = None;
                 self.refresh_visible_selectors();
                 Ok(())
             }
@@ -321,24 +326,30 @@ impl TuiApp {
             }
             Action::UpdateTabProvider(tab_id, provider) => {
                 if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
-                    tab.tab.provider = provider;
+                    tab.tab.provider = provider.clone();
                     tab.tab.model.clear();
                     tab.tab.reasoning_effort = None;
                 }
                 self.refresh_visible_selectors();
                 self.queue_connection_check_for_active_tab();
+                self.ui
+                    .toast_stack
+                    .push_message(format!("Switched to {provider}"), self.ui.frame_tick);
                 Ok(())
             }
             Action::UpdateTabModel(tab_id, model) => {
                 if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
-                    tab.tab.model = model;
+                    tab.tab.model = model.clone();
                     tab.tab.reasoning_effort = None;
                 }
                 self.refresh_visible_selectors();
                 self.queue_connection_check_for_active_tab();
+                self.ui
+                    .toast_stack
+                    .push_message(format!("Model: {model}"), self.ui.frame_tick);
                 Ok(())
             }
-            Action::SetProviderModels(provider, models) => {
+            Action::SetProviderModels(provider, _models) => {
                 if self
                     .ui
                     .tabs
@@ -349,18 +360,10 @@ impl TuiApp {
                     self.refresh_visible_selectors();
                 }
 
-                if let Some(settings) = &mut self.ui.settings_popup {
-                    if settings.default_provider == provider {
-                        settings.available_models = models.clone();
-                    }
-                    if settings.models_provider == provider {
-                        settings.models_available_models = models.clone();
-                    }
-                }
                 Ok(())
             }
             Action::SaveApiKey(_provider, _key) => Ok(()),
-            Action::MouseClick(_col, _row) => Ok(()),
+            Action::MouseClick(action) => self.dispatch_mouse_click(action).await,
             Action::SaveGeneratedFile => self.save_generated_file(),
             Action::SaveExportDialog => self.save_export_dialog(),
             Action::CancelSaveDialog => {
@@ -386,11 +389,32 @@ impl TuiApp {
                 });
                 Ok(())
             }
+            Action::OpenCommandPalette => {
+                let pinned = self.config.read().await.tui.pinned_commands.clone();
+                self.ui.palette = Some(crate::tui::palette::PaletteState::new(pinned));
+                Ok(())
+            }
+            Action::OpenSettingsPanel => {
+                let _focus = crate::tui::focus::Focus::SettingsPanel;
+                self.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
+                Ok(())
+            }
+            Action::SetPinnedCommands(pinned) => {
+                if let Some(palette) = self.ui.palette.as_mut() {
+                    palette.set_pinned(pinned);
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
 
     pub(crate) fn send_message(&mut self, content: String) -> color_eyre::Result<()> {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Err(color_eyre::eyre::eyre!(
+                "Cannot send a message without a Tokio runtime"
+            ));
+        }
         let mut conversation_id = self
             .ui
             .tabs
@@ -432,6 +456,13 @@ impl TuiApp {
         let is_local_provider = crate::llm::local::is_local_provider(&provider);
         let model = tab_state.tab.model.clone();
         let reasoning_effort = tab_state.tab.reasoning_effort.clone();
+        let supported_reasoning_efforts = self
+            .ui
+            .current_models
+            .iter()
+            .find(|entry| entry.id == model)
+            .map(|entry| entry.supported_reasoning_efforts.clone())
+            .unwrap_or_default();
         let messages = tab_state.messages.clone();
         let config_snapshot = self
             .config
@@ -464,7 +495,7 @@ impl TuiApp {
                 .map(|(_, _, backend_type)| backend_type.clone())
                 .unwrap_or_else(|| "openai".to_string())
         };
-        let api_key = if is_local_provider {
+        let local_api_key = if is_local_provider {
             config_snapshot
                 .local_inference
                 .api_token_env
@@ -472,10 +503,11 @@ impl TuiApp {
                 .and_then(|env_var| std::env::var(env_var).ok())
                 .filter(|value| !value.trim().is_empty())
         } else {
-            provider_config.as_ref().and_then(|(_, env_var, _)| {
-                crate::llm::auth::read_provider_api_key(&provider, env_var, &self.storage)
-            })
+            None
         };
+        let credential_env_var = provider_config
+            .as_ref()
+            .map(|(_, env_var, _)| env_var.clone());
         let action_tx = self.action_tx.clone();
         let system_prompt = self.system_prompt.clone();
         let user_request = content.clone();
@@ -504,19 +536,6 @@ impl TuiApp {
             let _ = action_tx.send(Action::StopStream(tab_id));
             return Ok(());
         };
-
-        if !is_local_provider && !provider.eq_ignore_ascii_case("Ollama") && api_key.is_none() {
-            self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::Failed;
-            self.ui.connection_message = Some(format!("Missing credentials for {provider}"));
-            let _ = action_tx.send(Action::StreamResponse(
-                tab_id,
-                assistant_idx,
-                format!("No API key or OAuth token found for {provider}. Open Settings > Providers or set the provider env var."),
-            ));
-            let _ = action_tx.send(Action::StopStream(tab_id));
-            return Ok(());
-        }
-
         if is_local_provider {
             self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::LocalConnected;
             self.ui.connection_message = Some("Connected to Local LLM".to_string());
@@ -526,6 +545,44 @@ impl TuiApp {
         }
 
         tokio::spawn(async move {
+            let api_key = if is_local_provider {
+                local_api_key
+            } else {
+                match credential_env_var {
+                    Some(env_var) => {
+                        let credential_request = crate::llm::auth::CredentialRequest::new(
+                            &provider, &env_var, &endpoint,
+                        );
+                        match crate::llm::auth::resolve_provider_credential(credential_request)
+                            .await
+                        {
+                            Ok(Some(credential)) => {
+                                Some(credential.bearer_token().expose_secret().to_owned())
+                            }
+                            Ok(None) => None,
+                            Err(error) => {
+                                let _ = action_tx.send(Action::StreamResponse(
+                                    tab_id,
+                                    assistant_idx,
+                                    format!("Credential unavailable: {error}"),
+                                ));
+                                let _ = action_tx.send(Action::StopStream(tab_id));
+                                return;
+                            }
+                        }
+                    }
+                    None => None,
+                }
+            };
+            if !is_local_provider && !provider.eq_ignore_ascii_case("Ollama") && api_key.is_none() {
+                let _ = action_tx.send(Action::StreamResponse(
+                    tab_id,
+                    assistant_idx,
+                    format!("No API key or OAuth token found for {provider}. Open Settings > Providers or set the provider env var."),
+                ));
+                let _ = action_tx.send(Action::StopStream(tab_id));
+                return;
+            }
             let event_tx = action_tx.clone();
             let mut runtime_system_prompt = system_prompt.clone();
             let mut request = crate::llm::chat::ChatRequest {
@@ -533,6 +590,7 @@ impl TuiApp {
                 endpoint,
                 model,
                 reasoning_effort,
+                supported_reasoning_efforts,
                 backend_type,
                 api_key,
                 system_prompt: runtime_system_prompt.clone(),
@@ -829,6 +887,117 @@ impl TuiApp {
             let _ = action_tx.send(Action::StopStream(tab_id));
         });
 
+        Ok(())
+    }
+
+    async fn dispatch_mouse_click(&mut self, action: MouseClickAction) -> color_eyre::Result<()> {
+        match action {
+            MouseClickAction::SelectPaletteItem(index) => {
+                if let Some(palette) = self.ui.palette.as_mut() {
+                    palette.select(index);
+                }
+                Ok(())
+            }
+            MouseClickAction::ToggleLeftHandle => {
+                self.ui.panel_state.toggle_left();
+                self.ui.sidebar_open =
+                    self.ui.panel_state.left != crate::tui::shell::PanelMode::Closed;
+                Ok(())
+            }
+            MouseClickAction::ToggleRightHandle => {
+                self.ui.panel_state.toggle_right();
+                self.ui.artifact_sidebar_open =
+                    self.ui.panel_state.right != crate::tui::shell::PanelMode::Closed;
+                Ok(())
+            }
+            MouseClickAction::OpenProviderDropdown => {
+                if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
+                    tab.provider_dropdown_open = !tab.provider_dropdown_open;
+                    tab.model_dropdown_open = false;
+                    tab.reasoning_dropdown_open = false;
+                }
+                Ok(())
+            }
+            MouseClickAction::OpenModelDropdown => {
+                if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
+                    tab.model_dropdown_open = !tab.model_dropdown_open;
+                    tab.provider_dropdown_open = false;
+                    tab.reasoning_dropdown_open = false;
+                }
+                Ok(())
+            }
+            MouseClickAction::SelectSettingsItem(index) => self.select_settings_item(index).await,
+        }
+    }
+
+    async fn select_settings_item(&mut self, index: usize) -> color_eyre::Result<()> {
+        let catalog = crate::tui::settings_panel::all_settings();
+        let Some(settings) = self.ui.settings_v2.as_mut() else {
+            return Ok(());
+        };
+        settings.select(index, &catalog);
+        let selected_id = settings
+            .selected_setting(&catalog)
+            .map(|setting| setting.id);
+        match settings.enter(&catalog) {
+            crate::tui::settings_panel::EnterResult::OpenKeybind {
+                action_id,
+                action_label,
+            } => {
+                self.ui.keybind_capture = Some(
+                    crate::tui::keybind_capture::KeybindCaptureState::new(action_id, action_label),
+                );
+            }
+            crate::tui::settings_panel::EnterResult::SelectTheme(theme) => {
+                self.apply_theme_selection(theme)?;
+            }
+            crate::tui::settings_panel::EnterResult::SelectToastPosition(position) => {
+                self.apply_toast_position_selection(position)?;
+            }
+            crate::tui::settings_panel::EnterResult::ToggledBool => match selected_id {
+                Some("web_search") => {
+                    self.toggle_web_search().await?;
+                    let state = if self.ui.web_search_enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    };
+                    self.ui
+                        .toast_stack
+                        .push_message(format!("Web Search {state}"), self.ui.frame_tick);
+                }
+                Some("collapse_thinking") => {
+                    self.toggle_collapse_thinking()?;
+                }
+                _ => {}
+            },
+            crate::tui::settings_panel::EnterResult::Nothing
+            | crate::tui::settings_panel::EnterResult::EnteredSubsection
+            | crate::tui::settings_panel::EnterResult::RequestConfirm => {}
+        }
+        Ok(())
+    }
+
+    fn toggle_collapse_thinking(&mut self) -> color_eyre::Result<()> {
+        let mut config = self
+            .config
+            .try_read()
+            .map(|config| config.clone())
+            .unwrap_or_default();
+        config.collapse_thinking = !config.collapse_thinking;
+        config.save()?;
+        if let Ok(mut live_config) = self.config.try_write() {
+            *live_config = config.clone();
+        }
+        self.ui.collapse_thinking = config.collapse_thinking;
+        let state = if self.ui.collapse_thinking {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        self.ui
+            .toast_stack
+            .push_message(format!("Collapse Thinking {state}"), self.ui.frame_tick);
         Ok(())
     }
 }

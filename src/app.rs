@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::io::IsTerminal;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 pub mod action;
 mod artifacts;
@@ -18,6 +18,7 @@ mod runtime;
 mod settings;
 pub mod tab;
 mod terminal;
+mod update;
 
 pub use action::Action;
 pub use generated_file::GeneratedFile;
@@ -61,14 +62,28 @@ impl TuiApp {
         ui.show_selector = config_snapshot.show_selector;
         ui.show_chat_scrollbar = config_snapshot.show_chat_scrollbar;
         ui.collapse_thinking = config_snapshot.collapse_thinking;
-        ui.kitty_enhanced_text = config_snapshot.kitty_enhanced_text;
+        ui.kitty_enhanced_text = false;
         ui.kitty_heading_downscale = config_snapshot.kitty_heading_downscale;
         ui.image_protocol = config_snapshot.image_protocol.clone();
         ui.web_search_enabled = config_snapshot.web_search.enabled;
         ui.db_providers = Self::provider_entries_with_local(&config_snapshot, None);
+        ui.panel_state = crate::tui::shell::PanelState::from_config(&config_snapshot.tui);
+        ui.sidebar_open = ui.panel_state.left != crate::tui::shell::PanelMode::Closed;
+        ui.artifact_sidebar_open = ui.panel_state.right != crate::tui::shell::PanelMode::Closed;
+        ui.tui_config = config_snapshot.tui.clone();
+        ui.keybinding_overrides = config_snapshot.tui.keybinding_overrides.clone();
         ui.disabled_providers = config_snapshot.disabled_providers.iter().cloned().collect();
         ui.disabled_models = config_snapshot.disabled_models.iter().cloned().collect();
         let _ = storage.sync_providers(&config_snapshot.providers);
+        if let Ok(mut providers) = storage.get_providers() {
+            if config_snapshot.local_inference.enabled {
+                providers.push(crate::llm::local::local_provider_entry(
+                    &config_snapshot.local_inference,
+                    None,
+                ));
+            }
+            ui.db_providers = providers;
+        }
         ui.visible_providers =
             Self::filter_visible_providers(&ui.db_providers, &ui.disabled_providers);
 
@@ -126,21 +141,6 @@ impl TuiApp {
         app
     }
 
-    pub fn queue_update_check(&self) {
-        if tokio::runtime::Handle::try_current().is_err() {
-            return;
-        }
-        let action_tx = self.action_tx.clone();
-        tokio::spawn(async move {
-            if let Ok(Some(release)) = crate::updater::available_release().await {
-                let _ = action_tx.send(Action::ShowToast(format!(
-                    "Update {} available. Run `tcui upgrade` to update.",
-                    release.version
-                )));
-            }
-        });
-    }
-
     pub(crate) fn load_system_prompt() -> String {
         let paths = [
             std::path::PathBuf::from("assets/TCUI.md"),
@@ -186,7 +186,17 @@ impl TuiApp {
                 model = first_model.id.clone();
             }
         }
-        self.ui.current_reasoning_options = Self::reasoning_options_for(&provider, &model);
+        let selected_model = self
+            .ui
+            .current_models
+            .iter()
+            .find(|entry| entry.id == model);
+        let default_reasoning_effort = selected_model
+            .and_then(|entry| entry.default_reasoning_effort.as_ref())
+            .cloned();
+        self.ui.current_reasoning_options = selected_model
+            .map(|entry| Self::reasoning_options_for(&provider, entry))
+            .unwrap_or_default();
         if self.ui.current_reasoning_options.is_empty() {
             reasoning_effort = None;
         } else if reasoning_effort.as_ref().is_none_or(|value| {
@@ -196,7 +206,16 @@ impl TuiApp {
                 .iter()
                 .any(|option| option == value)
         }) {
-            reasoning_effort = Some("medium".to_string());
+            reasoning_effort = default_reasoning_effort
+                .filter(|default| self.ui.current_reasoning_options.contains(default))
+                .or_else(|| {
+                    self.ui
+                        .current_reasoning_options
+                        .iter()
+                        .find(|option| option.as_str() == "medium")
+                        .cloned()
+                })
+                .or_else(|| self.ui.current_reasoning_options.first().cloned());
         }
         if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
             tab.tab.provider = provider;
@@ -392,6 +411,9 @@ impl TuiApp {
 
         let filter = trimmed.trim_start_matches('/').to_ascii_lowercase();
         let commands = [
+            ("/settings", "Open the Settings panel"),
+            ("/help", "Show the help document"),
+            ("/keybinds", "Show keyboard shortcuts"),
             ("/theme ", "Select and apply a theme"),
             ("/skills", "Show installed skills"),
             ("/mcp", "Show MCP servers"),
@@ -488,3 +510,7 @@ impl TuiApp {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "app/runtime_guard_tests.rs"]
+mod runtime_guard_tests;

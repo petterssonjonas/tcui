@@ -56,14 +56,6 @@ impl KittyHeadingTier {
         }
     }
 
-    pub const fn chunk_column_limit(self) -> usize {
-        match self {
-            KittyHeadingTier::H1 => 128,
-            KittyHeadingTier::H2 => 6,
-            KittyHeadingTier::H3 => 4,
-        }
-    }
-
     pub fn osc_sequence(self, text: &str, columns: usize) -> String {
         match self {
             KittyHeadingTier::H1 => {
@@ -914,7 +906,7 @@ fn heading_overlay_style(level: usize) -> Style {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_markdown, RenderOptions};
+    use super::{RenderOptions, render_markdown};
     use crate::config::app_config::{HeadingDownscale, MarkdownMode};
     use crate::ui::components::terminal_capabilities::TerminalCapabilities;
 

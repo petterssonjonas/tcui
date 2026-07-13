@@ -271,6 +271,8 @@ pub struct AppConfig {
     pub notifications: NotificationConfig,
     pub local_inference: LocalInferenceConfig,
     pub web_search: WebSearchConfig,
+    #[serde(default, deserialize_with = "crate::config::tui::deserialize_tui")]
+    pub tui: crate::config::tui::TuiConfig,
     #[cfg(feature = "memory")]
     pub memory: crate::memory::MemoryConfig,
     pub providers: Vec<ProviderConfig>,
@@ -426,7 +428,7 @@ impl Default for AppConfig {
             show_selector: true,
             show_chat_scrollbar: true,
             collapse_thinking: true,
-            kitty_enhanced_text: true,
+            kitty_enhanced_text: false,
             kitty_heading_downscale: HeadingDownscale::None,
             quit_confirmation: true,
             use_env_keys: false,
@@ -439,6 +441,7 @@ impl Default for AppConfig {
             notifications: NotificationConfig::default(),
             local_inference: LocalInferenceConfig::default(),
             web_search: WebSearchConfig::default(),
+            tui: crate::config::tui::TuiConfig::default(),
             #[cfg(feature = "memory")]
             memory: crate::memory::MemoryConfig::default(),
             providers: default_providers(),
@@ -610,9 +613,9 @@ fn default_providers() -> Vec<ProviderConfig> {
         ),
         (
             "Codex",
-            "https://api.openai.com/v1",
+            "https://chatgpt.com/backend-api/codex",
             "CODEX_API_KEY",
-            "openai",
+            "codex",
             "oauth",
         ),
     ]
@@ -729,6 +732,16 @@ kitty_text_max_scale = 1
         assert_eq!(openai.2, "OPENAI_API_KEY");
         assert_eq!(openai.3, "openai");
         assert_eq!(openai.4, "api_key");
+    }
+
+    #[test]
+    fn codex_default_uses_the_subscription_responses_backend() {
+        let config = AppConfig::default();
+        let codex = config.provider_config("Codex").expect("find Codex");
+
+        assert_eq!(codex.endpoint, "https://chatgpt.com/backend-api/codex");
+        assert_eq!(codex.backend_type, "codex");
+        assert_eq!(codex.auth_type, "oauth");
     }
 
     #[test]

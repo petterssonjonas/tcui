@@ -1,4 +1,4 @@
-use ratatui::{prelude::*, widgets::*, Frame};
+use ratatui::{Frame, prelude::*, widgets::*};
 
 use crate::config::app_config::{HeadingDownscale, MarkdownMode};
 use crate::ui::artifact_sidebar::{ArtifactEntry, ArtifactHandle, ArtifactKind};
@@ -18,6 +18,7 @@ pub struct ArtifactViewerHitAreas {
 pub struct ArtifactViewerState {
     pub artifact: ArtifactEntry,
     pub scroll: usize,
+    pub view_only: bool,
     pub hit_areas: ArtifactViewerHitAreas,
     image_state: Option<ImageBlockState>,
 }
@@ -35,6 +36,7 @@ impl ArtifactViewerState {
         Self {
             artifact,
             scroll: 0,
+            view_only: false,
             hit_areas: ArtifactViewerHitAreas::default(),
             image_state: None,
         }
@@ -51,12 +53,15 @@ impl ArtifactViewerState {
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect, props: ArtifactViewerProps<'_>) {
+        let theme = crate::theme::active_theme();
         let popup_area = popup_area(area);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
-            .style(Style::default().bg(Color::Black));
-        let inner = block.inner(popup_area);
+        let block = Block::default().style(Style::default().bg(theme.code_bg));
+        let inner = Rect::new(
+            popup_area.x,
+            popup_area.y + 1,
+            popup_area.width,
+            popup_area.height.saturating_sub(1),
+        );
         f.render_widget(Clear, popup_area);
         f.render_widget(block, popup_area);
         let title_y = popup_area.y;
@@ -151,7 +156,7 @@ impl ArtifactViewerState {
             }
         }
 
-        if button_area.height > 0 {
+        if button_area.height > 0 && !self.view_only {
             let theme = crate::theme::active_theme();
             let mut x = button_area.right().saturating_sub(1);
             let y = button_area.y;
@@ -201,9 +206,9 @@ pub fn popup_area(area: Rect) -> Rect {
     Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(25),
-            Constraint::Percentage(75),
-            Constraint::Percentage(0),
+            Constraint::Percentage(10),
+            Constraint::Percentage(80),
+            Constraint::Percentage(10),
         ])
         .split(popup_layout[1])[1]
 }
@@ -224,7 +229,7 @@ mod tests {
     use super::{ArtifactViewerProps, ArtifactViewerState};
     use crate::config::app_config::{HeadingDownscale, MarkdownMode};
     use crate::ui::components::terminal_capabilities::{TerminalCapabilities, TerminalKind};
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
     fn preview_scroll_is_clamped_to_rendered_content() {

@@ -1,14 +1,15 @@
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use portable_pty::{Child, CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    widgets::{Block, Borders, Clear, Paragraph},
-    Frame,
+    widgets::{Block, Clear, Paragraph},
 };
 use tokio::sync::mpsc::{Receiver, Sender};
 use tui_term::vt100::Parser;
@@ -19,6 +20,7 @@ const INPUT_CHANNEL_SIZE: usize = 64;
 
 pub struct EditorPopupState {
     artifact_name: String,
+    chat_draft_path: Option<PathBuf>,
     parser: Arc<RwLock<Parser>>,
     input_tx: Sender<Bytes>,
     output_rx: Receiver<Vec<u8>>,
@@ -30,7 +32,15 @@ pub struct EditorPopupState {
 }
 
 impl EditorPopupState {
-    pub fn new(path: &std::path::Path) -> Result<Self, String> {
+    pub fn new(path: &Path) -> Result<Self, String> {
+        Self::new_with_chat_draft(path, None)
+    }
+
+    pub fn new_chat_draft(path: &Path) -> Result<Self, String> {
+        Self::new_with_chat_draft(path, Some(path.to_path_buf()))
+    }
+
+    fn new_with_chat_draft(path: &Path, chat_draft_path: Option<PathBuf>) -> Result<Self, String> {
         let artifact_name = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -80,6 +90,7 @@ impl EditorPopupState {
 
         Ok(Self {
             artifact_name,
+            chat_draft_path,
             parser,
             input_tx,
             output_rx,
@@ -92,14 +103,17 @@ impl EditorPopupState {
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
+        let theme = crate::theme::active_theme();
         let popup_area = popup_area(area);
         f.render_widget(Clear, popup_area);
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
-            .style(Style::default().bg(Color::Black));
-        let inner = block.inner(popup_area);
+        let block = Block::default().style(Style::default().bg(theme.panel));
+        let inner = Rect::new(
+            popup_area.x,
+            popup_area.y + 1,
+            popup_area.width,
+            popup_area.height.saturating_sub(1),
+        );
         f.render_widget(block, popup_area);
         let rows = inner.height.max(1);
         let cols = inner.width.max(1);
@@ -204,11 +218,23 @@ impl EditorPopupState {
     pub fn close_area(&self) -> Option<Rect> {
         self.close_hit_area
     }
+
+    pub fn chat_draft_path(&self) -> Option<&Path> {
+        self.chat_draft_path.as_deref()
+    }
+
+    /// Takes the draft path so `Drop` will not delete the file before the caller reads it.
+    pub fn take_chat_draft_path(&mut self) -> Option<PathBuf> {
+        self.chat_draft_path.take()
+    }
 }
 
 impl Drop for EditorPopupState {
     fn drop(&mut self) {
         let _ = self.child.kill();
+        if let Some(path) = &self.chat_draft_path {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 

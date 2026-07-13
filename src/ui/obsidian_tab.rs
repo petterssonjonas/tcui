@@ -25,27 +25,45 @@ impl<'a> ObsidianTab<'a> {
     }
 
     fn render_file_tree(&self, f: &mut Frame, area: Rect) {
+        let theme = crate::theme::active_theme();
         let items = vec![
+            Line::styled(
+                "Files [Ctrl+S]",
+                Style::default()
+                    .fg(theme.accent)
+                    .bg(theme.panel)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Line::from(Span::raw("📁 Vault")),
             Line::from(Span::raw("  └─ README.md")),
         ];
 
         let list = Paragraph::new(items)
-            .block(Block::default().title("Files [Ctrl+S]").borders(Borders::ALL))
+            .block(Block::default().style(Style::default().bg(theme.panel)))
             .scrollable(true);
 
         f.render_widget(list, area);
     }
 
     fn render_preview(&self, f: &mut Frame, area: Rect) {
+        let theme = crate::theme::active_theme();
         let content = if let Some(path) = &self.selected_path {
             format!("Preview: {}", path)
         } else {
             "Select a file to preview".to_string()
         };
 
-        let paragraph = Paragraph::new(content)
-            .block(Block::default().title("Preview").borders(Borders::ALL));
+        let paragraph = Paragraph::new(vec![
+            Line::styled(
+                "Preview",
+                Style::default()
+                    .fg(theme.accent)
+                    .bg(theme.panel)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::raw(content),
+        ])
+        .block(Block::default().style(Style::default().bg(theme.panel)));
 
         f.render_widget(paragraph, area);
     }

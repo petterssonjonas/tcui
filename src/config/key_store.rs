@@ -1,45 +1,63 @@
 use crate::config::AppConfig;
+use crate::storage::crypto::{
+    SharedKey, StorageCryptoError, decrypt_serialized, encrypt_serialized,
+};
+use crate::storage::paths::TcuiDataPaths;
 use color_eyre::Result;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Todo 7 invokes the typed API-key lifecycle from the OpenRouter auth command."
+    )
+)]
+mod api_key;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Todo 7 invokes the typed API-key lifecycle from the OpenRouter auth command."
+    )
+)]
+mod credential;
+mod format;
+mod oauth;
+mod path_security;
+mod persistence;
+mod rollback;
+
+pub use credential::{
+    ApiKeyCredential, ApiKeyCredentialOwnership, ApiKeyCredentialSource, Credential,
+};
+use format::{LoadedKeysFile, StoredKeysFile};
+use oauth::StoredOAuthCredential;
+pub use oauth::{KeyStoreError, OAuthCredential};
+pub use oauth::{OAuthCredentialOwnership, OAuthCredentialSource};
+
+const CURRENT_STORE_VERSION: u32 = 1;
 
 pub struct KeyStore;
-
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-struct StoredKeysFile {
-    #[serde(default)]
-    keys: BTreeMap<String, String>,
-}
 
 impl KeyStore {
     pub fn new() -> Self {
         Self
     }
 
-    pub fn load_keys(config: &AppConfig) -> Result<Vec<(String, String)>> {
-        let file = Self::load_file(config)?;
-        file.keys
-            .into_iter()
-            .map(|(provider, encrypted)| {
-                Ok((
-                    provider,
-                    crate::storage::Storage::decrypt_shared_text(&encrypted)?,
-                ))
-            })
-            .collect()
-    }
-
     pub fn get(config: &AppConfig, provider: &str) -> Result<Option<String>> {
         let file = Self::load_file(config)?;
-        file.keys
+        file.keys()
             .get(provider)
             .map(|encrypted| crate::storage::Storage::decrypt_shared_text(encrypted))
             .transpose()
     }
 
     pub fn save_keys(config: &AppConfig, keys: &[(String, String)]) -> Result<()> {
-        let mut file = StoredKeysFile::default();
+        let _guard = store_write_guard()?;
+        let mut file = Self::load_file(config)?.into_current()?;
+        file.keys.clear();
         for (provider, key) in keys {
             if key.trim().is_empty() {
                 continue;
@@ -49,32 +67,92 @@ impl KeyStore {
                 crate::storage::Storage::encrypt_shared_text(key.trim())?,
             );
         }
+        Self::write_file(config, &file)?;
+        Ok(())
+    }
+
+    pub fn get_oauth(
+        config: &AppConfig,
+        provider: &str,
+    ) -> std::result::Result<Option<OAuthCredential>, KeyStoreError> {
+        #[cfg(not(unix))]
+        {
+            let _ = (config, provider);
+            return Err(KeyStoreError::UnsupportedPlatform);
+        }
+
+        let file = Self::load_file(config)?.into_current()?;
+        let Some(encrypted) = file.oauth.get(provider) else {
+            return Ok(None);
+        };
+        let shared_key = shared_key()?;
+        let payload = decrypt_serialized::<StoredOAuthCredential>(
+            &shared_key,
+            &oauth_record_kind(provider),
+            encrypted,
+        )
+        .map_err(map_oauth_crypto_error)?;
+        let credential = OAuthCredential::from_payload(payload)?;
+        if credential.provider != provider {
+            return Err(KeyStoreError::ProviderMismatch);
+        }
+        Ok(Some(credential))
+    }
+
+    pub fn upsert_oauth(
+        config: &AppConfig,
+        credential: &OAuthCredential,
+    ) -> std::result::Result<(), KeyStoreError> {
+        #[cfg(not(unix))]
+        {
+            let _ = (config, credential);
+            return Err(KeyStoreError::UnsupportedPlatform);
+        }
+
+        let _guard = store_write_guard()?;
+        credential.validate()?;
+        let mut file = Self::load_file(config)?.into_current()?;
+        let shared_key = shared_key()?;
+        let encrypted = encrypt_serialized(
+            &shared_key,
+            &oauth_record_kind(&credential.provider),
+            &StoredOAuthCredential::from(credential),
+        )
+        .map_err(map_oauth_crypto_error)?;
+        file.oauth.insert(credential.provider.clone(), encrypted);
         Self::write_file(config, &file)
     }
 
-    fn load_file(config: &AppConfig) -> Result<StoredKeysFile> {
-        let path = Self::keys_path(config)?;
-        if !path.exists() {
-            return Ok(StoredKeysFile::default());
+    pub fn remove_oauth(
+        config: &AppConfig,
+        provider: &str,
+    ) -> std::result::Result<bool, KeyStoreError> {
+        #[cfg(not(unix))]
+        {
+            let _ = (config, provider);
+            return Err(KeyStoreError::UnsupportedPlatform);
         }
-        let content = std::fs::read_to_string(path)?;
-        Ok(toml::from_str(&content)?)
+
+        let _guard = store_write_guard()?;
+        let mut file = Self::load_file(config)?.into_current()?;
+        let removed = file.oauth.remove(provider).is_some();
+        if removed {
+            Self::write_file(config, &file)?;
+        }
+        Ok(removed)
     }
 
-    fn write_file(config: &AppConfig, file: &StoredKeysFile) -> Result<()> {
-        let path = Self::keys_path(config)?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&path, toml::to_string_pretty(file)?)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&path)?.permissions();
-            perms.set_mode(0o600);
-            std::fs::set_permissions(&path, perms)?;
-        }
-        Ok(())
+    fn load_file(config: &AppConfig) -> std::result::Result<LoadedKeysFile, KeyStoreError> {
+        let path = Self::keys_path(config).map_err(|_| KeyStoreError::KeyPath)?;
+        persistence::read_file(&path)
+    }
+
+    fn write_file(
+        config: &AppConfig,
+        file: &StoredKeysFile,
+    ) -> std::result::Result<(), KeyStoreError> {
+        let path = Self::keys_path(config).map_err(|_| KeyStoreError::KeyPath)?;
+        persistence::write_file(&path, file)
     }
 
     fn keys_path(config: &AppConfig) -> Result<PathBuf> {
@@ -92,6 +170,42 @@ impl KeyStore {
     }
 }
 
+fn shared_key() -> std::result::Result<SharedKey, KeyStoreError> {
+    SharedKey::load_or_create_default(&TcuiDataPaths::discover())
+        .map(|loaded| loaded.key)
+        .map_err(|_| KeyStoreError::KeyAccess)
+}
+
+fn store_write_guard() -> std::result::Result<MutexGuard<'static, ()>, KeyStoreError> {
+    static STORE_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    STORE_WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| KeyStoreError::Write)
+}
+
+fn oauth_record_kind(provider: &str) -> String {
+    format!("oauth:{provider}")
+}
+
+fn map_oauth_crypto_error(error: StorageCryptoError) -> KeyStoreError {
+    match error {
+        StorageCryptoError::Encrypt => KeyStoreError::OauthEncrypt,
+        StorageCryptoError::Json(_) | StorageCryptoError::Utf8(_) => {
+            KeyStoreError::InvalidOauthPayload
+        }
+        StorageCryptoError::Io(_)
+        | StorageCryptoError::InvalidKeyLength
+        | StorageCryptoError::MissingDefaultKey { .. } => KeyStoreError::KeyAccess,
+        StorageCryptoError::Base64(_)
+        | StorageCryptoError::MissingNonce
+        | StorageCryptoError::MissingCiphertext
+        | StorageCryptoError::InvalidEnvelope
+        | StorageCryptoError::Decrypt
+        | StorageCryptoError::WrongDocumentKind => KeyStoreError::OauthDecrypt,
+    }
+}
+
 impl Default for KeyStore {
     fn default() -> Self {
         Self::new()
@@ -99,69 +213,28 @@ impl Default for KeyStore {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Mutex;
+mod test_support;
 
-    fn env_lock() -> &'static Mutex<()> {
-        crate::test_support::env_lock()
-    }
+#[cfg(test)]
+mod legacy_tests;
 
-    fn unique_temp_dir(label: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock before epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!("tcui-{label}-{}-{nanos}", std::process::id()))
-    }
+#[cfg(test)]
+mod oauth_api_tests;
 
-    #[test]
-    fn stores_keys_encrypted_with_shared_key() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
-        let root = unique_temp_dir("keys-encryption");
-        let config_home = root.join("config-home");
-        std::fs::create_dir_all(&config_home).expect("create config dir");
+#[cfg(test)]
+mod credential_tests;
 
-        let mut config = AppConfig::default();
-        config.key_file = Some(
-            config_home
-                .join("tcui")
-                .join("keys.toml")
-                .display()
-                .to_string(),
-        );
+#[cfg(test)]
+mod oauth_persistence_tests;
 
-        KeyStore::save_keys(&config, &[("OpenAI".to_string(), "sk-secret".to_string())])
-            .expect("save encrypted keys");
-        let raw = std::fs::read_to_string(config_home.join("tcui").join("keys.toml"))
-            .expect("read raw key file");
-        assert!(raw.contains("enc:v1:"));
-        assert!(!raw.contains("sk-secret"));
+#[cfg(test)]
+mod oauth_concurrency_tests;
 
-        let keys = KeyStore::load_keys(&config).expect("load decrypted keys");
-        assert_eq!(keys, vec![("OpenAI".to_string(), "sk-secret".to_string())]);
+#[cfg(test)]
+mod filesystem_tests;
 
-        std::fs::remove_dir_all(&root).expect("cleanup temp dir");
-    }
+#[cfg(test)]
+mod parent_security_tests;
 
-    #[test]
-    fn default_key_path_uses_xdg_data_home() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
-        let root = unique_temp_dir("keys-default-path");
-        let data_home = root.join("data-home");
-        std::fs::create_dir_all(&data_home).expect("create data dir");
-        std::env::set_var("XDG_DATA_HOME", &data_home);
-
-        let config = AppConfig::default();
-        KeyStore::save_keys(&config, &[("OpenAI".to_string(), "sk-secret".to_string())])
-            .expect("save encrypted keys");
-
-        let key_path = data_home.join("tcui").join("keys.toml");
-        let raw = std::fs::read_to_string(&key_path).expect("read raw key file");
-        assert!(raw.contains("enc:v1:"));
-        assert!(!raw.contains("sk-secret"));
-
-        std::fs::remove_dir_all(&root).expect("cleanup temp dir");
-        std::env::remove_var("XDG_DATA_HOME");
-    }
-}
+#[cfg(test)]
+mod future_version_tests;

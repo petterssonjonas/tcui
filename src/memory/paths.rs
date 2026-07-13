@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 
-use crate::storage::paths::{ensure_directory, TcuiDataPaths};
+use crate::storage::paths::{TcuiDataPaths, ensure_directory};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -124,18 +124,26 @@ mod tests {
         let paths = MemoryPaths::new(&root).expect("memory paths");
 
         // When / Then
-        assert!(paths
-            .logical_path(std::path::Path::new("/tmp/outside.md"))
-            .is_err());
-        assert!(paths
-            .logical_path(std::path::Path::new("../outside.md"))
-            .is_err());
-        assert!(paths
-            .logical_path(std::path::Path::new("note.txt"))
-            .is_err());
-        assert!(paths
-            .logical_path(std::path::Path::new("nested/note.md"))
-            .is_ok());
+        assert!(
+            paths
+                .logical_path(std::path::Path::new("/tmp/outside.md"))
+                .is_err()
+        );
+        assert!(
+            paths
+                .logical_path(std::path::Path::new("../outside.md"))
+                .is_err()
+        );
+        assert!(
+            paths
+                .logical_path(std::path::Path::new("note.txt"))
+                .is_err()
+        );
+        assert!(
+            paths
+                .logical_path(std::path::Path::new("nested/note.md"))
+                .is_ok()
+        );
         fs::remove_dir_all(root).expect("temporary vault cleanup");
     }
 

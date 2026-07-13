@@ -1,13 +1,218 @@
 use ratatui::layout::Rect;
 
 use super::{Action, Tab, TuiApp};
+use crate::app::action::MouseClickAction;
 
 impl TuiApp {
+    fn action_for_slash_command(&self, text: &str) -> Option<Action> {
+        match text.trim() {
+            "/quit" | "/exit" | "/q" => Some(self.quit_action()),
+            "/skills" => Some(Action::ShowSkillsPopup),
+            "/mcp" => Some(Action::ShowMcpPopup),
+            "/settings" => Some(Action::OpenSettingsPanel),
+            "/help" => Some(Action::ShowHelp),
+            "/keybinds" => Some(Action::ShowKeybinds),
+            "/web" => Some(Action::ToggleWebSearch),
+            _ => None,
+        }
+    }
+
     pub(crate) fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> Option<Action> {
         use crossterm::event::{KeyCode, KeyModifiers};
 
         if key.kind != crossterm::event::KeyEventKind::Press {
             return None;
+        }
+
+        // TODO: Keybind editing is disabled in the settings UI (no keybind entries in
+        // all_settings). This capture flow is preserved and persisted to config, but
+        // normal key dispatch does not yet consult keybinding_overrides. Re-enable
+        // keybind entries in all_settings() once dispatch is wired through the binding map.
+        if let Some(mut capture) = self.ui.keybind_capture.take() {
+            let mut effective_bindings = std::collections::BTreeMap::new();
+            for setting in crate::tui::settings_panel::all_settings() {
+                if let crate::tui::settings_panel::SettingType::Keybind {
+                    action_id,
+                    default_binding,
+                    reserved: _,
+                } = setting.setting_type
+                {
+                    effective_bindings.insert(action_id.to_string(), default_binding.to_string());
+                }
+            }
+            effective_bindings.extend(self.ui.keybinding_overrides.clone());
+            let result = capture.capture_with_overrides(key, &effective_bindings);
+            match result {
+                crate::tui::keybind_capture::CaptureResult::Captured(_) => {
+                    let action_id = capture.action_id.clone();
+                    let action_label = capture.action_label.clone();
+                    if let Some(binding) = capture.confirm() {
+                        self.ui
+                            .keybinding_overrides
+                            .insert(action_id.clone(), binding.clone());
+                        self.ui
+                            .show_toast(format!("Bound {action_label} → {binding}"));
+                        if let Ok(mut config) = self.config.try_write() {
+                            config.tui.keybinding_overrides = self.ui.keybinding_overrides.clone();
+                            let _ = config.save();
+                        }
+                    }
+                }
+                crate::tui::keybind_capture::CaptureResult::Cleared => {
+                    let action_id = capture.action_id.clone();
+                    self.ui.keybinding_overrides.remove(&action_id);
+                    if let Ok(mut config) = self.config.try_write() {
+                        config.tui.keybinding_overrides = self.ui.keybinding_overrides.clone();
+                        let _ = config.save();
+                    }
+                }
+                crate::tui::keybind_capture::CaptureResult::Conflict(_)
+                | crate::tui::keybind_capture::CaptureResult::Waiting => {
+                    self.ui.keybind_capture = Some(capture);
+                }
+                crate::tui::keybind_capture::CaptureResult::Cancelled => {}
+            }
+            return None;
+        }
+
+        if self.ui.show_keybinds {
+            return match key.code {
+                KeyCode::Esc | KeyCode::Enter => Some(Action::DismissKeybinds),
+                _ => None,
+            };
+        }
+
+        if let Some(palette) = self.ui.palette.as_mut() {
+            return match key.code {
+                KeyCode::Esc => {
+                    self.ui.palette = None;
+                    None
+                }
+                KeyCode::Enter => {
+                    let action = palette.selected_action();
+                    self.ui.palette = None;
+                    action
+                }
+                KeyCode::Up => {
+                    palette.move_up();
+                    None
+                }
+                KeyCode::Down => {
+                    palette.move_down();
+                    None
+                }
+                KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if palette.toggle_pin() {
+                        let pinned = palette.pinned().to_vec();
+                        if let Ok(mut config) = self.config.try_write() {
+                            config.tui.pinned_commands = pinned;
+                            let _ = config.save();
+                        }
+                    }
+                    None
+                }
+                KeyCode::Char(c)
+                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    palette.insert_char(c);
+                    None
+                }
+                KeyCode::Backspace => {
+                    palette.backspace();
+                    None
+                }
+                _ => None,
+            };
+        }
+
+        if let Some(settings) = self.ui.settings_v2.as_mut() {
+            let catalog = crate::tui::settings_panel::all_settings();
+            return match key.code {
+                KeyCode::Esc => {
+                    if settings.esc() {
+                        self.ui.settings_v2 = None;
+                    }
+                    None
+                }
+                KeyCode::Enter => {
+                    if settings.confirm.is_some() {
+                        settings.confirm_reset();
+                        return None;
+                    }
+                    let selected_id = settings
+                        .selected_setting(&catalog)
+                        .map(|setting| setting.id);
+                    match settings.enter(&catalog) {
+                        crate::tui::settings_panel::EnterResult::OpenKeybind {
+                            action_id,
+                            action_label,
+                        } => {
+                            self.ui.keybind_capture =
+                                Some(crate::tui::keybind_capture::KeybindCaptureState::new(
+                                    action_id,
+                                    action_label,
+                                ));
+                        }
+                        crate::tui::settings_panel::EnterResult::SelectTheme(theme) => {
+                            let _ = self.apply_theme_selection(theme);
+                        }
+                        crate::tui::settings_panel::EnterResult::SelectToastPosition(position) => {
+                            let _ = self.apply_toast_position_selection(position);
+                        }
+                        crate::tui::settings_panel::EnterResult::ToggledBool => match selected_id {
+                            Some("web_search") => return Some(Action::ToggleWebSearch),
+                            Some("collapse_thinking") => {
+                                return Some(Action::ToggleCollapseThinking);
+                            }
+                            _ => {}
+                        },
+                        crate::tui::settings_panel::EnterResult::Nothing
+                        | crate::tui::settings_panel::EnterResult::EnteredSubsection
+                        | crate::tui::settings_panel::EnterResult::RequestConfirm => {}
+                    }
+                    None
+                }
+                KeyCode::Char(' ') => {
+                    let selected_id = settings
+                        .selected_setting(&catalog)
+                        .map(|setting| setting.id);
+                    if !settings.toggle_bool(&catalog) {
+                        settings.insert_char(' ');
+                    } else {
+                        match selected_id {
+                            Some("web_search") => return Some(Action::ToggleWebSearch),
+                            Some("collapse_thinking") => {
+                                return Some(Action::ToggleCollapseThinking);
+                            }
+                            _ => {}
+                        }
+                    }
+                    None
+                }
+                KeyCode::Left | KeyCode::Right if settings.confirm.is_some() => {
+                    settings.toggle_confirm_selection();
+                    None
+                }
+                KeyCode::Up => {
+                    settings.move_up();
+                    None
+                }
+                KeyCode::Down => {
+                    settings.move_down(&catalog);
+                    None
+                }
+                KeyCode::Char(c)
+                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    settings.insert_char(c);
+                    None
+                }
+                KeyCode::Backspace => {
+                    settings.backspace();
+                    None
+                }
+                _ => None,
+            };
         }
 
         if let Some(dialog) = &mut self.ui.export_dialog {
@@ -63,7 +268,8 @@ impl TuiApp {
         }
 
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('e') {
-            return Some(Action::ExportConversation);
+            self.open_chat_draft_editor();
+            return None;
         }
 
         if let Some(dialog) = &mut self.ui.save_file_dialog {
@@ -145,11 +351,19 @@ impl TuiApp {
                     self.ui.list_popup = None;
                     match action {
                         Some(crate::ui::modals::list_popup::ListPopupAction::InsertText(text)) => {
+                            if let Some(action) = self.action_for_slash_command(&text) {
+                                self.replace_input_content(String::new());
+                                return Some(action);
+                            }
                             self.insert_input_text(&text);
                         }
                         Some(crate::ui::modals::list_popup::ListPopupAction::ReplaceInput(
                             text,
                         )) => {
+                            if let Some(action) = self.action_for_slash_command(&text) {
+                                self.replace_input_content(String::new());
+                                return Some(action);
+                            }
                             self.replace_input_content(text);
                         }
                         Some(crate::ui::modals::list_popup::ListPopupAction::SetTheme(theme)) => {
@@ -160,12 +374,44 @@ impl TuiApp {
                     None
                 }
                 KeyCode::Up => {
+                    if live_input {
+                        if key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL)
+                            && self.browse_input_history(false)
+                        {
+                            return None;
+                        }
+                        if let Some(popup) = &mut self.ui.list_popup {
+                            popup.move_up();
+                        }
+                        return None;
+                    }
+                    if self.browse_input_history(false) {
+                        return None;
+                    }
                     if let Some(popup) = &mut self.ui.list_popup {
                         popup.move_up();
                     }
                     None
                 }
                 KeyCode::Down => {
+                    if live_input {
+                        if key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL)
+                            && self.browse_input_history(true)
+                        {
+                            return None;
+                        }
+                        if let Some(popup) = &mut self.ui.list_popup {
+                            popup.move_down(visible_rows);
+                        }
+                        return None;
+                    }
+                    if self.browse_input_history(true) {
+                        return None;
+                    }
                     if let Some(popup) = &mut self.ui.list_popup {
                         popup.move_down(visible_rows);
                     }
@@ -212,252 +458,6 @@ impl TuiApp {
                     None
                 }
             }
-        } else if self.ui.show_settings {
-            if self
-                .ui
-                .settings_popup
-                .as_ref()
-                .map(|settings| settings.provider_popup_active())
-                .unwrap_or(false)
-            {
-                let popup_action = if let Some(settings) = &mut self.ui.settings_popup {
-                    match key.code {
-                        KeyCode::Esc => {
-                            settings.close_active_provider_popup();
-                            crate::ui::settings_tab::ProvidersAction::None
-                        }
-                        KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                            settings.prev_popup_focus();
-                            crate::ui::settings_tab::ProvidersAction::None
-                        }
-                        KeyCode::Tab => {
-                            settings.next_popup_focus();
-                            crate::ui::settings_tab::ProvidersAction::None
-                        }
-                        KeyCode::Up => {
-                            settings.popup_up();
-                            crate::ui::settings_tab::ProvidersAction::None
-                        }
-                        KeyCode::Down => {
-                            settings.popup_down();
-                            crate::ui::settings_tab::ProvidersAction::None
-                        }
-                        KeyCode::Enter | KeyCode::Char(' ') => settings.activate_provider_popup(),
-                        KeyCode::Char(c)
-                            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-                        {
-                            settings.type_char(c);
-                            crate::ui::settings_tab::ProvidersAction::None
-                        }
-                        KeyCode::Backspace => {
-                            settings.backspace();
-                            crate::ui::settings_tab::ProvidersAction::None
-                        }
-                        _ => return None,
-                    }
-                } else {
-                    crate::ui::settings_tab::ProvidersAction::None
-                };
-                self.apply_settings_provider_action(popup_action);
-                return None;
-            }
-
-            match key.code {
-                KeyCode::Esc => Some(Action::CloseSettings),
-                KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    Some(Action::CloseSettings)
-                }
-                KeyCode::Char(',') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    Some(Action::CloseSettings)
-                }
-                KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                    if let Some(settings) = &mut self.ui.settings_popup {
-                        settings.prev_tab();
-                    }
-                    None
-                }
-                KeyCode::Tab => {
-                    if let Some(settings) = &mut self.ui.settings_popup {
-                        settings.next_tab();
-                    }
-                    None
-                }
-                KeyCode::Up => {
-                    if let Some(settings) = &mut self.ui.settings_popup {
-                        if settings.active_tab == crate::ui::settings_tab::SettingsTab::General {
-                            if settings.general_dropdown_open.is_some() {
-                                settings.general_dropdown_up();
-                            } else {
-                                settings.prev_focus();
-                            }
-                        } else if settings.active_tab
-                            == crate::ui::settings_tab::SettingsTab::Providers
-                        {
-                            if settings.providers_dropdown_open.is_some() {
-                                settings.providers_dropdown_up();
-                            } else {
-                                settings.prev_focus();
-                            }
-                        } else if settings.active_tab
-                            == crate::ui::settings_tab::SettingsTab::Models
-                        {
-                            if settings.models_dropdown_open {
-                                settings.models_dropdown_up();
-                            } else {
-                                settings.prev_focus();
-                            }
-                        } else if matches!(
-                            settings.active_tab,
-                            crate::ui::settings_tab::SettingsTab::Local
-                                | crate::ui::settings_tab::SettingsTab::Mcp
-                        ) {
-                            settings.prev_focus();
-                        }
-                    }
-                    None
-                }
-                KeyCode::Down => {
-                    if let Some(settings) = &mut self.ui.settings_popup {
-                        if settings.active_tab == crate::ui::settings_tab::SettingsTab::General {
-                            if settings.general_dropdown_open.is_some() {
-                                settings.general_dropdown_down();
-                            } else {
-                                settings.next_focus();
-                            }
-                        } else if settings.active_tab
-                            == crate::ui::settings_tab::SettingsTab::Providers
-                        {
-                            if settings.providers_dropdown_open.is_some() {
-                                settings.providers_dropdown_down();
-                            } else {
-                                settings.next_focus();
-                            }
-                        } else if settings.active_tab
-                            == crate::ui::settings_tab::SettingsTab::Models
-                        {
-                            if settings.models_dropdown_open {
-                                settings.models_dropdown_down();
-                            } else {
-                                settings.next_focus();
-                            }
-                        } else if matches!(
-                            settings.active_tab,
-                            crate::ui::settings_tab::SettingsTab::Local
-                                | crate::ui::settings_tab::SettingsTab::Mcp
-                        ) {
-                            settings.next_focus();
-                        }
-                    }
-                    None
-                }
-                KeyCode::Char(' ')
-                    if self.ui.settings_popup.as_ref().is_some_and(|settings| {
-                        settings.active_tab == crate::ui::settings_tab::SettingsTab::General
-                            && matches!(
-                                settings.general_focus,
-                                crate::ui::settings_tab::GeneralFocus::ArtifactSaveDir
-                                    | crate::ui::settings_tab::GeneralFocus::VaultPath
-                            )
-                    }) =>
-                {
-                    if let Some(settings) = &mut self.ui.settings_popup {
-                        settings.type_char(' ');
-                    }
-                    None
-                }
-                KeyCode::Enter | KeyCode::Char(' ') => {
-                    let mut provider_action = crate::ui::settings_tab::ProvidersAction::None;
-                    let mut theme_to_apply = None;
-                    let mut models_provider_to_refresh = None;
-                    if let Some(ref mut settings) = self.ui.settings_popup {
-                        match settings.active_tab {
-                            crate::ui::settings_tab::SettingsTab::General => {
-                                if settings.general_dropdown_open.is_some() {
-                                    let idx = settings.general_dropdown_current_idx();
-                                    let changed_theme = settings.select_general_dropdown_item(idx);
-                                    if changed_theme {
-                                        theme_to_apply = Some(settings.theme.clone());
-                                    }
-                                } else {
-                                    provider_action = settings.activate_focus();
-                                    if settings.general_focus
-                                        == crate::ui::settings_tab::GeneralFocus::Theme
-                                        && settings.general_dropdown_open.is_none()
-                                    {
-                                        theme_to_apply = Some(settings.theme.clone());
-                                    }
-                                }
-                            }
-                            crate::ui::settings_tab::SettingsTab::Providers => {
-                                provider_action = settings.activate_focus();
-                            }
-                            crate::ui::settings_tab::SettingsTab::Models => {
-                                if settings.models_dropdown_open {
-                                    settings.select_models_provider_dropdown_item(0);
-                                    if let Ok(models) =
-                                        self.storage.get_models(&settings.models_provider)
-                                    {
-                                        settings.models_available_models = models
-                                            .into_iter()
-                                            .map(
-                                                |(
-                                                    id,
-                                                    input_price,
-                                                    output_price,
-                                                    context_window,
-                                                )| {
-                                                    crate::ui::settings_tab::ModelInfo {
-                                                        id,
-                                                        input_price,
-                                                        output_price,
-                                                        context_window,
-                                                    }
-                                                },
-                                            )
-                                            .collect();
-                                    }
-                                    if settings.models_available_models.is_empty() {
-                                        models_provider_to_refresh =
-                                            Some(settings.models_provider.clone());
-                                    }
-                                } else {
-                                    settings.activate_models_focus();
-                                }
-                            }
-                            crate::ui::settings_tab::SettingsTab::Local => {
-                                provider_action = settings.activate_focus();
-                            }
-                            crate::ui::settings_tab::SettingsTab::Mcp => {
-                                provider_action = settings.activate_focus();
-                            }
-                            _ => {}
-                        }
-                    }
-                    if let Some(theme) = theme_to_apply {
-                        let _ = self.apply_theme_selection(&theme);
-                    }
-                    if let Some(provider) = models_provider_to_refresh {
-                        self.refresh_models_for_provider(provider);
-                    }
-                    self.apply_settings_provider_action(provider_action);
-                    None
-                }
-                KeyCode::Char(c)
-                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-                {
-                    if let Some(settings) = &mut self.ui.settings_popup {
-                        settings.type_char(c);
-                    }
-                    None
-                }
-                KeyCode::Backspace => {
-                    if let Some(settings) = &mut self.ui.settings_popup {
-                        settings.backspace();
-                    }
-                    None
-                }
-                _ => None,
-            }
         } else {
             match key.code {
                 KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
@@ -470,6 +470,12 @@ impl TuiApp {
                     Some(Action::ToggleSidebar)
                 }
                 KeyCode::Char(']') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(Action::ToggleArtifactSidebar)
+                }
+                KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(Action::ToggleSidebar)
+                }
+                KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     Some(Action::ToggleArtifactSidebar)
                 }
                 KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -494,6 +500,9 @@ impl TuiApp {
                 }
                 KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     Some(Action::ToggleSettings)
+                }
+                KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(Action::OpenCommandPalette)
                 }
                 KeyCode::Up if key.modifiers == KeyModifiers::ALT => {
                     self.scroll_active_chat_lines(-3);
@@ -548,19 +557,19 @@ impl TuiApp {
                     None
                 }
                 KeyCode::Enter => {
-                    if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
-                        let content = tab.input_content.clone();
-                        if !content.is_empty() {
-                            tab.input_history_index = None;
-                            tab.input_history_draft = None;
-                            tab.input_content.clear();
-                            tab.input_cursor = 0;
-                            tab.input_scroll = 0;
+                    if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        self.insert_input_newline();
+                        None
+                    } else {
+                        if let Some(content) = self.take_input_submission() {
                             let trimmed = content.trim();
                             match trimmed {
                                 "/quit" | "/exit" | "/q" => return Some(self.quit_action()),
                                 "/skills" => return Some(Action::ShowSkillsPopup),
                                 "/mcp" => return Some(Action::ShowMcpPopup),
+                                "/settings" => return Some(Action::OpenSettingsPanel),
+                                "/help" => return Some(Action::ShowHelp),
+                                "/keybinds" => return Some(Action::ShowKeybinds),
                                 "/web" => return Some(Action::ToggleWebSearch),
                                 _ => {
                                     if trimmed == "/theme" {
@@ -595,8 +604,8 @@ impl TuiApp {
                                 }
                             }
                         }
+                        None
                     }
-                    None
                 }
                 KeyCode::Char(c) => {
                     if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
@@ -619,6 +628,12 @@ impl TuiApp {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.handle_mouse_click(mouse.column, mouse.row)
+            }
+            MouseEventKind::Down(MouseButton::Right) => {
+                self.handle_key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Esc,
+                    crossterm::event::KeyModifiers::NONE,
+                ))
             }
             MouseEventKind::ScrollUp => {
                 if self.ui.editor_popup.is_some() {
@@ -678,37 +693,6 @@ impl TuiApp {
                     return;
                 }
             }
-        }
-
-        if self.ui.show_settings {
-            if let Some(settings) = &mut self.ui.settings_popup {
-                if settings.provider_popup_active() {
-                    if down {
-                        settings.popup_down();
-                    } else {
-                        settings.popup_up();
-                    }
-                    return;
-                }
-
-                if settings.general_dropdown_open.is_some() {
-                    if down {
-                        settings.general_dropdown_down();
-                    } else {
-                        settings.general_dropdown_up();
-                    }
-                    return;
-                }
-
-                if settings.providers_dropdown_open.is_some() {
-                    if down {
-                        settings.providers_dropdown_down();
-                    } else {
-                        settings.providers_dropdown_up();
-                    }
-                }
-            }
-            return;
         }
 
         if let Some(section) = self.ui.artifact_sidebar_state.section_at(pos) {
@@ -901,19 +885,15 @@ impl TuiApp {
             if let Some(chat_area) = self.ui.chat_area {
                 let popup_area = crate::ui::modals::artifact_viewer::popup_area(chat_area);
                 if popup_area.contains(pos) {
-                    let (close, edit, delete, handle) = self
-                        .ui
-                        .artifact_viewer
-                        .as_ref()
-                        .map(|viewer| {
+                    let (close, edit, delete, handle) =
+                        self.ui.artifact_viewer.as_ref().map(|viewer| {
                             (
                                 viewer.hit_areas.close,
                                 viewer.hit_areas.edit,
                                 viewer.hit_areas.delete,
                                 viewer.handle().clone(),
                             )
-                        })
-                        .expect("viewer checked above");
+                        })?;
                     if close.is_some_and(|area| area.contains(pos)) {
                         self.ui.artifact_viewer = None;
                         return None;
@@ -966,6 +946,61 @@ impl TuiApp {
             return None;
         }
 
+        if self.ui.show_keybinds {
+            return Some(Action::DismissKeybinds);
+        }
+
+        if self.ui.palette.is_some()
+            && !crate::tui::components::centered_rect(70, 60, area).contains(pos)
+        {
+            self.ui.palette = None;
+            return None;
+        }
+
+        if self.ui.settings_v2.is_some()
+            && !crate::tui::components::centered_rect(70, 60, area).contains(pos)
+        {
+            self.ui.settings_v2 = None;
+            return None;
+        }
+
+        if let Some((_, mouse_action)) = self
+            .ui
+            .mouse_hit_areas
+            .iter()
+            .rev()
+            .find(|(hit_area, _)| hit_area.contains(pos))
+            .copied()
+        {
+            match mouse_action {
+                crate::ui::MouseAction::PaletteItem(index) => {
+                    if let Some(palette) = self.ui.palette.as_mut() {
+                        palette.select(index);
+                        let action = palette.selected_action();
+                        self.ui.palette = None;
+                        return action;
+                    }
+                }
+                crate::ui::MouseAction::LeftHandle => {
+                    return Some(Action::MouseClick(MouseClickAction::ToggleLeftHandle));
+                }
+                crate::ui::MouseAction::RightHandle => {
+                    return Some(Action::MouseClick(MouseClickAction::ToggleRightHandle));
+                }
+                crate::ui::MouseAction::ProviderDropdown => {
+                    return Some(Action::MouseClick(MouseClickAction::OpenProviderDropdown));
+                }
+                crate::ui::MouseAction::ModelDropdown => {
+                    return Some(Action::MouseClick(MouseClickAction::OpenModelDropdown));
+                }
+                crate::ui::MouseAction::SettingsItem(index) => {
+                    return Some(Action::MouseClick(MouseClickAction::SelectSettingsItem(
+                        index,
+                    )));
+                }
+            }
+        }
+
         // Check modal first (takes priority)
         if self.ui.active_modal.is_some() {
             if let Some(modal_areas) = self.ui.modal_areas {
@@ -980,522 +1015,6 @@ impl TuiApp {
             }
             self.ui.active_modal = None;
             return Some(Action::CancelModal);
-        }
-
-        // Check settings popup
-        if self.ui.show_settings {
-            // Check if click is inside settings popup
-            let popup_area = crate::ui::settings_tab::SettingsPopup::popup_area(area);
-            if popup_area.contains(pos) {
-                if self
-                    .ui
-                    .settings_popup
-                    .as_ref()
-                    .map(|settings| settings.provider_popup_active())
-                    .unwrap_or(false)
-                {
-                    let action = if let Some(settings) = &mut self.ui.settings_popup {
-                        settings.handle_provider_popup_click(pos)
-                    } else {
-                        crate::ui::settings_tab::ProvidersAction::None
-                    };
-                    self.apply_settings_provider_action(action);
-                    return None;
-                }
-
-                // Check settings tabs
-                if let Some(areas) = &self.ui.settings_tab_areas {
-                    for (i, tab_area) in areas.iter().enumerate() {
-                        if tab_area.contains(pos) {
-                            if let Some(settings) = &mut self.ui.settings_popup {
-                                settings.active_tab = match i {
-                                    0 => crate::ui::settings_tab::SettingsTab::General,
-                                    1 => crate::ui::settings_tab::SettingsTab::Keybindings,
-                                    2 => crate::ui::settings_tab::SettingsTab::Providers,
-                                    3 => crate::ui::settings_tab::SettingsTab::Models,
-                                    4 => crate::ui::settings_tab::SettingsTab::Local,
-                                    5 => crate::ui::settings_tab::SettingsTab::Mcp,
-                                    _ => crate::ui::settings_tab::SettingsTab::General,
-                                };
-                            }
-                            return None;
-                        }
-                    }
-                }
-                let mut models_provider_to_refresh = None;
-                let mut models_dropdown_handled = false;
-                let mut models_dropdown_closed = false;
-                if let Some(ref mut settings) = self.ui.settings_popup {
-                    if settings.provider_popup_active() {
-                        let action = settings.handle_provider_popup_click(pos);
-                        self.apply_settings_provider_action(action);
-                        return None;
-                    }
-                    if settings.active_tab == crate::ui::settings_tab::SettingsTab::General {
-                        let mut theme_to_apply = None;
-                        if let Some(dropdown) = settings.general_dropdown_open {
-                            for (i, item_area) in
-                                settings.general_hit_areas.dropdown_items.iter().enumerate()
-                            {
-                                if item_area.contains(pos) {
-                                    let changed_theme = settings.select_general_dropdown_item(i);
-                                    if changed_theme {
-                                        theme_to_apply = Some(settings.theme.clone());
-                                    }
-                                    if dropdown
-                                        == crate::ui::settings_tab::GeneralDropdown::UserAlignment
-                                    {
-                                        if let Ok(models) =
-                                            self.storage.get_models(&settings.default_provider)
-                                        {
-                                            settings.available_models = models
-                                                .into_iter()
-                                                .map(|(id, input_price, output_price, context_window)| {
-                                                    crate::ui::settings_tab::ModelInfo {
-                                                        id,
-                                                        input_price,
-                                                        output_price,
-                                                        context_window,
-                                                    }
-                                                })
-                                                .collect();
-                                        }
-                                    }
-                                    if let Some(theme) = theme_to_apply {
-                                        let _ = self.apply_theme_selection(&theme);
-                                    }
-                                    return None;
-                                }
-                            }
-                            settings.close_general_dropdown();
-                            return None;
-                        }
-                        if let Some(area) = settings.general_hit_areas.user_alignment {
-                            if area.contains(pos) {
-                                settings.toggle_general_dropdown(
-                                    crate::ui::settings_tab::GeneralDropdown::UserAlignment,
-                                );
-                                settings.general_focus =
-                                    crate::ui::settings_tab::GeneralFocus::UserAlignment;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.general_hit_areas.theme {
-                            if area.contains(pos) {
-                                settings.toggle_general_dropdown(
-                                    crate::ui::settings_tab::GeneralDropdown::Theme,
-                                );
-                                settings.general_focus =
-                                    crate::ui::settings_tab::GeneralFocus::Theme;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.general_hit_areas.ai_alignment {
-                            if area.contains(pos) {
-                                settings.toggle_general_dropdown(
-                                    crate::ui::settings_tab::GeneralDropdown::AiAlignment,
-                                );
-                                settings.general_focus =
-                                    crate::ui::settings_tab::GeneralFocus::AiAlignment;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.general_hit_areas.artifact_save_dir {
-                            if area.contains(pos) {
-                                settings.general_focus =
-                                    crate::ui::settings_tab::GeneralFocus::ArtifactSaveDir;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.general_hit_areas.vault_path {
-                            if area.contains(pos) {
-                                settings.general_focus =
-                                    crate::ui::settings_tab::GeneralFocus::VaultPath;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.general_hit_areas.show_selector {
-                            if area.contains(pos) {
-                                settings.show_selector = !settings.show_selector;
-                                settings.general_focus =
-                                    crate::ui::settings_tab::GeneralFocus::ShowSelector;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.general_hit_areas.show_chat_scrollbar {
-                            if area.contains(pos) {
-                                settings.show_chat_scrollbar = !settings.show_chat_scrollbar;
-                                settings.general_focus =
-                                    crate::ui::settings_tab::GeneralFocus::ShowChatScrollbar;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.general_hit_areas.collapse_thinking {
-                            if area.contains(pos) {
-                                settings.collapse_thinking = !settings.collapse_thinking;
-                                settings.general_focus =
-                                    crate::ui::settings_tab::GeneralFocus::CollapseThinking;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.general_hit_areas.kitty_enhanced_text {
-                            if area.contains(pos) {
-                                settings.kitty_enhanced_text = !settings.kitty_enhanced_text;
-                                settings.general_focus =
-                                    crate::ui::settings_tab::GeneralFocus::KittyEnhancedText;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.general_hit_areas.kitty_text_scale {
-                            if area.contains(pos) {
-                                settings.toggle_general_dropdown(
-                                    crate::ui::settings_tab::GeneralDropdown::KittyTextScale,
-                                );
-                                settings.general_focus =
-                                    crate::ui::settings_tab::GeneralFocus::KittyTextScale;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.general_hit_areas.web_search_enabled {
-                            if area.contains(pos) {
-                                settings.web_search_enabled = !settings.web_search_enabled;
-                                settings.general_focus =
-                                    crate::ui::settings_tab::GeneralFocus::WebSearchEnabled;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.general_hit_areas.quit_confirmation {
-                            if area.contains(pos) {
-                                settings.quit_confirmation = !settings.quit_confirmation;
-                                settings.general_focus =
-                                    crate::ui::settings_tab::GeneralFocus::QuitConfirmation;
-                                return None;
-                            }
-                        }
-                    } else if settings.active_tab == crate::ui::settings_tab::SettingsTab::Local {
-                        if let Some(area) = settings.local_hit_areas.enabled {
-                            if area.contains(pos) {
-                                settings.local_focus = crate::ui::settings_tab::LocalFocus::Enabled;
-                                settings.local_enabled = !settings.local_enabled;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.local_hit_areas.host {
-                            if area.contains(pos) {
-                                settings.local_focus = crate::ui::settings_tab::LocalFocus::Host;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.local_hit_areas.port {
-                            if area.contains(pos) {
-                                settings.local_focus = crate::ui::settings_tab::LocalFocus::Port;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.local_hit_areas.server_type {
-                            if area.contains(pos) {
-                                settings.local_focus =
-                                    crate::ui::settings_tab::LocalFocus::ServerType;
-                                let _ = settings.activate_focus();
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.local_hit_areas.selected_model {
-                            if area.contains(pos) {
-                                settings.local_focus =
-                                    crate::ui::settings_tab::LocalFocus::SelectedModel;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.local_hit_areas.model_directory {
-                            if area.contains(pos) {
-                                settings.local_focus =
-                                    crate::ui::settings_tab::LocalFocus::ModelDirectory;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.local_hit_areas.health_interval {
-                            if area.contains(pos) {
-                                settings.local_focus =
-                                    crate::ui::settings_tab::LocalFocus::HealthInterval;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.local_hit_areas.connect_timeout {
-                            if area.contains(pos) {
-                                settings.local_focus =
-                                    crate::ui::settings_tab::LocalFocus::ConnectTimeout;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.local_hit_areas.request_timeout {
-                            if area.contains(pos) {
-                                settings.local_focus =
-                                    crate::ui::settings_tab::LocalFocus::RequestTimeout;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.local_hit_areas.api_token_env {
-                            if area.contains(pos) {
-                                settings.local_focus =
-                                    crate::ui::settings_tab::LocalFocus::ApiTokenEnv;
-                                return None;
-                            }
-                        }
-                    } else if settings.active_tab == crate::ui::settings_tab::SettingsTab::Mcp {
-                        for (idx, area) in &settings.mcp_hit_areas.rows {
-                            if area.contains(pos) {
-                                settings.mcp_focus = *idx;
-                                let _ = settings.activate_focus();
-                                return None;
-                            }
-                        }
-                    } else if settings.active_tab == crate::ui::settings_tab::SettingsTab::Models {
-                        if settings.models_dropdown_open {
-                            let mut provider_to_refresh = None;
-                            let mut handled = false;
-                            for (i, area) in settings
-                                .models_tab_hit_areas
-                                .provider_items
-                                .iter()
-                                .enumerate()
-                            {
-                                if area.contains(pos) {
-                                    settings.select_models_provider_dropdown_item(i);
-                                    if let Ok(models) =
-                                        self.storage.get_models(&settings.models_provider)
-                                    {
-                                        settings.models_available_models = models
-                                            .into_iter()
-                                            .map(
-                                                |(
-                                                    id,
-                                                    input_price,
-                                                    output_price,
-                                                    context_window,
-                                                )| {
-                                                    crate::ui::settings_tab::ModelInfo {
-                                                        id,
-                                                        input_price,
-                                                        output_price,
-                                                        context_window,
-                                                    }
-                                                },
-                                            )
-                                            .collect();
-                                    }
-                                    if settings.models_available_models.is_empty() {
-                                        provider_to_refresh =
-                                            Some(settings.models_provider.clone());
-                                    }
-                                    handled = true;
-                                    break;
-                                }
-                            }
-                            models_provider_to_refresh = provider_to_refresh;
-                            if handled {
-                                models_dropdown_handled = true;
-                            } else {
-                                settings.models_dropdown_open = false;
-                                models_dropdown_closed = true;
-                            }
-                        }
-                        if let Some(area) = settings.models_tab_hit_areas.provider {
-                            if area.contains(pos) {
-                                settings.models_tab_focus =
-                                    crate::ui::settings_tab::ModelsTabFocus::Provider;
-                                settings.toggle_models_dropdown();
-                                return None;
-                            }
-                        }
-                        for (idx, row_area) in
-                            settings.models_tab_hit_areas.model_rows.iter().enumerate()
-                        {
-                            if row_area.contains(pos) {
-                                settings.models_tab_focus =
-                                    crate::ui::settings_tab::ModelsTabFocus::Model(idx);
-                                settings.activate_models_focus();
-                                return None;
-                            }
-                        }
-                    }
-                }
-                if let Some(provider) = models_provider_to_refresh {
-                    self.refresh_models_for_provider(provider);
-                }
-                if models_dropdown_handled || models_dropdown_closed {
-                    return None;
-                }
-
-                let mut provider_action = crate::ui::settings_tab::ProvidersAction::None;
-                let mut refresh_after_settings_selection = None;
-                if let Some(ref mut settings) = self.ui.settings_popup {
-                    if settings.active_tab == crate::ui::settings_tab::SettingsTab::Providers {
-                        if let Some(_popup) = settings.preset_key_popup.as_mut() {
-                            provider_action = settings.handle_providers_click(pos);
-                        } else if let Some(dropdown) = settings.providers_dropdown_open {
-                            let item_areas = match dropdown {
-                                crate::ui::settings_tab::ProvidersDropdown::DefaultProvider
-                                | crate::ui::settings_tab::ProvidersDropdown::SmallProvider => {
-                                    &settings.providers_tab_hit_areas.default_provider_items
-                                }
-                                crate::ui::settings_tab::ProvidersDropdown::DefaultModel
-                                | crate::ui::settings_tab::ProvidersDropdown::SmallModel => {
-                                    &settings.providers_tab_hit_areas.default_model_items
-                                }
-                            };
-                            let mut handled = false;
-                            for (i, area) in item_areas.iter().enumerate() {
-                                if area.contains(pos) {
-                                    settings.select_providers_dropdown_item(i);
-                                    handled = true;
-                                    break;
-                                }
-                            }
-                            if handled {
-                                if dropdown
-                                    == crate::ui::settings_tab::ProvidersDropdown::DefaultProvider
-                                {
-                                    if let Ok(models) =
-                                        self.storage.get_models(&settings.default_provider)
-                                    {
-                                        settings.available_models = models
-                                            .into_iter()
-                                            .map(
-                                                |(
-                                                    id,
-                                                    input_price,
-                                                    output_price,
-                                                    context_window,
-                                                )| {
-                                                    crate::ui::settings_tab::ModelInfo {
-                                                        id,
-                                                        input_price,
-                                                        output_price,
-                                                        context_window,
-                                                    }
-                                                },
-                                            )
-                                            .collect();
-                                    }
-                                    if settings.available_models.is_empty() {
-                                        refresh_after_settings_selection =
-                                            Some(settings.default_provider.clone());
-                                    }
-                                }
-                                if let Some(provider) = refresh_after_settings_selection {
-                                    self.refresh_models_for_provider(provider);
-                                }
-                                return None;
-                            } else {
-                                settings.providers_dropdown_open = None;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.providers_tab_hit_areas.default_provider {
-                            if area.contains(pos) {
-                                settings.toggle_providers_dropdown(
-                                    crate::ui::settings_tab::ProvidersDropdown::DefaultProvider,
-                                );
-                                settings.providers_tab_focus =
-                                    crate::ui::settings_tab::ProvidersTabFocus::DefaultProvider;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.providers_tab_hit_areas.default_model {
-                            if area.contains(pos) {
-                                settings.toggle_providers_dropdown(
-                                    crate::ui::settings_tab::ProvidersDropdown::DefaultModel,
-                                );
-                                settings.providers_tab_focus =
-                                    crate::ui::settings_tab::ProvidersTabFocus::DefaultModel;
-                                return None;
-                            }
-                        }
-                        if let Some(area) = settings.providers_tab_hit_areas.reload_models_button {
-                            if area.contains(pos) {
-                                settings.providers_tab_focus =
-                                    crate::ui::settings_tab::ProvidersTabFocus::ReloadModelsButton;
-                                provider_action = settings.activate_focus();
-                            }
-                        }
-                        if let Some(area) = settings.providers_tab_hit_areas.grab_env_button {
-                            if area.contains(pos) {
-                                settings.providers_tab_focus =
-                                    crate::ui::settings_tab::ProvidersTabFocus::UseEnvToggle;
-                                provider_action = settings.activate_focus();
-                            }
-                        }
-                        if let Some(area) = settings.providers_tab_hit_areas.add_button {
-                            if area.contains(pos) {
-                                settings.providers_tab_focus =
-                                    crate::ui::settings_tab::ProvidersTabFocus::AddProviderButton;
-                                provider_action = settings.activate_focus();
-                            }
-                        }
-                        if let Some(area) = settings.providers_tab_hit_areas.edit_button {
-                            if area.contains(pos) {
-                                settings.providers_tab_focus =
-                                    crate::ui::settings_tab::ProvidersTabFocus::EditProvidersButton;
-                                provider_action = settings.activate_focus();
-                            }
-                        }
-                        for (idx, row_area) in settings
-                            .providers_tab_hit_areas
-                            .saved_key_rows
-                            .iter()
-                            .enumerate()
-                        {
-                            if row_area.contains(pos) {
-                                settings.providers_tab_focus =
-                                    crate::ui::settings_tab::ProvidersTabFocus::SavedKeyList(idx);
-                                let _ = settings.activate_focus();
-                                return None;
-                            }
-                        }
-                        for (idx, row_area) in settings
-                            .providers_tab_hit_areas
-                            .oauth_rows
-                            .iter()
-                            .enumerate()
-                        {
-                            if row_area.contains(pos) {
-                                settings.providers_tab_focus =
-                                    crate::ui::settings_tab::ProvidersTabFocus::OAuthProvider(idx);
-                                let _ = settings.activate_focus();
-                                return None;
-                            }
-                        }
-                        let mut preset_clicked = None;
-                        for (idx, row_area) in settings
-                            .providers_tab_hit_areas
-                            .preset_rows
-                            .iter()
-                            .enumerate()
-                        {
-                            if row_area.contains(pos) {
-                                preset_clicked = Some(idx);
-                                break;
-                            }
-                        }
-                        if let Some(idx) = preset_clicked {
-                            settings.providers_tab_focus =
-                                crate::ui::settings_tab::ProvidersTabFocus::PresetProvider(idx);
-                            provider_action = settings.activate_focus();
-                        }
-                    }
-                    if settings.active_tab == crate::ui::settings_tab::SettingsTab::Models
-                        && settings.models_dropdown_open
-                    {
-                        return None;
-                    }
-                }
-                self.apply_settings_provider_action(provider_action.clone());
-                return None;
-            } else {
-                // Click outside popup - close it
-                return Some(Action::CloseSettings);
-            }
         }
 
         let mut clicked_link = None;
@@ -1520,28 +1039,38 @@ impl TuiApp {
         }
 
         if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
-            if let Some(scrollbar) = tab.chat_scrollbar_area {
-                if scrollbar.contains(pos) {
-                    let max_scroll = tab
-                        .total_rendered_lines
-                        .saturating_sub(tab.message_viewport_height);
-                    if max_scroll > 0 && scrollbar.height > 0 {
-                        let relative = pos.y.saturating_sub(scrollbar.y) as usize;
-                        tab.scroll_offset =
-                            ((relative * max_scroll) / scrollbar.height as usize).min(max_scroll);
-                        tab.scroll_to_message = None;
+            // When a dropdown is open, skip scrollbar/input checks so clicks on
+            // overlapping dropdown items reach the dropdown handler below instead
+            // of being swallowed by the input-area handler.
+            let dropdown_open = tab.provider_dropdown_open
+                || tab.model_dropdown_open
+                || tab.reasoning_dropdown_open;
+            if !dropdown_open {
+                if let Some(scrollbar) = tab.chat_scrollbar_area {
+                    if scrollbar.contains(pos) {
+                        let max_scroll = tab
+                            .total_rendered_lines
+                            .saturating_sub(tab.message_viewport_height);
+                        if max_scroll > 0 && scrollbar.height > 0 {
+                            let relative = pos.y.saturating_sub(scrollbar.y) as usize;
+                            tab.scroll_offset = ((relative * max_scroll)
+                                / scrollbar.height as usize)
+                                .min(max_scroll);
+                            tab.scroll_to_message = None;
+                        }
+                        return None;
                     }
+                }
+                if tab.input_area.is_some_and(|area| area.contains(pos)) {
+                    self.set_input_cursor_from_click(pos);
                     return None;
                 }
-            }
-            if tab.input_area.is_some_and(|area| area.contains(pos)) {
-                self.set_input_cursor_from_click(pos);
-                return None;
             }
         }
 
         if self.ui.show_selector {
             let mut selected_provider = None;
+            let mut selected_model = None;
             let mut handled_selector = false;
             let mut refresh_models_and_reasoning = false;
 
@@ -1567,8 +1096,10 @@ impl TuiApp {
                                 tab.provider_dropdown_open = false;
                             } else if tab.model_dropdown_open {
                                 if real_idx < self.ui.current_models.len() {
-                                    tab.tab.model = self.ui.current_models[real_idx].id.clone();
+                                    let model = self.ui.current_models[real_idx].id.clone();
+                                    tab.tab.model = model.clone();
                                     tab.tab.reasoning_effort = None;
+                                    selected_model = Some(model);
                                 }
                                 tab.model_dropdown_open = false;
                                 refresh_models_and_reasoning = true;
@@ -1626,7 +1157,7 @@ impl TuiApp {
                 let models = self.visible_models_for_provider(&provider);
                 self.ui.current_models = models.clone();
                 if models.is_empty() {
-                    self.refresh_models_for_provider(provider);
+                    self.refresh_models_for_provider(provider.clone());
                 } else if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
                     if tab.tab.model.is_empty() {
                         if let Some(first) = self.ui.current_models.first() {
@@ -1636,6 +1167,11 @@ impl TuiApp {
                 }
                 self.refresh_visible_selectors();
                 self.queue_connection_check_for_active_tab();
+                self.ui.show_toast(format!("Switched to {provider}"));
+            }
+
+            if let Some(model) = selected_model {
+                self.ui.show_toast(format!("Model: {model}"));
             }
 
             if handled_selector {
