@@ -3,7 +3,14 @@ use std::collections::HashSet;
 use super::{Action, TuiApp};
 use crate::config::AppConfig;
 
-pub(crate) type ModelRow = (String, Option<f64>, Option<f64>, Option<u32>);
+pub(crate) type ModelRow = (
+    String,
+    Option<f64>,
+    Option<f64>,
+    Option<u32>,
+    Option<String>,
+    Vec<String>,
+);
 
 impl TuiApp {
     pub(crate) fn provider_entries_with_local(
@@ -46,12 +53,18 @@ impl TuiApp {
         models
     }
 
-    pub(crate) fn reasoning_options_for(provider: &str, model: &str) -> Vec<String> {
+    pub(crate) fn reasoning_options_for(
+        provider: &str,
+        model: &crate::ui::ModelInfo,
+    ) -> Vec<String> {
         let provider = crate::llm::auth::canonical_provider_name(provider);
-        if model.starts_with("gpt-5")
+        if provider == "Codex" {
+            return model.supported_reasoning_efforts.clone();
+        }
+        if model.id.starts_with("gpt-5")
             && matches!(
                 provider.as_str(),
-                "Codex" | "OpenAI" | "OpenRouter" | "Groq" | "Mistral"
+                "OpenAI" | "OpenRouter" | "Groq" | "Mistral"
             )
         {
             return ["none", "low", "medium", "high", "xhigh"]
@@ -67,11 +80,20 @@ impl TuiApp {
             Ok(models) => models
                 .into_iter()
                 .map(
-                    |(id, input_price, output_price, context_window)| crate::ui::ModelInfo {
+                    |(
                         id,
                         input_price,
                         output_price,
                         context_window,
+                        default_reasoning_effort,
+                        supported_reasoning_efforts,
+                    )| crate::ui::ModelInfo {
+                        id,
+                        input_price,
+                        output_price,
+                        context_window,
+                        default_reasoning_effort,
+                        supported_reasoning_efforts,
                     },
                 )
                 .collect::<Vec<_>>(),
@@ -108,6 +130,8 @@ impl TuiApp {
                             model.input_price,
                             model.output_price,
                             model.context_window,
+                            model.default_reasoning_effort.clone(),
+                            model.supported_reasoning_efforts.clone(),
                         )
                     })
                     .collect();
@@ -153,11 +177,20 @@ impl TuiApp {
             let model_infos = models
                 .into_iter()
                 .map(
-                    |(id, input_price, output_price, context_window)| crate::ui::ModelInfo {
+                    |(
                         id,
                         input_price,
                         output_price,
                         context_window,
+                        default_reasoning_effort,
+                        supported_reasoning_efforts,
+                    )| crate::ui::ModelInfo {
+                        id,
+                        input_price,
+                        output_price,
+                        context_window,
+                        default_reasoning_effort,
+                        supported_reasoning_efforts,
                     },
                 )
                 .collect();
@@ -171,6 +204,17 @@ mod tests {
     use super::*;
     use crate::config::AppConfig;
 
+    fn model_info(id: &str) -> crate::ui::ModelInfo {
+        crate::ui::ModelInfo {
+            id: id.to_string(),
+            input_price: None,
+            output_price: None,
+            context_window: None,
+            default_reasoning_effort: None,
+            supported_reasoning_efforts: Vec::new(),
+        }
+    }
+
     #[test]
     fn provider_entries_with_local_includes_local_when_enabled() {
         let mut config = AppConfig::default();
@@ -181,9 +225,11 @@ mod tests {
 
         let entries = TuiApp::provider_entries_with_local(&config, None);
 
-        assert!(entries
-            .iter()
-            .any(|(name, _, _, _, _)| name == crate::config::LOCAL_PROVIDER_NAME));
+        assert!(
+            entries
+                .iter()
+                .any(|(name, _, _, _, _)| name == crate::config::LOCAL_PROVIDER_NAME)
+        );
     }
 
     #[test]
@@ -193,9 +239,11 @@ mod tests {
 
         let entries = TuiApp::provider_entries_with_local(&config, None);
 
-        assert!(!entries
-            .iter()
-            .any(|(name, _, _, _, _)| name == crate::config::LOCAL_PROVIDER_NAME));
+        assert!(
+            !entries
+                .iter()
+                .any(|(name, _, _, _, _)| name == crate::config::LOCAL_PROVIDER_NAME)
+        );
     }
 
     #[test]
@@ -235,13 +283,35 @@ mod tests {
 
     #[test]
     fn reasoning_options_for_gpt5_models() {
-        let options = TuiApp::reasoning_options_for("OpenAI", "gpt-5-chess");
+        let model = model_info("gpt-5-chess");
+        let options = TuiApp::reasoning_options_for("OpenAI", &model);
         assert_eq!(options, vec!["none", "low", "medium", "high", "xhigh"]);
     }
 
     #[test]
     fn reasoning_options_empty_for_non_gpt5() {
-        let options = TuiApp::reasoning_options_for("OpenAI", "gpt-4o");
+        let model = model_info("gpt-4o");
+        let options = TuiApp::reasoning_options_for("OpenAI", &model);
         assert!(options.is_empty());
+    }
+
+    #[test]
+    fn codex_reasoning_options_follow_selected_model_metadata() {
+        let model = crate::ui::ModelInfo {
+            id: "gpt-5.6-sol".to_string(),
+            input_price: None,
+            output_price: None,
+            context_window: Some(272_000),
+            default_reasoning_effort: Some("medium".to_string()),
+            supported_reasoning_efforts: vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+            ],
+        };
+
+        let options = TuiApp::reasoning_options_for("Codex", &model);
+
+        assert_eq!(options, vec!["low", "medium", "high"]);
     }
 }

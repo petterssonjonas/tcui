@@ -42,6 +42,8 @@ pub enum Action {
     ShowQuitConfirm,
     ShowHelp,
     DismissHelp,
+    ShowKeybinds,
+    DismissKeybinds,
     ShowSettings,
     CloseSettings,
     ToggleSettings,

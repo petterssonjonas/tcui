@@ -2,7 +2,7 @@ use color_eyre::eyre::eyre;
 use serde::Deserialize;
 
 use crate::{
-    config::{LocalInferenceConfig, LocalServerType, LOCAL_PROVIDER_NAME},
+    config::{LOCAL_PROVIDER_NAME, LocalInferenceConfig, LocalServerType},
     ui::ModelInfo,
 };
 
@@ -163,6 +163,8 @@ async fn probe_ollama(
             input_price: None,
             output_price: None,
             context_window: None,
+            default_reasoning_effort: None,
+            supported_reasoning_efforts: Vec::new(),
         })
         .collect::<Vec<_>>();
     let selected_model = resolve_selected_model(&config.selected_model, &models);
@@ -218,6 +220,8 @@ async fn probe_lmstudio(
                 input_price: None,
                 output_price: None,
                 context_window: None,
+                default_reasoning_effort: None,
+                supported_reasoning_efforts: Vec::new(),
             }
         })
         .collect::<Vec<_>>();
@@ -303,6 +307,8 @@ async fn fetch_openai_models(
             input_price: None,
             output_price: None,
             context_window: None,
+            default_reasoning_effort: None,
+            supported_reasoning_efforts: Vec::new(),
         })
         .collect())
 }

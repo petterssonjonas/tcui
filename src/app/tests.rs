@@ -14,7 +14,7 @@ fn unique_temp_dir(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("tcui-{label}-{}-{nanos}", std::process::id()))
 }
 
-fn with_test_app(label: &str, test: impl FnOnce(&mut TuiApp)) {
+pub(super) fn with_test_app(label: &str, test: impl FnOnce(&mut TuiApp)) {
     with_test_app_config(label, AppConfig::default(), test);
 }
 
@@ -167,10 +167,12 @@ fn skills_popup_labels_description_and_origin_but_inserts_only_name() {
                 "@save ".to_string()
             ))
         );
-        assert!(popup
-            .items
-            .iter()
-            .any(|item| item.label.starts_with("@research ")));
+        assert!(
+            popup
+                .items
+                .iter()
+                .any(|item| item.label.starts_with("@research "))
+        );
     });
 }
 
@@ -245,10 +247,12 @@ fn inline_at_completion_discovers_research_skill() {
 
         // Then
         let popup = app.ui.list_popup.as_ref().expect("skill completion popup");
-        assert!(popup
-            .items
-            .iter()
-            .any(|item| item.label.contains("@research")));
+        assert!(
+            popup
+                .items
+                .iter()
+                .any(|item| item.label.contains("@research"))
+        );
     });
 }
 
@@ -409,6 +413,30 @@ default_model = "deepseek-v4-flash"
 }
 
 #[test]
+fn startup_uses_migrated_codex_provider_from_storage() {
+    let mut config = AppConfig::default();
+    let codex = config
+        .providers
+        .iter_mut()
+        .find(|provider| provider.name == "Codex")
+        .expect("Codex provider");
+    codex.endpoint = "https://api.openai.com/v1".to_owned();
+    codex.backend_type = "openai".to_owned();
+
+    with_test_app_config("startup-codex-provider-migration", config, |app| {
+        let codex = app
+            .ui
+            .db_providers
+            .iter()
+            .find(|(name, _, _, _, _)| name == "Codex")
+            .expect("Codex provider");
+
+        assert_eq!(codex.1, "https://chatgpt.com/backend-api/codex");
+        assert_eq!(codex.3, "codex");
+    });
+}
+
+#[test]
 fn startup_adds_local_inference_provider_when_enabled() {
     let _guard = env_lock().lock().expect("env lock poisoned");
     let root = unique_temp_dir("startup-local");
@@ -447,11 +475,12 @@ selected_model = "llama3.1"
         None,
     );
 
-    assert!(app
-        .ui
-        .db_providers
-        .iter()
-        .any(|(name, _, _, _, _)| name == crate::config::LOCAL_PROVIDER_NAME));
+    assert!(
+        app.ui
+            .db_providers
+            .iter()
+            .any(|(name, _, _, _, _)| name == crate::config::LOCAL_PROVIDER_NAME)
+    );
     assert_eq!(
         app.ui.tabs[0].tab.provider,
         crate::config::LOCAL_PROVIDER_NAME
@@ -525,10 +554,12 @@ fn typing_slash_opens_command_popup() {
         let popup = app.ui.list_popup.as_ref().expect("command popup");
         assert_eq!(popup.title, "Commands");
         assert!(popup.items.iter().any(|item| item.label.contains("/theme")));
-        assert!(popup
-            .items
-            .iter()
-            .any(|item| item.label.contains("/remindme")));
+        assert!(
+            popup
+                .items
+                .iter()
+                .any(|item| item.label.contains("/remindme"))
+        );
     });
 }
 
@@ -677,10 +708,12 @@ fn inline_at_completion_discovers_memory_skills() {
         // Then
         let popup = app.ui.list_popup.as_ref().expect("skill completion popup");
         assert_eq!(popup.title, "Skills");
-        assert!(popup
-            .items
-            .iter()
-            .any(|item| item.label.contains("@remember")));
+        assert!(
+            popup
+                .items
+                .iter()
+                .any(|item| item.label.contains("@remember"))
+        );
     });
 }
 
@@ -707,13 +740,89 @@ fn theme_command_persists_selection() {
 }
 
 #[test]
+fn update_check_without_tokio_runtime_does_not_panic_or_queue_a_toast() {
+    with_test_app("update-check-no-runtime", |app| {
+        // Given
+        assert!(tokio::runtime::Handle::try_current().is_err());
+
+        // When
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            app.queue_update_check();
+        }));
+
+        // Then
+        assert!(result.is_ok());
+        assert!(matches!(
+            app.action_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    });
+}
+
+#[test]
+fn connection_check_without_tokio_runtime_does_not_panic_or_queue_a_probe() {
+    with_test_app("connection-check-no-runtime", |app| {
+        // Given
+        assert!(tokio::runtime::Handle::try_current().is_err());
+
+        // When
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            app.queue_connection_check_for_active_tab();
+        }));
+
+        // Then
+        assert!(result.is_ok());
+        assert!(matches!(
+            app.action_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    });
+}
+
+#[test]
+fn send_message_without_tokio_runtime_returns_error_without_persisting_or_queueing() {
+    with_test_app("send-message-no-runtime", |app| {
+        // Given
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let conversation_id = app.ui.tabs[0].active_conversation;
+        assert!(
+            app.storage
+                .get_messages(conversation_id)
+                .expect("read initial messages")
+                .is_empty()
+        );
+
+        // When
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            app.send_message("Hello from test".to_string())
+        }));
+
+        // Then
+        assert!(matches!(result, Ok(Err(_))));
+        assert!(
+            app.storage
+                .get_messages(conversation_id)
+                .expect("read messages after rejected send")
+                .is_empty()
+        );
+        assert!(app.ui.tabs[0].messages.is_empty());
+        assert!(matches!(
+            app.action_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    });
+}
+
+#[test]
 fn send_message_creates_conversation_and_saves_user_message() {
     with_test_app("send-message", |app| {
         // Given
         let initial_conversation = app.ui.tabs[0].active_conversation;
+        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
 
         // When
-        app.send_message("Hello from test".to_string())
+        runtime
+            .block_on(async { app.send_message("Hello from test".to_string()) })
             .expect("send message");
 
         // Then
@@ -740,17 +849,21 @@ fn send_message_creates_conversation_and_saves_user_message() {
 fn slash_remindme_is_handled_without_model_streaming() {
     with_test_app("slash-remindme", |app| {
         std::env::set_var("TCUI_REMINDER_SYSTEMD_RUN", "true");
+        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
 
-        app.send_message("/remindme in 10m | Stretch".to_string())
+        runtime
+            .block_on(async { app.send_message("/remindme in 10m | Stretch".to_string()) })
             .expect("schedule reminder");
 
         let tab = &app.ui.tabs[0];
         assert_eq!(tab.messages.len(), 2);
         assert_eq!(tab.messages[0].role, "user");
         assert_eq!(tab.messages[1].role, "assistant");
-        assert!(tab.messages[1]
-            .content
-            .contains("Scheduled one-shot reminder"));
+        assert!(
+            tab.messages[1]
+                .content
+                .contains("Scheduled one-shot reminder")
+        );
 
         std::env::remove_var("TCUI_REMINDER_SYSTEMD_RUN");
     });
@@ -771,16 +884,6 @@ fn apply_theme_selection_updates_popup_and_saved_config() {
         assert_eq!(live_theme, "nord");
         assert_eq!(AppConfig::load().expect("load config").theme, "nord");
     });
-}
-
-#[tokio::test]
-async fn oauth_connection_check_skips_models_probe() {
-    let mut config = AppConfig::default();
-    config.default_provider = "Codex".to_string();
-
-    let result = TuiApp::check_cloud_connection("Codex", &config, Some("token")).await;
-
-    assert!(result.is_ok());
 }
 
 #[test]
@@ -957,14 +1060,18 @@ fn deleting_inactive_conversation_keeps_active_chat_loaded() {
             .expect("delete first conversation");
 
         assert_eq!(app.ui.tabs[0].active_conversation, second);
-        assert!(app.ui.tabs[0]
-            .conversations
-            .iter()
-            .all(|conversation| conversation.id != first));
-        assert!(app.ui.tabs[0]
-            .conversations
-            .iter()
-            .any(|conversation| conversation.id == second));
+        assert!(
+            app.ui.tabs[0]
+                .conversations
+                .iter()
+                .all(|conversation| conversation.id != first)
+        );
+        assert!(
+            app.ui.tabs[0]
+                .conversations
+                .iter()
+                .any(|conversation| conversation.id == second)
+        );
     });
 }
 

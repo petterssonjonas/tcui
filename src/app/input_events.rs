@@ -11,6 +11,7 @@ impl TuiApp {
             "/mcp" => Some(Action::ShowMcpPopup),
             "/settings" => Some(Action::OpenSettingsPanel),
             "/help" => Some(Action::ShowHelp),
+            "/keybinds" => Some(Action::ShowKeybinds),
             "/web" => Some(Action::ToggleWebSearch),
             _ => None,
         }
@@ -74,9 +75,9 @@ impl TuiApp {
             return None;
         }
 
-        if self.ui.show_help {
+        if self.ui.show_keybinds {
             return match key.code {
-                KeyCode::Esc | KeyCode::Enter => Some(Action::DismissHelp),
+                KeyCode::Esc | KeyCode::Enter => Some(Action::DismissKeybinds),
                 _ => None,
             };
         }
@@ -161,7 +162,7 @@ impl TuiApp {
                         crate::tui::settings_panel::EnterResult::ToggledBool => match selected_id {
                             Some("web_search") => return Some(Action::ToggleWebSearch),
                             Some("collapse_thinking") => {
-                                return Some(Action::ToggleCollapseThinking)
+                                return Some(Action::ToggleCollapseThinking);
                             }
                             _ => {}
                         },
@@ -181,7 +182,7 @@ impl TuiApp {
                         match selected_id {
                             Some("web_search") => return Some(Action::ToggleWebSearch),
                             Some("collapse_thinking") => {
-                                return Some(Action::ToggleCollapseThinking)
+                                return Some(Action::ToggleCollapseThinking);
                             }
                             _ => {}
                         }
@@ -568,6 +569,7 @@ impl TuiApp {
                                 "/mcp" => return Some(Action::ShowMcpPopup),
                                 "/settings" => return Some(Action::OpenSettingsPanel),
                                 "/help" => return Some(Action::ShowHelp),
+                                "/keybinds" => return Some(Action::ShowKeybinds),
                                 "/web" => return Some(Action::ToggleWebSearch),
                                 _ => {
                                     if trimmed == "/theme" {
@@ -944,8 +946,8 @@ impl TuiApp {
             return None;
         }
 
-        if self.ui.show_help {
-            return Some(Action::DismissHelp);
+        if self.ui.show_keybinds {
+            return Some(Action::DismissKeybinds);
         }
 
         if self.ui.palette.is_some()
@@ -1037,23 +1039,32 @@ impl TuiApp {
         }
 
         if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
-            if let Some(scrollbar) = tab.chat_scrollbar_area {
-                if scrollbar.contains(pos) {
-                    let max_scroll = tab
-                        .total_rendered_lines
-                        .saturating_sub(tab.message_viewport_height);
-                    if max_scroll > 0 && scrollbar.height > 0 {
-                        let relative = pos.y.saturating_sub(scrollbar.y) as usize;
-                        tab.scroll_offset =
-                            ((relative * max_scroll) / scrollbar.height as usize).min(max_scroll);
-                        tab.scroll_to_message = None;
+            // When a dropdown is open, skip scrollbar/input checks so clicks on
+            // overlapping dropdown items reach the dropdown handler below instead
+            // of being swallowed by the input-area handler.
+            let dropdown_open = tab.provider_dropdown_open
+                || tab.model_dropdown_open
+                || tab.reasoning_dropdown_open;
+            if !dropdown_open {
+                if let Some(scrollbar) = tab.chat_scrollbar_area {
+                    if scrollbar.contains(pos) {
+                        let max_scroll = tab
+                            .total_rendered_lines
+                            .saturating_sub(tab.message_viewport_height);
+                        if max_scroll > 0 && scrollbar.height > 0 {
+                            let relative = pos.y.saturating_sub(scrollbar.y) as usize;
+                            tab.scroll_offset = ((relative * max_scroll)
+                                / scrollbar.height as usize)
+                                .min(max_scroll);
+                            tab.scroll_to_message = None;
+                        }
+                        return None;
                     }
+                }
+                if tab.input_area.is_some_and(|area| area.contains(pos)) {
+                    self.set_input_cursor_from_click(pos);
                     return None;
                 }
-            }
-            if tab.input_area.is_some_and(|area| area.contains(pos)) {
-                self.set_input_cursor_from_click(pos);
-                return None;
             }
         }
 

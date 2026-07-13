@@ -613,9 +613,9 @@ fn default_providers() -> Vec<ProviderConfig> {
         ),
         (
             "Codex",
-            "https://api.openai.com/v1",
+            "https://chatgpt.com/backend-api/codex",
             "CODEX_API_KEY",
-            "openai",
+            "codex",
             "oauth",
         ),
     ]
@@ -732,6 +732,16 @@ kitty_text_max_scale = 1
         assert_eq!(openai.2, "OPENAI_API_KEY");
         assert_eq!(openai.3, "openai");
         assert_eq!(openai.4, "api_key");
+    }
+
+    #[test]
+    fn codex_default_uses_the_subscription_responses_backend() {
+        let config = AppConfig::default();
+        let codex = config.provider_config("Codex").expect("find Codex");
+
+        assert_eq!(codex.endpoint, "https://chatgpt.com/backend-api/codex");
+        assert_eq!(codex.backend_type, "codex");
+        assert_eq!(codex.auth_type, "oauth");
     }
 
     #[test]

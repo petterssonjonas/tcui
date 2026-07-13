@@ -94,19 +94,23 @@ fn consume_sse_bytes_waits_for_split_utf8() {
     let split_at = full.find('å').unwrap() + 1;
 
     buffer.extend_from_slice(&full.as_bytes()[..split_at]);
-    assert!(consume_sse_bytes(&mut buffer, &mut |data| {
-        seen.push(data.to_string());
-        Ok(true)
-    })
-    .unwrap());
+    assert!(
+        consume_sse_bytes(&mut buffer, &mut |data| {
+            seen.push(data.to_string());
+            Ok(true)
+        })
+        .unwrap()
+    );
     assert!(seen.is_empty());
 
     buffer.extend_from_slice(&full.as_bytes()[split_at..]);
-    assert!(consume_sse_bytes(&mut buffer, &mut |data| {
-        seen.push(data.to_string());
-        Ok(true)
-    })
-    .unwrap());
+    assert!(
+        consume_sse_bytes(&mut buffer, &mut |data| {
+            seen.push(data.to_string());
+            Ok(true)
+        })
+        .unwrap()
+    );
 
     assert_eq!(
         seen,

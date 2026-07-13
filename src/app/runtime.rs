@@ -1,7 +1,8 @@
 use futures::StreamExt;
+use secrecy::ExposeSecret;
 use std::io::IsTerminal;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use super::{Action, Message, TuiApp};
 use crate::app::action::MouseClickAction;
@@ -145,11 +146,23 @@ impl TuiApp {
                 Ok(())
             }
             Action::ShowHelp => {
-                self.ui.show_help = true;
+                let artifact = crate::ui::artifact_sidebar::ArtifactEntry::temp_markdown(
+                    u64::MAX,
+                    "Help".to_string(),
+                    crate::ui::HELP_MARKDOWN.to_string(),
+                );
+                let mut viewer =
+                    crate::ui::modals::artifact_viewer::ArtifactViewerState::new(artifact);
+                viewer.view_only = true;
+                self.ui.artifact_viewer = Some(viewer);
                 Ok(())
             }
-            Action::DismissHelp => {
-                self.ui.show_help = false;
+            Action::ShowKeybinds => {
+                self.ui.show_keybinds = true;
+                Ok(())
+            }
+            Action::DismissKeybinds => {
+                self.ui.show_keybinds = false;
                 Ok(())
             }
             Action::CloseListPopup => {
@@ -397,6 +410,11 @@ impl TuiApp {
     }
 
     pub(crate) fn send_message(&mut self, content: String) -> color_eyre::Result<()> {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Err(color_eyre::eyre::eyre!(
+                "Cannot send a message without a Tokio runtime"
+            ));
+        }
         let mut conversation_id = self
             .ui
             .tabs
@@ -438,6 +456,13 @@ impl TuiApp {
         let is_local_provider = crate::llm::local::is_local_provider(&provider);
         let model = tab_state.tab.model.clone();
         let reasoning_effort = tab_state.tab.reasoning_effort.clone();
+        let supported_reasoning_efforts = self
+            .ui
+            .current_models
+            .iter()
+            .find(|entry| entry.id == model)
+            .map(|entry| entry.supported_reasoning_efforts.clone())
+            .unwrap_or_default();
         let messages = tab_state.messages.clone();
         let config_snapshot = self
             .config
@@ -470,7 +495,7 @@ impl TuiApp {
                 .map(|(_, _, backend_type)| backend_type.clone())
                 .unwrap_or_else(|| "openai".to_string())
         };
-        let api_key = if is_local_provider {
+        let local_api_key = if is_local_provider {
             config_snapshot
                 .local_inference
                 .api_token_env
@@ -478,10 +503,11 @@ impl TuiApp {
                 .and_then(|env_var| std::env::var(env_var).ok())
                 .filter(|value| !value.trim().is_empty())
         } else {
-            provider_config.as_ref().and_then(|(_, env_var, _)| {
-                crate::llm::auth::read_provider_api_key(&provider, env_var, &self.storage)
-            })
+            None
         };
+        let credential_env_var = provider_config
+            .as_ref()
+            .map(|(_, env_var, _)| env_var.clone());
         let action_tx = self.action_tx.clone();
         let system_prompt = self.system_prompt.clone();
         let user_request = content.clone();
@@ -510,19 +536,6 @@ impl TuiApp {
             let _ = action_tx.send(Action::StopStream(tab_id));
             return Ok(());
         };
-
-        if !is_local_provider && !provider.eq_ignore_ascii_case("Ollama") && api_key.is_none() {
-            self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::Failed;
-            self.ui.connection_message = Some(format!("Missing credentials for {provider}"));
-            let _ = action_tx.send(Action::StreamResponse(
-                tab_id,
-                assistant_idx,
-                format!("No API key or OAuth token found for {provider}. Open Settings > Providers or set the provider env var."),
-            ));
-            let _ = action_tx.send(Action::StopStream(tab_id));
-            return Ok(());
-        }
-
         if is_local_provider {
             self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::LocalConnected;
             self.ui.connection_message = Some("Connected to Local LLM".to_string());
@@ -532,6 +545,44 @@ impl TuiApp {
         }
 
         tokio::spawn(async move {
+            let api_key = if is_local_provider {
+                local_api_key
+            } else {
+                match credential_env_var {
+                    Some(env_var) => {
+                        let credential_request = crate::llm::auth::CredentialRequest::new(
+                            &provider, &env_var, &endpoint,
+                        );
+                        match crate::llm::auth::resolve_provider_credential(credential_request)
+                            .await
+                        {
+                            Ok(Some(credential)) => {
+                                Some(credential.bearer_token().expose_secret().to_owned())
+                            }
+                            Ok(None) => None,
+                            Err(error) => {
+                                let _ = action_tx.send(Action::StreamResponse(
+                                    tab_id,
+                                    assistant_idx,
+                                    format!("Credential unavailable: {error}"),
+                                ));
+                                let _ = action_tx.send(Action::StopStream(tab_id));
+                                return;
+                            }
+                        }
+                    }
+                    None => None,
+                }
+            };
+            if !is_local_provider && !provider.eq_ignore_ascii_case("Ollama") && api_key.is_none() {
+                let _ = action_tx.send(Action::StreamResponse(
+                    tab_id,
+                    assistant_idx,
+                    format!("No API key or OAuth token found for {provider}. Open Settings > Providers or set the provider env var."),
+                ));
+                let _ = action_tx.send(Action::StopStream(tab_id));
+                return;
+            }
             let event_tx = action_tx.clone();
             let mut runtime_system_prompt = system_prompt.clone();
             let mut request = crate::llm::chat::ChatRequest {
@@ -539,6 +590,7 @@ impl TuiApp {
                 endpoint,
                 model,
                 reasoning_effort,
+                supported_reasoning_efforts,
                 backend_type,
                 api_key,
                 system_prompt: runtime_system_prompt.clone(),
