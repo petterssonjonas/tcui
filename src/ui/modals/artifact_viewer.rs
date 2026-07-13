@@ -1,4 +1,4 @@
-use ratatui::{prelude::*, widgets::*, Frame};
+use ratatui::{Frame, prelude::*, widgets::*};
 
 use crate::config::app_config::{HeadingDownscale, MarkdownMode};
 use crate::ui::artifact_sidebar::{ArtifactEntry, ArtifactHandle, ArtifactKind};
@@ -18,6 +18,7 @@ pub struct ArtifactViewerHitAreas {
 pub struct ArtifactViewerState {
     pub artifact: ArtifactEntry,
     pub scroll: usize,
+    pub view_only: bool,
     pub hit_areas: ArtifactViewerHitAreas,
     image_state: Option<ImageBlockState>,
 }
@@ -35,6 +36,7 @@ impl ArtifactViewerState {
         Self {
             artifact,
             scroll: 0,
+            view_only: false,
             hit_areas: ArtifactViewerHitAreas::default(),
             image_state: None,
         }
@@ -154,7 +156,7 @@ impl ArtifactViewerState {
             }
         }
 
-        if button_area.height > 0 {
+        if button_area.height > 0 && !self.view_only {
             let theme = crate::theme::active_theme();
             let mut x = button_area.right().saturating_sub(1);
             let y = button_area.y;
@@ -227,7 +229,7 @@ mod tests {
     use super::{ArtifactViewerProps, ArtifactViewerState};
     use crate::config::app_config::{HeadingDownscale, MarkdownMode};
     use crate::ui::components::terminal_capabilities::{TerminalCapabilities, TerminalKind};
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
     fn preview_scroll_is_clamped_to_rendered_content() {

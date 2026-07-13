@@ -1,4 +1,4 @@
-use ratatui::{prelude::*, widgets::*, Frame};
+use ratatui::{Frame, prelude::*, widgets::*};
 use unicode_width::UnicodeWidthStr;
 
 pub struct TopBar<'a> {

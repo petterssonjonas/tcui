@@ -1,5 +1,5 @@
 use crate::ui::artifact_sidebar::ArtifactEntry;
-use ratatui::{layout::Rect, prelude::*, widgets::*, Frame};
+use ratatui::{Frame, layout::Rect, prelude::*, widgets::*};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Default)]

@@ -114,7 +114,7 @@ fn parse_duration(input: &str) -> Result<std::time::Duration, ReminderError> {
                 _ => {
                     return Err(ReminderError::Invalid(
                         "duration units are s, m, h, and d".to_string(),
-                    ))
+                    ));
                 }
             })
             .ok_or_else(|| ReminderError::Invalid("duration is too large".to_string()))?;

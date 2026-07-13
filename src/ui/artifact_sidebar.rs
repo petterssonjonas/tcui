@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use ratatui::{prelude::*, widgets::*, Frame};
+use ratatui::{Frame, prelude::*, widgets::*};
 
 const ROW_HEIGHT: u16 = 3;
 const ROW_GAP: u16 = 1;
@@ -882,10 +882,10 @@ fn resolve_local_path(source: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_vault_nodes, ArtifactEntry, ArtifactHandle, ArtifactKind, ArtifactOrigin,
-        ArtifactSection, ArtifactSidebar, ArtifactSidebarAction, ArtifactSidebarState,
+        ArtifactEntry, ArtifactHandle, ArtifactKind, ArtifactOrigin, ArtifactSection,
+        ArtifactSidebar, ArtifactSidebarAction, ArtifactSidebarState, build_vault_nodes,
     };
-    use ratatui::{backend::TestBackend, layout::Position, layout::Rect, Terminal};
+    use ratatui::{Terminal, backend::TestBackend, layout::Position, layout::Rect};
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
 
@@ -914,23 +914,31 @@ mod tests {
 
         let expanded = build_vault_nodes(&entries, &HashSet::new());
         assert!(expanded.iter().any(|node| node.path == Path::new("notes")));
-        assert!(expanded
-            .iter()
-            .any(|node| node.path == Path::new("notes/projects")));
-        assert!(expanded
-            .iter()
-            .any(|node| node.path == Path::new("notes/projects/b.md")));
+        assert!(
+            expanded
+                .iter()
+                .any(|node| node.path == Path::new("notes/projects"))
+        );
+        assert!(
+            expanded
+                .iter()
+                .any(|node| node.path == Path::new("notes/projects/b.md"))
+        );
 
         let mut collapsed_dirs = HashSet::new();
         collapsed_dirs.insert(PathBuf::from("notes"));
         let collapsed = build_vault_nodes(&entries, &collapsed_dirs);
         assert!(collapsed.iter().any(|node| node.path == Path::new("notes")));
-        assert!(!collapsed
-            .iter()
-            .any(|node| node.path == Path::new("notes/projects")));
-        assert!(!collapsed
-            .iter()
-            .any(|node| node.path == Path::new("notes/a.md")));
+        assert!(
+            !collapsed
+                .iter()
+                .any(|node| node.path == Path::new("notes/projects"))
+        );
+        assert!(
+            !collapsed
+                .iter()
+                .any(|node| node.path == Path::new("notes/a.md"))
+        );
     }
 
     #[test]

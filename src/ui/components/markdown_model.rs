@@ -906,7 +906,7 @@ fn heading_overlay_style(level: usize) -> Style {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_markdown, RenderOptions};
+    use super::{RenderOptions, render_markdown};
     use crate::config::app_config::{HeadingDownscale, MarkdownMode};
     use crate::ui::components::terminal_capabilities::TerminalCapabilities;
 

@@ -4,8 +4,8 @@
 #![allow(dead_code)]
 
 use crate::app::Action;
-use crate::tui::components::{centered_rect, GroupHeader, SearchField, SelectList};
-use ratatui::{prelude::*, widgets::*, Frame};
+use crate::tui::components::{GroupHeader, SearchField, SelectList, centered_rect};
+use ratatui::{Frame, prelude::*, widgets::*};
 
 use CommandCategory as C;
 
@@ -480,6 +480,7 @@ pub fn all_commands() -> Vec<Command> {
         ("show_skills", "Show Skills", C::Agent, None, Action::ShowSkillsPopup, false),
         ("show_mcp", "Show MCP", C::Mcps, None, Action::ShowMcpPopup, false),
         ("show_help", "/help", C::System, None, Action::ShowHelp, false),
+        ("show_keybinds", "/keybinds", C::System, None, Action::ShowKeybinds, false),
         ("quit", "Quit", C::System, Some("Ctrl+Q"), Action::Quit, false),
         ("show_local_search", "Search Vault", C::Prompt, None, Action::ShowLocalSearch(String::new()), false),
         ("focus_input", "Focus Input", C::System, None, Action::FocusInput, false),

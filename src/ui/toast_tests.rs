@@ -1,5 +1,5 @@
 use crate::{config::ToastPosition, ui::toast::*};
-use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 
 #[test]
 fn stack_keeps_only_five_newest_toasts() {
@@ -181,4 +181,47 @@ fn center_position_stacks_multiple_toasts_without_overwriting() {
     let screen = terminal.backend().to_string();
     assert!(screen.contains("first center toast"));
     assert!(screen.contains("second center toast"));
+}
+
+#[test]
+fn explicit_newlines_split_into_separate_lines() {
+    let toast = Toast::new(
+        "Welcome to TCUI.\nType /help for instructions.".to_string(),
+        0,
+    );
+
+    assert_eq!(toast.lines.len(), 2);
+}
+
+#[test]
+fn long_message_auto_wraps_beyond_message_width() {
+    let long = "a".repeat(80);
+    let toast = Toast::new(long, 0);
+
+    assert!(
+        toast.lines.len() > 1,
+        "expected wrapping, got {} lines",
+        toast.lines.len()
+    );
+    assert!(toast.lines.len() <= 6);
+}
+
+#[test]
+fn toast_line_count_caps_at_six() {
+    let segments = (0..12)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let toast = Toast::new(segments, 0);
+
+    assert_eq!(toast.lines.len(), 6);
+}
+
+#[test]
+fn toast_height_grows_with_line_count() {
+    let one = Toast::new("short".to_string(), 0);
+    let three = Toast::new("a\nb\nc".to_string(), 0);
+
+    assert_eq!(toast_height(one.lines.len()), 3);
+    assert_eq!(toast_height(three.lines.len()), 5);
 }

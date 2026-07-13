@@ -7,7 +7,7 @@
 #![allow(dead_code)]
 
 use crossterm::event::KeyCode;
-use ratatui::{prelude::*, widgets::*, Frame};
+use ratatui::{Frame, prelude::*, widgets::*};
 
 // ---------------------------------------------------------------------------
 // Centered popup geometry

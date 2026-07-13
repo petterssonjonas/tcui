@@ -1,16 +1,23 @@
 #![allow(dead_code)]
 use crate::app::message::Message;
 use color_eyre::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params, types::Type};
 
 use crate::storage::chat_store::{ChatDocument, ChatStore};
 use crate::storage::crypto::{
-    decrypt_shared_text_with_key, encrypt_shared_text_with_key, SharedKey,
+    SharedKey, decrypt_shared_text_with_key, encrypt_shared_text_with_key,
 };
 use crate::storage::paths::TcuiDataPaths;
 
 pub type ProviderRow = (String, String, String, String, String);
-pub type ModelRow = (String, Option<f64>, Option<f64>, Option<u32>);
+pub type ModelRow = (
+    String,
+    Option<f64>,
+    Option<f64>,
+    Option<u32>,
+    Option<String>,
+    Vec<String>,
+);
 
 pub struct Storage {
     conn: Connection,
@@ -44,6 +51,14 @@ impl Storage {
             [],
         );
         let _ = conn.execute("ALTER TABLE models ADD COLUMN context_window INTEGER", []);
+        let _ = conn.execute(
+            "ALTER TABLE models ADD COLUMN default_reasoning_effort TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE models ADD COLUMN supported_reasoning_efforts TEXT NOT NULL DEFAULT '[]'",
+            [],
+        );
         let shared_key = SharedKey::load_or_create_default(&paths)?;
         Self::from_parts(conn, paths, shared_key.key, shared_key.created_default_key)
     }
@@ -63,6 +78,14 @@ impl Storage {
             [],
         );
         let _ = conn.execute("ALTER TABLE models ADD COLUMN context_window INTEGER", []);
+        let _ = conn.execute(
+            "ALTER TABLE models ADD COLUMN default_reasoning_effort TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE models ADD COLUMN supported_reasoning_efforts TEXT NOT NULL DEFAULT '[]'",
+            [],
+        );
         Self::from_parts(conn, paths, shared_key, false)
     }
 
@@ -193,6 +216,7 @@ impl Storage {
     }
 
     pub fn get_providers(&self) -> Result<Vec<ProviderRow>> {
+        self.migrate_legacy_codex_provider()?;
         let mut stmt = self.conn.prepare(
             "SELECT name, endpoint, env_var, backend_type, auth_type FROM providers ORDER BY name",
         )?;
@@ -206,6 +230,25 @@ impl Storage {
             ))
         })?;
         rows.filter_map(|r| r.ok()).map(Ok).collect()
+    }
+
+    fn migrate_legacy_codex_provider(&self) -> Result<()> {
+        let migrated = self.conn.execute(
+            "UPDATE providers
+             SET endpoint = ?1, backend_type = ?2
+             WHERE name = ?3 AND instr(endpoint, ?4) = 1 AND backend_type = ?5",
+            params![
+                "https://chatgpt.com/backend-api/codex",
+                "codex",
+                "Codex",
+                "https://api.openai.com",
+                "openai",
+            ],
+        )?;
+        if migrated > 0 {
+            crate::diagnostics::provider_migration("Codex");
+        }
+        Ok(())
     }
 
     pub fn get_provider_endpoint(&self, name: &str) -> Result<Option<String>> {
@@ -240,11 +283,36 @@ impl Storage {
         let tx = self.conn.unchecked_transaction()?;
         self.conn
             .execute("DELETE FROM models WHERE provider = ?1", params![provider])?;
-        for (model_id, input_price, output_price, context_window) in models {
+        for (
+            model_id,
+            input_price,
+            output_price,
+            context_window,
+            default_reasoning_effort,
+            supported_reasoning_efforts,
+        ) in models
+        {
+            let supported_reasoning_efforts = serde_json::to_string(supported_reasoning_efforts)?;
             self.conn.execute(
-                "INSERT INTO models (provider, model_id, input_price, output_price, context_window, fetched_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
-                params![provider, model_id, input_price, output_price, context_window],
+                "INSERT INTO models (
+                    provider,
+                    model_id,
+                    input_price,
+                    output_price,
+                    context_window,
+                    default_reasoning_effort,
+                    supported_reasoning_efforts,
+                    fetched_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))",
+                params![
+                    provider,
+                    model_id,
+                    input_price,
+                    output_price,
+                    context_window,
+                    default_reasoning_effort,
+                    supported_reasoning_efforts
+                ],
             )?;
         }
         tx.commit()?;
@@ -253,14 +321,30 @@ impl Storage {
 
     pub fn get_models(&self, provider: &str) -> Result<Vec<ModelRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT model_id, input_price, output_price, context_window FROM models WHERE provider = ?1 ORDER BY model_id"
+            "SELECT
+                model_id,
+                input_price,
+                output_price,
+                context_window,
+                default_reasoning_effort,
+                supported_reasoning_efforts
+             FROM models
+             WHERE provider = ?1
+             ORDER BY model_id",
         )?;
         let rows = stmt.query_map([provider], |row| {
+            let encoded_efforts = row.get::<_, String>(5)?;
+            let supported_reasoning_efforts =
+                serde_json::from_str(&encoded_efforts).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(5, Type::Text, Box::new(error))
+                })?;
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<f64>>(1)?,
                 row.get::<_, Option<f64>>(2)?,
                 row.get::<_, Option<u32>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                supported_reasoning_efforts,
             ))
         })?;
         rows.filter_map(|r| r.ok()).map(Ok).collect()
@@ -373,7 +457,7 @@ pub struct ConversationEntry {
 mod tests {
     use super::*;
     use crate::storage::chat_store::ChatDocument;
-    use crate::storage::crypto::{read_encrypted_document, SharedKey};
+    use crate::storage::crypto::{SharedKey, read_encrypted_document};
     use std::path::PathBuf;
     use std::sync::Mutex;
 
@@ -460,10 +544,12 @@ mod tests {
 
         assert!(!chat_path(&data_home, conversation_id).exists());
         assert!(trash_chat_path(&data_home, conversation_id).exists());
-        assert!(storage
-            .get_conversations(0)
-            .expect("list conversations")
-            .is_empty());
+        assert!(
+            storage
+                .get_conversations(0)
+                .expect("list conversations")
+                .is_empty()
+        );
 
         std::fs::remove_dir_all(&root).expect("cleanup temp dir");
         std::env::remove_var("XDG_DATA_HOME");
@@ -560,10 +646,12 @@ mod tests {
         drop(connection);
 
         let storage = Storage::new().expect("create storage");
-        assert!(storage
-            .get_conversations(7)
-            .expect("list active conversations")
-            .is_empty());
+        assert!(
+            storage
+                .get_conversations(7)
+                .expect("list active conversations")
+                .is_empty()
+        );
 
         let archived_path = trash_chat_path(&data_home, 42);
         assert!(archived_path.exists(), "legacy chat should be archived");
@@ -633,6 +721,125 @@ mod tests {
         );
         std::fs::remove_dir_all(root).expect("cleanup temp dir");
         std::env::remove_var("XDG_DATA_HOME");
+    }
+
+    #[test]
+    fn provider_load_migrates_legacy_codex_configuration_once() {
+        let (storage, root) = provider_storage("codex-provider-migration");
+        storage
+            .update_provider("Codex", "https://api.openai.com/v1", "openai", "oauth")
+            .expect("seed legacy Codex provider");
+
+        let providers = storage.get_providers().expect("load providers");
+        let codex = providers
+            .iter()
+            .find(|(name, _, _, _, _)| name == "Codex")
+            .expect("Codex provider");
+
+        assert_eq!(
+            codex,
+            &(
+                "Codex".to_owned(),
+                "https://chatgpt.com/backend-api/codex".to_owned(),
+                "CODEX_API_KEY".to_owned(),
+                "codex".to_owned(),
+                "oauth".to_owned(),
+            )
+        );
+        let changes_after_first_load = storage.conn.total_changes();
+        storage.get_providers().expect("reload providers");
+        assert_eq!(storage.conn.total_changes(), changes_after_first_load);
+
+        std::fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn provider_load_preserves_custom_codex_endpoint() {
+        let (storage, root) = provider_storage("codex-provider-custom-endpoint");
+        storage
+            .update_provider(
+                "Codex",
+                "https://gateway.example.test/codex",
+                "openai",
+                "oauth",
+            )
+            .expect("seed customized Codex provider");
+
+        let providers = storage.get_providers().expect("load providers");
+        let codex = providers
+            .iter()
+            .find(|(name, _, _, _, _)| name == "Codex")
+            .expect("Codex provider");
+
+        assert_eq!(codex.1, "https://gateway.example.test/codex");
+        assert_eq!(codex.3, "openai");
+
+        std::fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn provider_load_preserves_noncanonical_codex_name() {
+        let (storage, root) = provider_storage("codex-provider-noncanonical-name");
+        storage
+            .add_provider(
+                "codex",
+                "https://api.openai.com/v1",
+                "CUSTOM_CODEX_KEY",
+                "openai",
+                "api_key",
+            )
+            .expect("seed noncanonical Codex provider");
+
+        let providers = storage.get_providers().expect("load providers");
+        let custom = providers
+            .iter()
+            .find(|(name, _, _, _, _)| name == "codex")
+            .expect("noncanonical Codex provider");
+
+        assert_eq!(custom.1, "https://api.openai.com/v1");
+        assert_eq!(custom.3, "openai");
+
+        std::fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn model_cache_round_trips_reasoning_metadata() -> Result<(), Box<dyn std::error::Error>> {
+        let (storage, root) = provider_storage("model-reasoning-metadata");
+        let models = vec![(
+            "gpt-5.6-sol".to_string(),
+            None,
+            None,
+            Some(272_000),
+            Some("medium".to_string()),
+            vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+        )];
+
+        storage.save_models("Codex", &models)?;
+        let loaded = storage.get_models("Codex")?;
+
+        assert_eq!(loaded, models);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    fn provider_storage(label: &str) -> (Storage, PathBuf) {
+        let root = unique_temp_dir(label);
+        let paths = TcuiDataPaths::from_root(root.clone());
+        paths.ensure_layout().expect("create provider test layout");
+        let shared_key = SharedKey::load_or_create_default(&paths)
+            .expect("create provider test key")
+            .key;
+        let connection = Connection::open_in_memory().expect("open provider test database");
+        connection
+            .execute_batch(include_str!("../../migrations/init.sql"))
+            .expect("initialize provider test database");
+        let storage = Storage {
+            conn: connection,
+            chat_store: ChatStore::new(paths, shared_key),
+            created_default_key: false,
+        };
+        storage.seed_providers().expect("seed providers");
+        (storage, root)
     }
 
     fn chat_path(data_home: &PathBuf, conversation_id: i64) -> PathBuf {

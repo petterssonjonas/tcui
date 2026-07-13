@@ -2,7 +2,7 @@ use crate::{
     config::AppConfig,
     mcp::{
         error::{McpError, McpResult},
-        registry::{lookup_profile, McpProfile},
+        registry::{McpProfile, lookup_profile},
         transport::spawn_stdio,
     },
 };

@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use ratatui::{prelude::*, widgets::*, Frame};
+use ratatui::{Frame, prelude::*, widgets::*};
 
 pub struct QuitConfirmModal {
     title: String,

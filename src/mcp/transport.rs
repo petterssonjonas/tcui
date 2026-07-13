@@ -166,9 +166,11 @@ mod tests {
         // Then
         assert!(environment.lines().any(|line| line == "PATH=/test/bin"));
         assert!(environment.lines().any(|line| line == "HOME=/test/home"));
-        assert!(environment
-            .lines()
-            .any(|line| line == "EXA_API_KEY=exa-secret"));
+        assert!(
+            environment
+                .lines()
+                .any(|line| line == "EXA_API_KEY=exa-secret")
+        );
         assert!(!environment.contains("UNRELATED_SECRET"));
 
         std::env::remove_var("UNRELATED_SECRET");

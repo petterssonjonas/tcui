@@ -1,4 +1,4 @@
-use ratatui::{layout::Rect, prelude::*, widgets::*, Frame};
+use ratatui::{Frame, layout::Rect, prelude::*, widgets::*};
 
 pub struct DiffView<'a> {
     pub path: &'a str,

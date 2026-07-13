@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use super::markdown::parse_memory;
 use super::store::{
-    is_memory_document_path, normalize_markdown, now_ms, MemoryDocument, MemoryError, MemoryStore,
+    MemoryDocument, MemoryError, MemoryStore, is_memory_document_path, normalize_markdown, now_ms,
 };
 use super::sync::fingerprint;
 

@@ -2,9 +2,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ratatui::{
+    Frame,
     prelude::*,
     widgets::{Block, Clear, Paragraph, Wrap},
-    Frame,
 };
 
 pub mod artifact_sidebar;
@@ -35,12 +35,16 @@ use status_bar::{ConnectionStatus, StatusBar, StatusBarAreas, StatusBarConfig};
 use toast::ToastStack;
 use top_bar::TopBar;
 
+pub const HELP_MARKDOWN: &str = include_str!("help.md");
+
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
     pub id: String,
     pub input_price: Option<f64>,
     pub output_price: Option<f64>,
     pub context_window: Option<u32>,
+    pub default_reasoning_effort: Option<String>,
+    pub supported_reasoning_efforts: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -84,7 +88,7 @@ pub struct UI {
     pub settings_v2: Option<crate::tui::settings_panel::SettingsPanelState>,
     pub keybind_capture: Option<crate::tui::keybind_capture::KeybindCaptureState>,
     pub keybinding_overrides: BTreeMap<String, String>,
-    pub show_help: bool,
+    pub show_keybinds: bool,
     pub mouse_hit_areas: Vec<(Rect, MouseAction)>,
     pub last_area: Option<Rect>,
     pub chat_area: Option<Rect>,
@@ -271,7 +275,7 @@ impl UI {
             settings_v2: None,
             keybind_capture: None,
             keybinding_overrides: BTreeMap::new(),
-            show_help: false,
+            show_keybinds: false,
             mouse_hit_areas: Vec::new(),
             last_area: None,
             chat_area: None,
@@ -667,8 +671,8 @@ impl UI {
             }
         }
 
-        if self.show_help {
-            self.render_help(f, area);
+        if self.show_keybinds {
+            self.render_keybinds(f, area);
         }
 
         // Modal overlay (rendered on top of everything)
@@ -697,43 +701,22 @@ impl UI {
         }
     }
 
-    fn render_help(&self, f: &mut Frame, area: Rect) {
+    fn render_keybinds(&self, f: &mut Frame, area: Rect) {
         let theme = crate::theme::active_theme();
         let popup = centered_rect(68, 62, area);
         f.render_widget(Clear, popup);
         let block = Block::default().style(Style::default().fg(theme.foreground).bg(theme.panel));
-        let commands = crate::tui::palette::all_commands();
         let mut lines = vec![
             Line::styled(
-                " Help ",
+                " Keybindings ",
                 Style::default()
                     .fg(theme.accent)
                     .bg(theme.panel)
                     .add_modifier(Modifier::BOLD),
             ),
-            Line::styled("Available commands", Style::default().fg(theme.accent)),
-        ];
-        lines.push(Line::from(
-            "  Slash commands: /help /settings /theme /mcp /skills /web",
-        ));
-        lines.push(Line::styled(
-            "  Esc or Enter dismisses this help.",
-            Style::default().fg(theme.muted),
-        ));
-        for command in commands.iter().take(8) {
-            let shortcut = command.shortcut.as_deref().unwrap_or("/");
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {shortcut:<14}"),
-                    Style::default().fg(theme.muted),
-                ),
-                Span::raw(command.title.clone()),
-            ]));
-        }
-        lines.extend([
+            Line::styled("Esc or Enter dismisses.", Style::default().fg(theme.muted)),
             Line::from(""),
-            Line::styled("Keybindings", Style::default().fg(theme.accent)),
-        ]);
+        ];
         for setting in crate::tui::settings_panel::all_settings()
             .iter()
             .filter(|setting| {
@@ -762,9 +745,10 @@ impl UI {
             Line::from("  ctrl+left    Toggle left sidebar"),
             Line::from("  ctrl+right   Toggle artifact sidebar"),
             Line::from(""),
-            Line::styled("Usage", Style::default().fg(theme.accent)),
-            Line::from("  Type /settings, /theme, /mcp, /skills, /web, or /help."),
-            Line::from("  Click status provider/model labels to change selectors."),
+            Line::styled(
+                "Rebind keys from the settings panel.",
+                Style::default().fg(theme.muted),
+            ),
             Line::from(""),
         ]);
         let paragraph = Paragraph::new(lines)
@@ -914,7 +898,7 @@ impl UI {
 #[cfg(test)]
 mod tests {
     use super::UI;
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
     fn artifact_sidebar_starts_collapsed() {
@@ -996,17 +980,17 @@ mod tests {
     }
 
     #[test]
-    fn help_modal_renders_commands_and_usage() {
+    fn keybinds_popup_renders_shortcuts() {
         let mut ui = UI::new();
-        ui.show_help = true;
+        ui.show_keybinds = true;
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
 
         terminal.draw(|frame| ui.render(frame)).expect("render ui");
 
         let screen = terminal.backend().to_string();
-        assert!(screen.contains("Available commands"));
-        assert!(screen.contains("/help"));
-        assert!(screen.contains("Esc or Enter dismisses this help."));
+        assert!(screen.contains("Keybindings"));
+        assert!(screen.contains("shift+enter"));
+        assert!(screen.contains("Esc or Enter dismisses."));
     }
 
     #[test]
@@ -1016,13 +1000,15 @@ mod tests {
 
         terminal.draw(|frame| ui.render(frame)).expect("render ui");
 
-        assert!(ui
-            .mouse_hit_areas
-            .iter()
-            .any(|(_, action)| *action == super::MouseAction::LeftHandle));
-        assert!(ui
-            .mouse_hit_areas
-            .iter()
-            .any(|(_, action)| *action == super::MouseAction::RightHandle));
+        assert!(
+            ui.mouse_hit_areas
+                .iter()
+                .any(|(_, action)| *action == super::MouseAction::LeftHandle)
+        );
+        assert!(
+            ui.mouse_hit_areas
+                .iter()
+                .any(|(_, action)| *action == super::MouseAction::RightHandle)
+        );
     }
 }

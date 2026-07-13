@@ -5,7 +5,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
 };
-use ratatui_image::picker::{cap_parser::QueryStdioOptions, Capability, Picker, ProtocolType};
+use ratatui_image::picker::{Capability, Picker, ProtocolType, cap_parser::QueryStdioOptions};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 

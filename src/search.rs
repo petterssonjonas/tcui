@@ -1,4 +1,4 @@
-use color_eyre::{eyre::eyre, Result};
+use color_eyre::{Result, eyre::eyre};
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -127,7 +127,7 @@ pub(crate) fn parse_ddgr_results(json: &str) -> Result<Vec<SearchResult>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_untrusted_context, parse_ddgr_results, SearchContext, SearchResult};
+    use super::{SearchContext, SearchResult, format_untrusted_context, parse_ddgr_results};
 
     #[test]
     fn parses_ddgr_json_into_search_results() {

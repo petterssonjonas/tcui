@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use super::builtins::{self, BUILTINS};
 use super::frontmatter::read_metadata;
-use super::{mentions, Skill, SkillMeta, SkillOrigin};
+use super::{Skill, SkillMeta, SkillOrigin, mentions};
 
 #[derive(Debug)]
 pub struct SkillCatalog {
@@ -163,9 +163,11 @@ mod tests {
         assert_eq!(loaded[0].name, "websearch");
         assert_eq!(loaded[1].name, "research");
         assert_eq!(loaded[2].name, "save");
-        assert!(loaded
-            .iter()
-            .all(|skill| skill.origin == SkillOrigin::Builtin));
+        assert!(
+            loaded
+                .iter()
+                .all(|skill| skill.origin == SkillOrigin::Builtin)
+        );
         assert!(loaded.iter().all(|skill| !skill.source.is_empty()));
     }
 

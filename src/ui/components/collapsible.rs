@@ -1,4 +1,4 @@
-use ratatui::{layout::Rect, prelude::*, widgets::*, Frame};
+use ratatui::{Frame, layout::Rect, prelude::*, widgets::*};
 
 pub struct Collapsible<'a> {
     pub title: &'a str,
@@ -39,19 +39,23 @@ impl<'a> Collapsible<'a> {
         );
 
         let text_lines: Vec<Line> = if self.collapsed {
-            vec![Line::from(title).style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-                    .bg(theme.code_bg),
-            )]
+            vec![
+                Line::from(title).style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(theme.code_bg),
+                ),
+            ]
         } else {
-            let mut v = vec![Line::from(title).style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-                    .bg(theme.code_bg),
-            )];
+            let mut v = vec![
+                Line::from(title).style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(theme.code_bg),
+                ),
+            ];
             v.extend(self.content.lines().map(|l| {
                 Line::from(l).style(Style::default().fg(theme.foreground).bg(theme.code_bg))
             }));

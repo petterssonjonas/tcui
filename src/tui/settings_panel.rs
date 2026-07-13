@@ -5,9 +5,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::tui::components::{centered_rect, ConfirmModal, GroupHeader, SearchField};
+use crate::tui::components::{ConfirmModal, GroupHeader, SearchField, centered_rect};
 use crate::tui::focus::Focus;
-use ratatui::{prelude::*, widgets::*, Frame};
+use ratatui::{Frame, prelude::*, widgets::*};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SettingCategory {
@@ -777,9 +777,11 @@ mod tests {
         assert!(results.iter().any(|(_, setting)| {
             matches!(setting.setting_type, SettingType::Theme("opencode"))
         }));
-        assert!(results
-            .iter()
-            .all(|(_, setting)| { matches!(setting.setting_type, SettingType::Theme(_)) }));
+        assert!(
+            results
+                .iter()
+                .all(|(_, setting)| { matches!(setting.setting_type, SettingType::Theme(_)) })
+        );
     }
 
     #[test]
@@ -792,12 +794,16 @@ mod tests {
 
         let results = panel.results(&settings);
 
-        assert!(results
-            .iter()
-            .any(|(_, setting)| setting.id == "theme_gruvbox"));
-        assert!(results
-            .iter()
-            .all(|(_, setting)| setting_matches(setting, "gruvbox")));
+        assert!(
+            results
+                .iter()
+                .any(|(_, setting)| setting.id == "theme_gruvbox")
+        );
+        assert!(
+            results
+                .iter()
+                .all(|(_, setting)| setting_matches(setting, "gruvbox"))
+        );
     }
 
     #[test]

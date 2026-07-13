@@ -1,14 +1,14 @@
 #![allow(dead_code)]
 use crate::config::app_config::{HeadingDownscale, MarkdownMode, TextAlignment};
-use crate::ui::components::image_block::{is_local_image_source, ImageBlockState};
+use crate::ui::ModelInfo;
+use crate::ui::components::image_block::{ImageBlockState, is_local_image_source};
 use crate::ui::components::markdown::MarkdownRenderer;
 use crate::ui::components::markdown_model::{KittyHeadingTier, LinkTarget, RenderedImage};
-use crate::ui::ModelInfo;
 use ratatui::{
+    Frame,
     layout::{Rect, Size},
     prelude::*,
     widgets::*,
-    Frame,
 };
 use ratatui_image::sliced::SignedPosition;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -152,7 +152,7 @@ impl<'a> ChatTab<'a> {
             chunk_idx += 1; // skip spacer
             self.render_centered_input(f, chunks[chunk_idx]);
         } else {
-            self.render_messages(f, chunks[chunk_idx]);
+            self.render_messages(f, chat_messages_area(chunks[chunk_idx]));
             chunk_idx += 1;
             self.render_input(f, chunks[chunk_idx]);
         }
@@ -1047,6 +1047,15 @@ fn input_box_area(area: Rect) -> Rect {
     })
 }
 
+fn chat_messages_area(area: Rect) -> Rect {
+    Rect::new(
+        area.x.saturating_add(1),
+        area.y,
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(1),
+    )
+}
+
 fn bottom_input_height(state: &crate::ui::ChatTabState, area: Rect) -> u16 {
     let max_box_height = (area.height / 2).max(3);
     let margin_height = INPUT_MARGIN_VERTICAL.saturating_mul(2);
@@ -1108,7 +1117,7 @@ pub(crate) fn input_layout(
 
     if content.is_empty() {
         let placeholder = if show_placeholder {
-            "  Type your message... (/quit to exit)"
+            "Type your message..."
         } else {
             ""
         };
@@ -1426,7 +1435,7 @@ fn aligned_line_x(area: Rect, line: &Line<'_>) -> u16 {
 mod tests {
     use super::*;
     use crate::ui::components::terminal_capabilities::{TerminalCapabilities, TerminalKind};
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
     fn skill_mentions_on_one_line_have_independent_hit_areas() {
@@ -1497,7 +1506,7 @@ mod tests {
 
         assert_eq!(
             layout.visible_lines,
-            vec!["  Type your message... (/quit to exit)".to_string()]
+            vec!["Type your message...".to_string()]
         );
         assert_eq!(layout.cursor_y, 0);
         assert_eq!(layout.total_lines, 1);
@@ -1885,12 +1894,14 @@ mod tests {
         }
 
         // Then
-        assert!(terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .any(|cell| cell.symbol().contains("\u{1b}]66;")));
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|cell| cell.symbol().contains("\u{1b}]66;"))
+        );
     }
 
     #[test]
@@ -1931,12 +1942,14 @@ mod tests {
             .draw(|frame| chat.render_messages(frame, Rect::new(0, 0, 40, 1)))
             .expect("render clipped heading");
 
-        assert!(!terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .any(|cell| cell.symbol().contains("\u{1b}]66;")));
+        assert!(
+            !terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|cell| cell.symbol().contains("\u{1b}]66;"))
+        );
     }
 
     #[test]

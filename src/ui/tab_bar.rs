@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use ratatui::{layout::Rect, prelude::*, widgets::*, Frame};
+use ratatui::{Frame, layout::Rect, prelude::*, widgets::*};
 
 pub struct TabBar<'a> {
     pub tabs: &'a [crate::ui::ChatTabState],
