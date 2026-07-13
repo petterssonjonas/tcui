@@ -1,18 +1,18 @@
 #![allow(dead_code)]
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, Payload},
     Aes256Gcm,
+    aead::{Aead, KeyInit, Payload},
 };
-use base64::{engine::general_purpose::STANDARD, Engine as _};
-use serde::{de::DeserializeOwned, Serialize};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde::{Serialize, de::DeserializeOwned};
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::storage::paths::{
-    directory_has_entries, directory_has_non_trash_entries, ensure_directory, set_unix_mode,
-    TcuiDataPaths,
+    TcuiDataPaths, directory_has_entries, directory_has_non_trash_entries, ensure_directory,
+    set_unix_mode,
 };
 
 const ENVELOPE_PREFIX: &str = "enc:v1:";
