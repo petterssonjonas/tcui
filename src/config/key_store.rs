@@ -1,6 +1,6 @@
 use crate::config::AppConfig;
 use crate::storage::crypto::{
-    SharedKey, StorageCryptoError, decrypt_serialized, encrypt_serialized,
+    decrypt_serialized, encrypt_serialized, SharedKey, StorageCryptoError,
 };
 use crate::storage::paths::TcuiDataPaths;
 use color_eyre::Result;

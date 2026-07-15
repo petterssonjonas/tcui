@@ -10,10 +10,9 @@ impl TuiApp {
 
     pub(super) fn queue_update_check_with(
         &self,
-        release_check: impl std::future::Future<
-            Output = color_eyre::Result<Option<crate::updater::ReleaseInfo>>,
-        > + Send
-        + 'static,
+        release_check: impl std::future::Future<Output = color_eyre::Result<Option<crate::updater::ReleaseInfo>>>
+            + Send
+            + 'static,
     ) {
         let action_tx = self.action_tx.clone();
         tokio::spawn(async move {

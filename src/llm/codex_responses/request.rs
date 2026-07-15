@@ -1,6 +1,6 @@
-use color_eyre::eyre::{Result, eyre};
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
-use serde_json::{Map, Value, json};
+use color_eyre::eyre::{eyre, Result};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
+use serde_json::{json, Map, Value};
 
 use crate::llm::chat::ChatRequest;
 

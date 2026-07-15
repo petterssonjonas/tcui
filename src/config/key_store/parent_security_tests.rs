@@ -1,5 +1,5 @@
 use super::persistence::write_file_with_after_final_check;
-use super::test_support::{TestEnv, env_lock};
+use super::test_support::{env_lock, TestEnv};
 use super::*;
 use std::collections::BTreeMap;
 use std::path::PathBuf;

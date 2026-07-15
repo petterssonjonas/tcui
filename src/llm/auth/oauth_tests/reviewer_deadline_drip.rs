@@ -7,8 +7,8 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 use crate::llm::auth::oauth::{
-    AuthorizationCode, AuthorizationCodeExchange, ClientId, OAuthError, PkceVerifier, RedirectUri,
-    TokenEndpoint, TokenRequestTimeout, TokenService, oauth_cancellation,
+    oauth_cancellation, AuthorizationCode, AuthorizationCodeExchange, ClientId, OAuthError,
+    PkceVerifier, RedirectUri, TokenEndpoint, TokenRequestTimeout, TokenService,
 };
 
 fn exchange_request() -> Result<AuthorizationCodeExchange, OAuthError> {
@@ -21,8 +21,8 @@ fn exchange_request() -> Result<AuthorizationCodeExchange, OAuthError> {
 }
 
 #[tokio::test(start_paused = true)]
-async fn slow_dripping_token_body_cannot_outlive_the_request_deadline()
--> Result<(), Box<dyn std::error::Error>> {
+async fn slow_dripping_token_body_cannot_outlive_the_request_deadline(
+) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = TokenEndpoint::parse(&format!("http://{}", listener.local_addr()?))?;
     let (body_started, body_started_receiver) = oneshot::channel();

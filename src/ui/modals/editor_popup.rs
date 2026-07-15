@@ -6,10 +6,10 @@ use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use portable_pty::{Child, CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use ratatui::{
-    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     widgets::{Block, Clear, Paragraph},
+    Frame,
 };
 use tokio::sync::mpsc::{Receiver, Sender};
 use tui_term::vt100::Parser;

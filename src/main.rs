@@ -11,10 +11,10 @@ use crossterm::{
     },
     execute,
     terminal::{
-        EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode,
+        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
     },
 };
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::{backend::CrosstermBackend, Terminal};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -178,7 +178,11 @@ async fn main() -> Result<()> {
             dirs::home_dir().as_deref(),
         );
         let v = Vault::new(expanded);
-        if v.exists() { Some(Arc::new(v)) } else { None }
+        if v.exists() {
+            Some(Arc::new(v))
+        } else {
+            None
+        }
     });
 
     let mut app = TuiApp::new(
@@ -488,11 +492,9 @@ mod tests {
     fn cli_leaves_offline_actions_empty_for_a_pre_tui_command() {
         let cli = Cli::try_parse_from(["tcui", "upgrade"]).expect("upgrade command parses");
 
-        assert!(
-            OfflineAction::from_cli(&cli)
-                .expect("upgrade does not conflict with offline actions")
-                .is_none()
-        );
+        assert!(OfflineAction::from_cli(&cli)
+            .expect("upgrade does not conflict with offline actions")
+            .is_none());
     }
 
     #[cfg(feature = "memory")]

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use color_eyre::{Result, eyre::eyre};
+use color_eyre::{eyre::eyre, Result};
 use serde::Deserialize;
 
 mod platform;

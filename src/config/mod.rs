@@ -6,7 +6,7 @@ pub mod soul;
 pub mod tui;
 
 pub use app_config::{
-    AppConfig, LOCAL_PROVIDER_NAME, LocalInferenceConfig, LocalServerType, ProviderConfig,
+    AppConfig, LocalInferenceConfig, LocalServerType, ProviderConfig, LOCAL_PROVIDER_NAME,
 };
 pub use key_store::KeyStore;
 pub use mcp_config::McpServerConfig;

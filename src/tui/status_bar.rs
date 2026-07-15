@@ -1,8 +1,8 @@
-use ratatui::{Frame, prelude::*, widgets::*};
+use ratatui::{prelude::*, widgets::*, Frame};
 use unicode_width::UnicodeWidthStr;
 
-pub use crate::tui::status_bar_layout::StatusBarConfig;
 use crate::tui::status_bar_layout::slot_rect;
+pub use crate::tui::status_bar_layout::StatusBarConfig;
 
 const SELECTOR_MIN_WIDTH: usize = 30;
 

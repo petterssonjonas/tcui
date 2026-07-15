@@ -7,8 +7,8 @@ use chrono::{Duration, Utc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::codex::{
-    CodexCredentialSource, CodexNativeAdapter, codex_status, read_external_credential,
-    resolve_credential,
+    codex_status, read_external_credential, resolve_credential, CodexCredentialSource,
+    CodexNativeAdapter,
 };
 use super::codex_test_support::TestEnvironment;
 use crate::config::key_store::{OAuthCredential, OAuthCredentialOwnership, OAuthCredentialSource};
@@ -18,8 +18,8 @@ use crate::config::{AppConfig, KeyStore};
 // owns real terminal SIGINT/process-group event wiring and dispatching that status through the CLI.
 
 #[test]
-fn external_legacy_auth_is_read_in_place_without_secret_debug_output()
--> Result<(), Box<dyn std::error::Error>> {
+fn external_legacy_auth_is_read_in_place_without_secret_debug_output(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");
@@ -39,8 +39,8 @@ fn external_legacy_auth_is_read_in_place_without_secret_debug_output()
 }
 
 #[test]
-fn external_current_auth_uses_top_level_account_without_copying_file()
--> Result<(), Box<dyn std::error::Error>> {
+fn external_current_auth_uses_top_level_account_without_copying_file(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");
@@ -58,8 +58,8 @@ fn external_current_auth_uses_top_level_account_without_copying_file()
 }
 
 #[test]
-fn tcui_native_credential_has_precedence_without_mutating_external_auth()
--> Result<(), Box<dyn std::error::Error>> {
+fn tcui_native_credential_has_precedence_without_mutating_external_auth(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");
@@ -100,8 +100,8 @@ fn tcui_native_credential_has_precedence_without_mutating_external_auth()
 }
 
 #[tokio::test]
-async fn native_status_is_redacted_and_ordinary_logout_preserves_external_auth()
--> Result<(), Box<dyn std::error::Error>> {
+async fn native_status_is_redacted_and_ordinary_logout_preserves_external_auth(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");
@@ -155,8 +155,8 @@ async fn native_status_is_redacted_and_ordinary_logout_preserves_external_auth()
     Ok(())
 }
 
-async fn revoke_server()
--> Result<(String, tokio::task::JoinHandle<Result<(), std::io::Error>>), std::io::Error> {
+async fn revoke_server(
+) -> Result<(String, tokio::task::JoinHandle<Result<(), std::io::Error>>), std::io::Error> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("http://{}", listener.local_addr()?);
     let server = tokio::spawn(async move {

@@ -1,13 +1,13 @@
 use chrono::Utc;
 
 use crate::llm::auth::oauth::{
-    AuthorizationCode, AuthorizationCodeExchange, ClientId, OAuthError, PkceVerifier, RedirectUri,
-    TokenEndpoint, TokenService, oauth_cancellation,
+    oauth_cancellation, AuthorizationCode, AuthorizationCodeExchange, ClientId, OAuthError,
+    PkceVerifier, RedirectUri, TokenEndpoint, TokenService,
 };
 
 #[tokio::test]
-async fn token_exchange_rejects_an_encoded_form_larger_than_the_request_limit()
--> Result<(), OAuthError> {
+async fn token_exchange_rejects_an_encoded_form_larger_than_the_request_limit(
+) -> Result<(), OAuthError> {
     let request = AuthorizationCodeExchange::new(
         ClientId::parse(&"&".repeat(4_096))?,
         RedirectUri::parse("http://127.0.0.1:34567/callback")?,
@@ -26,8 +26,8 @@ async fn token_exchange_rejects_an_encoded_form_larger_than_the_request_limit()
 }
 
 #[tokio::test]
-async fn token_exchange_rejects_a_field_larger_than_the_request_field_limit()
--> Result<(), OAuthError> {
+async fn token_exchange_rejects_a_field_larger_than_the_request_field_limit(
+) -> Result<(), OAuthError> {
     let request = AuthorizationCodeExchange::new(
         ClientId::parse(&"x".repeat(4_097))?,
         RedirectUri::parse("http://127.0.0.1:34567/callback")?,

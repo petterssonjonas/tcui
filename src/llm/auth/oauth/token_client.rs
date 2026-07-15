@@ -2,13 +2,13 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use oauth2::{
-    AsyncHttpClient, Client as OAuthClient, RequestTokenError, StandardRevocableToken, TokenUrl,
     basic::{BasicErrorResponse, BasicRevocationErrorResponse, BasicTokenIntrospectionResponse},
+    AsyncHttpClient, Client as OAuthClient, RequestTokenError, StandardRevocableToken, TokenUrl,
 };
-use reqwest::{Client, Url, redirect::Policy};
+use reqwest::{redirect::Policy, Client, Url};
 use tokio::time::Instant;
 
-use super::http_client::{BoundedOAuthHttpClient, OAuthHttpError, validate_form};
+use super::http_client::{validate_form, BoundedOAuthHttpClient, OAuthHttpError};
 use super::token::AuthorizationCodeExchange;
 use super::token_values::{OpenIdTokenResponse, RefreshTokenExchange, TokenSet};
 use super::{OAuthCancellation, OAuthError, TokenErrorKind};

@@ -7,9 +7,9 @@ use crate::config::key_store::{
 };
 use crate::config::{AppConfig, KeyStore};
 use crate::llm::auth::{
-    oauth::{OAuthError, RedirectUri, oauth_cancellation},
+    oauth::{oauth_cancellation, OAuthError, RedirectUri},
     openrouter::{
-        OpenRouterAdapter, OpenRouterError, OpenRouterTestEndpoints, persist_exchanged_key,
+        persist_exchanged_key, OpenRouterAdapter, OpenRouterError, OpenRouterTestEndpoints,
     },
 };
 
@@ -39,8 +39,8 @@ fn prior_credential() -> Credential {
 }
 
 #[test]
-fn cancelled_after_http_before_persist_preserves_prior_key()
--> Result<(), Box<dyn std::error::Error>> {
+fn cancelled_after_http_before_persist_preserves_prior_key(
+) -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let _guard = crate::test_support::env_lock()
         .lock()
@@ -74,8 +74,8 @@ fn cancelled_after_http_before_persist_preserves_prior_key()
     clippy::await_holding_lock,
     reason = "The process-wide environment fixture must remain isolated through async cleanup."
 )]
-async fn rejected_exchange_preserves_prior_key_and_redacts_code()
--> Result<(), Box<dyn std::error::Error>> {
+async fn rejected_exchange_preserves_prior_key_and_redacts_code(
+) -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let _guard = crate::test_support::env_lock()
         .lock()
@@ -125,8 +125,8 @@ async fn rejected_exchange_preserves_prior_key_and_redacts_code()
     clippy::await_holding_lock,
     reason = "The process-wide environment fixture must remain isolated through async cleanup."
 )]
-async fn expired_exchange_code_returns_typed_rejection_without_persisting()
--> Result<(), Box<dyn std::error::Error>> {
+async fn expired_exchange_code_returns_typed_rejection_without_persisting(
+) -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let _guard = crate::test_support::env_lock()
         .lock()

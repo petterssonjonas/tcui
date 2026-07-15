@@ -2,7 +2,7 @@ use std::sync::{Arc, Barrier};
 
 use chrono::{DateTime, Utc};
 
-use super::test_support::{TestEnv, env_lock};
+use super::test_support::{env_lock, TestEnv};
 use super::*;
 
 const CONCURRENT_WRITERS: usize = 16;

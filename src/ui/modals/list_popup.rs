@@ -1,4 +1,4 @@
-use ratatui::{Frame, layout::Rect, prelude::*, widgets::*};
+use ratatui::{layout::Rect, prelude::*, widgets::*, Frame};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListPopupAction {

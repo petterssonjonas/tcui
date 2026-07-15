@@ -10,9 +10,12 @@ A focused terminal chat workspace: calm, dense, and readable under long sessions
 
 | Role | Token | Light | Dark | Usage |
 |------|-------|-------|------|-------|
-| Surface/primary | terminal-default | terminal-default | terminal-default | Main terminal background |
-| Surface/elevated | terminal-black | terminal-black | terminal-black | Popups, dropdowns, status bar |
-| Text/primary | terminal-white | terminal-white | terminal-white | Main messages |
+| Surface/primary | theme-background | terminal-default | dark theme neutral | Chat viewport where the conversation happens |
+| Surface/elevated | theme-panel | terminal-black | raised dark theme neutral | Popups, dropdowns, status bar |
+| Surface/sidebar | theme-sidebar | terminal-black | one step darker than the chat viewport | Side panels and assistant answers |
+| Surface/message | theme-card | terminal-black | dark message neutral | User message blocks |
+| Surface/selection | theme-selection | terminal-reversed | dark neutral or intentional accent pairing | Selected rows and code labels |
+| Text/primary | theme-foreground | terminal-white | light theme foreground | Main messages and selected text |
 | Text/secondary | terminal-gray | terminal-gray | terminal-gray | Hints and labels |
 | Text/muted | terminal-dark-gray | terminal-dark-gray | terminal-dark-gray | Placeholders |
 | Accent/primary | terminal-cyan | terminal-cyan | terminal-cyan | Provider/model controls, focus |
@@ -24,6 +27,9 @@ A focused terminal chat workspace: calm, dense, and readable under long sessions
 ### Rules
 
 - Use terminal colors through `ratatui::style::Color`; no raw ANSI escape sequences in widgets.
+- Custom themes keep the canvas and large surfaces dark, with light foreground text. Accent colors must not fill large selection or message regions.
+- Custom-theme selections use a dark neutral background with readable foreground text; intentional theme-specific accent pairings are allowed.
+- User messages use a dark card-family neutral. Assistant answers use a darker neutral so both remain distinct from the chat viewport.
 - Cyan is reserved for chat controls and assistant identity. Green is reserved for user identity and success.
 - Warning yellow means the user can fix the state from settings.
 

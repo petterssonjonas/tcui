@@ -29,8 +29,8 @@ async fn local_http_fixture() -> io::Result<(String, JoinHandle<io::Result<()>>)
 }
 
 #[tokio::test]
-async fn local_reqwest_fixture_round_trips_with_explicit_timeout()
--> Result<(), Box<dyn std::error::Error>> {
+async fn local_reqwest_fixture_round_trips_with_explicit_timeout(
+) -> Result<(), Box<dyn std::error::Error>> {
     let (endpoint, server) = local_http_fixture().await?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(500))

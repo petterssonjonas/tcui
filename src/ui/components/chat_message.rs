@@ -1,4 +1,4 @@
-use ratatui::{Frame, layout::Rect, prelude::*, widgets::*};
+use ratatui::{layout::Rect, prelude::*, widgets::*, Frame};
 use std::env;
 
 fn user_display_name() -> String {

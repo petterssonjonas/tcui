@@ -122,8 +122,8 @@ impl Drop for PersistentRestoreBackupRenameFailure {
 }
 
 #[cfg(all(test, unix))]
-pub(super) fn inject_persistent_restore_backup_rename_failure()
--> PersistentRestoreBackupRenameFailure {
+pub(super) fn inject_persistent_restore_backup_rename_failure(
+) -> PersistentRestoreBackupRenameFailure {
     INJECT_PERSISTENT_RESTORE_BACKUP_RENAME_FAILURE.with(|failure| failure.set(true));
     PersistentRestoreBackupRenameFailure
 }
@@ -224,16 +224,14 @@ mod tests {
             fs::read(&target).expect("read original credential file"),
             original
         );
-        assert!(
-            fs::read_dir(&root.0)
-                .expect("read rollback test directory")
-                .all(|entry| {
-                    !entry
-                        .expect("read rollback test entry")
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with(".tcui-keys-")
-                })
-        );
+        assert!(fs::read_dir(&root.0)
+            .expect("read rollback test directory")
+            .all(|entry| {
+                !entry
+                    .expect("read rollback test entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".tcui-keys-")
+            }));
     }
 }

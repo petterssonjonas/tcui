@@ -1,10 +1,10 @@
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::Utc;
 use secrecy::ExposeSecret;
 use serde::Deserialize;
 
-use super::CodexNativeAdapter;
 use super::error::CodexNativeError;
+use super::CodexNativeAdapter;
 use crate::config::key_store::{OAuthCredential, OAuthCredentialOwnership, OAuthCredentialSource};
 use crate::config::{AppConfig, KeyStore};
 use crate::llm::auth::codex::credential::CodexCredential;

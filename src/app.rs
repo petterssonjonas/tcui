@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::io::IsTerminal;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 pub mod action;
 mod artifacts;

@@ -1,14 +1,13 @@
 use std::path::{Path, PathBuf};
 
 use rmcp::{
-    RoleServer, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
         ErrorData, ListResourcesResult, PaginatedRequestParams, RawResource,
         ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents,
         ServerCapabilities, ServerInfo,
     },
-    schemars, tool, tool_handler, tool_router,
+    schemars, tool, tool_handler, tool_router, RoleServer, ServerHandler, ServiceExt,
 };
 use serde::Deserialize;
 
@@ -170,9 +169,11 @@ impl ServerHandler for MemoryMcp {
                 .status()
                 .and_then(|status| serde_json::to_string(&status).map_err(Into::into))
                 .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
-            return Ok(ReadResourceResult::new(vec![
-                ResourceContents::text(status, request.uri).with_mime_type("application/json"),
-            ]));
+            return Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                status,
+                request.uri,
+            )
+            .with_mime_type("application/json")]));
         }
         let encoded = request
             .uri
@@ -184,9 +185,11 @@ impl ServerHandler for MemoryMcp {
             .store
             .read(Path::new(&path))
             .map_err(|error| ErrorData::resource_not_found(error.to_string(), None))?;
-        Ok(ReadResourceResult::new(vec![
-            ResourceContents::text(markdown, request.uri).with_mime_type("text/markdown"),
-        ]))
+        Ok(ReadResourceResult::new(vec![ResourceContents::text(
+            markdown,
+            request.uri,
+        )
+        .with_mime_type("text/markdown")]))
     }
 }
 

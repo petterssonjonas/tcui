@@ -1,5 +1,5 @@
 use crate::tui::status_bar::{ConnectionStatus, StatusBar, StatusBarAreas, StatusBarConfig};
-use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+use ratatui::{backend::TestBackend, layout::Rect, Terminal};
 
 fn rendered(status: StatusBar, height: u16) -> (String, StatusBarAreas) {
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");

@@ -10,11 +10,11 @@ mod support;
 use std::io::Write;
 use std::process::Stdio;
 
-use support::{CliEnvironment, JsonEndpoint, configure_openrouter};
+use support::{configure_openrouter, CliEnvironment, JsonEndpoint};
 
 #[test]
-fn auth_cli_delegates_codex_then_preserves_external_credentials_until_external_logout()
--> Result<(), Box<dyn std::error::Error>> {
+fn auth_cli_delegates_codex_then_preserves_external_credentials_until_external_logout(
+) -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let environment = CliEnvironment::new("codex-round-trip")?;
     environment.install_codex(
@@ -58,8 +58,8 @@ fn auth_cli_delegates_codex_then_preserves_external_credentials_until_external_l
 }
 
 #[test]
-fn auth_cli_exchanges_openrouter_headless_code_then_reports_and_removes_only_local_credential()
--> Result<(), Box<dyn std::error::Error>> {
+fn auth_cli_exchanges_openrouter_headless_code_then_reports_and_removes_only_local_credential(
+) -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let environment = CliEnvironment::new("openrouter-round-trip")?;
     let endpoint = JsonEndpoint::respond_once(r#"{"key":"openrouter-key-canary"}"#)?;
@@ -108,8 +108,8 @@ fn auth_cli_exchanges_openrouter_headless_code_then_reports_and_removes_only_loc
 }
 
 #[test]
-fn auth_cli_rejects_unsupported_provider_without_opening_a_browser()
--> Result<(), Box<dyn std::error::Error>> {
+fn auth_cli_rejects_unsupported_provider_without_opening_a_browser(
+) -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let environment = CliEnvironment::new("unsupported")?;
 

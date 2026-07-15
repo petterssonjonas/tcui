@@ -1,7 +1,7 @@
 use color_eyre::eyre::eyre;
 use serde::Deserialize;
 
-use crate::llm::chat::{ChatStreamEvent, TitleTagFilter, push_title_filtered_content};
+use crate::llm::chat::{push_title_filtered_content, ChatStreamEvent, TitleTagFilter};
 
 #[derive(Deserialize)]
 struct CodexStreamEvent {

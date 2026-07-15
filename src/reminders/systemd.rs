@@ -1,4 +1,4 @@
-use super::{ReminderError, ReminderSchedule, parse::weekday_label};
+use super::{parse::weekday_label, ReminderError, ReminderSchedule};
 
 pub(super) fn schedule(id: &str, schedule: &ReminderSchedule) -> Result<String, ReminderError> {
     let unit = format!("tcui-reminder-{id}");

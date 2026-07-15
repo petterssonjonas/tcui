@@ -1,6 +1,6 @@
 use std::future::Future;
 
-use tokio::time::{Instant, sleep_until};
+use tokio::time::{sleep_until, Instant};
 
 use super::{OAuthCancellation, OAuthError};
 

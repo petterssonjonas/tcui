@@ -5,9 +5,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::tui::components::{ConfirmModal, GroupHeader, SearchField, centered_rect};
+use crate::tui::components::{centered_rect, ConfirmModal, GroupHeader, SearchField};
 use crate::tui::focus::Focus;
-use ratatui::{Frame, prelude::*, widgets::*};
+use ratatui::{prelude::*, widgets::*, Frame};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SettingCategory {
@@ -652,7 +652,8 @@ pub fn all_settings() -> Vec<Setting> {
         subsection("ui_layout", "UI Layout", "Panels and status widgets", C::UiLayout),
         subsection("chat_behavior", "Chat Behavior", "Chat input and output defaults", C::ChatBehavior),
         setting("theme_system", "System", "Use terminal default colors", C::Theme, T::Theme("system"), &["theme", "default"], D::Safe),
-        setting("theme_gruvbox", "Gruvbox", "Warm retro palette", C::Theme, T::Theme("gruvbox"), &["theme", "color"], D::Safe),
+        setting("theme_gruvbox_dark_low_contrast", "Gruvbox Dark Low Contrast", "Warm muted dark palette", C::Theme, T::Theme("gruvbox-dark-low-contrast"), &["theme", "color", "gruvbox", "low", "contrast"], D::Safe),
+        setting("theme_gruvbox_dark_high_contrast", "Gruvbox Dark High Contrast", "Warm vivid dark palette", C::Theme, T::Theme("gruvbox-dark-high-contrast"), &["theme", "color", "gruvbox", "high", "contrast"], D::Safe),
         setting("theme_nord", "Nord", "Arctic blue palette", C::Theme, T::Theme("nord"), &["theme", "color"], D::Safe),
         setting("theme_dracula", "Dracula", "Purple dark palette", C::Theme, T::Theme("dracula"), &["theme", "color"], D::Safe),
         setting("theme_github", "GitHub", "GitHub dark palette", C::Theme, T::Theme("github"), &["theme", "color"], D::Safe),
@@ -751,7 +752,7 @@ mod tests {
             .filter(|setting| setting.setting_type == SettingType::Subsection)
             .count();
 
-        assert_eq!(settings.len(), 24);
+        assert_eq!(settings.len(), 25);
         assert_eq!(subsections, 3);
         assert_eq!(SettingCategory::ALL.len(), 12);
     }
@@ -763,7 +764,7 @@ mod tests {
 
         let results = panel.results(&settings);
 
-        assert_eq!(results.len(), 24);
+        assert_eq!(results.len(), 25);
     }
 
     #[test]
@@ -777,11 +778,9 @@ mod tests {
         assert!(results.iter().any(|(_, setting)| {
             matches!(setting.setting_type, SettingType::Theme("opencode"))
         }));
-        assert!(
-            results
-                .iter()
-                .all(|(_, setting)| { matches!(setting.setting_type, SettingType::Theme(_)) })
-        );
+        assert!(results
+            .iter()
+            .all(|(_, setting)| { matches!(setting.setting_type, SettingType::Theme(_)) }));
     }
 
     #[test]
@@ -794,16 +793,15 @@ mod tests {
 
         let results = panel.results(&settings);
 
-        assert!(
-            results
-                .iter()
-                .any(|(_, setting)| setting.id == "theme_gruvbox")
-        );
-        assert!(
-            results
-                .iter()
-                .all(|(_, setting)| setting_matches(setting, "gruvbox"))
-        );
+        assert!(results
+            .iter()
+            .any(|(_, setting)| { setting.id == "theme_gruvbox_dark_low_contrast" }));
+        assert!(results
+            .iter()
+            .any(|(_, setting)| { setting.id == "theme_gruvbox_dark_high_contrast" }));
+        assert!(results
+            .iter()
+            .all(|(_, setting)| setting_matches(setting, "gruvbox")));
     }
 
     #[test]
@@ -815,7 +813,7 @@ mod tests {
         let results = panel.results(&settings);
 
         assert_eq!(panel.current_category(), Some(SettingCategory::Theme));
-        assert_eq!(results.len(), 14);
+        assert_eq!(results.len(), 15);
         assert!(results.iter().all(|(_, setting)| {
             setting.category == SettingCategory::Theme
                 && setting.setting_type != SettingType::Subsection

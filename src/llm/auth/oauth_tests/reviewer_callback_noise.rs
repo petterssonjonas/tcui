@@ -1,15 +1,15 @@
 use std::time::Duration;
 
 use crate::llm::auth::oauth::{
-    CallbackPath, CallbackTimeout, LoopbackCallback, LoopbackCallbackConfig, State,
-    oauth_cancellation,
+    oauth_cancellation, CallbackPath, CallbackTimeout, LoopbackCallback, LoopbackCallbackConfig,
+    State,
 };
 
 use super::callback_support::send_raw_callback;
 
 #[tokio::test]
-async fn loopback_callback_accepts_valid_response_after_four_invalid_connections()
--> Result<(), Box<dyn std::error::Error>> {
+async fn loopback_callback_accepts_valid_response_after_four_invalid_connections(
+) -> Result<(), Box<dyn std::error::Error>> {
     let state = State::generate()?;
     let state_value = state.as_str().to_owned();
     let callback = LoopbackCallback::bind(

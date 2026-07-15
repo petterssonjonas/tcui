@@ -2,8 +2,8 @@ use std::fmt;
 
 use secrecy::SecretString;
 
-use super::CredentialSource;
 use super::codex::{CodexCredential, CodexCredentialSource};
+use super::CredentialSource;
 
 #[derive(Clone)]
 pub(crate) struct Credential {

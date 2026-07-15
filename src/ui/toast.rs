@@ -1,12 +1,12 @@
 use ratatui::{
-    Frame,
     prelude::*,
     widgets::{Block, Clear, Paragraph},
+    Frame,
 };
 use std::collections::VecDeque;
 
-use crate::config::ToastPosition;
 use crate::config::app_config::{HeadingDownscale, MarkdownMode};
+use crate::config::ToastPosition;
 use crate::ui::components::markdown::MarkdownRenderer;
 use crate::ui::components::terminal_capabilities::{TerminalCapabilities, TerminalKind};
 

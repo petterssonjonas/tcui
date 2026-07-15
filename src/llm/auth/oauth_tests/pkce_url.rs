@@ -31,8 +31,8 @@ fn generated_state_is_url_safe_and_has_256_bits_of_encoded_entropy() -> Result<(
 }
 
 #[test]
-fn state_comparison_rejects_short_and_long_candidates_without_length_shortcuts()
--> Result<(), OAuthError> {
+fn state_comparison_rejects_short_and_long_candidates_without_length_shortcuts(
+) -> Result<(), OAuthError> {
     let state = State::generate()?;
 
     assert!(!state.matches(&state.as_str()[..42]));
@@ -91,8 +91,8 @@ fn authorization_url_preserves_existing_query_and_encodes_oauth_values() -> Resu
 }
 
 #[test]
-fn authorization_url_rejects_endpoints_with_reserved_oauth_query_parameters()
--> Result<(), OAuthError> {
+fn authorization_url_rejects_endpoints_with_reserved_oauth_query_parameters(
+) -> Result<(), OAuthError> {
     let endpoint =
         AuthorizationEndpoint::parse("https://authorization.example/authorize?state=bad")?;
     let request = AuthorizationRequest::new(

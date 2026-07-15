@@ -2,7 +2,7 @@ use std::fmt;
 
 use chrono::{DateTime, Utc};
 
-use super::credential::{CodexCredentialSource, CodexResolutionError, resolve_credential};
+use super::credential::{resolve_credential, CodexCredentialSource, CodexResolutionError};
 use crate::config::AppConfig;
 
 pub(crate) enum CodexStatus {

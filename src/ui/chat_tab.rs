@@ -1,14 +1,14 @@
 #![allow(dead_code)]
 use crate::config::app_config::{HeadingDownscale, MarkdownMode, TextAlignment};
-use crate::ui::ModelInfo;
-use crate::ui::components::image_block::{ImageBlockState, is_local_image_source};
+use crate::ui::components::image_block::{is_local_image_source, ImageBlockState};
 use crate::ui::components::markdown::MarkdownRenderer;
 use crate::ui::components::markdown_model::{KittyHeadingTier, LinkTarget, RenderedImage};
+use crate::ui::ModelInfo;
 use ratatui::{
-    Frame,
     layout::{Rect, Size},
     prelude::*,
     widgets::*,
+    Frame,
 };
 use ratatui_image::sliced::SignedPosition;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -763,6 +763,9 @@ impl<'a> ChatTab<'a> {
                         line,
                         Style::default().bg(theme.user_bubble),
                     ));
+                } else if is_assistant {
+                    line.style = line.style.bg(theme.assistant_bubble);
+                    lines.push(line);
                 } else {
                     lines.push(line);
                 }
@@ -915,14 +918,14 @@ impl<'a> ChatTab<'a> {
         )
         .block(
             Block::default()
-                .style(Style::default().bg(theme.code_bg))
+                .style(Style::default().bg(theme.panel))
                 .title(" Message ")
                 .title_style(Style::default().fg(theme.muted)),
         )
         .style(if self.state.input_content.is_empty() {
-            Style::default().fg(theme.muted).bg(theme.code_bg)
+            Style::default().fg(theme.muted).bg(theme.panel)
         } else {
-            Style::default().fg(theme.foreground).bg(theme.code_bg)
+            Style::default().fg(theme.foreground).bg(theme.panel)
         });
 
         f.render_widget(input, box_area);
@@ -997,7 +1000,7 @@ impl<'a> ChatTab<'a> {
         )
         .block(
             Block::default()
-                .style(Style::default().bg(theme.code_bg))
+                .style(Style::default().bg(theme.panel))
                 .title(" Start a conversation ")
                 .title_style(
                     Style::default()
@@ -1006,9 +1009,9 @@ impl<'a> ChatTab<'a> {
                 ),
         )
         .style(if self.state.input_content.is_empty() {
-            Style::default().fg(theme.muted).bg(theme.code_bg)
+            Style::default().fg(theme.muted).bg(theme.panel)
         } else {
-            Style::default().fg(theme.foreground).bg(theme.code_bg)
+            Style::default().fg(theme.foreground).bg(theme.panel)
         });
 
         f.render_widget(input, box_area);
@@ -1435,7 +1438,7 @@ fn aligned_line_x(area: Rect, line: &Line<'_>) -> u16 {
 mod tests {
     use super::*;
     use crate::ui::components::terminal_capabilities::{TerminalCapabilities, TerminalKind};
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
     fn skill_mentions_on_one_line_have_independent_hit_areas() {
@@ -1674,7 +1677,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_styles_assistant_box_and_user_clean_text() {
+    fn transcript_uses_distinct_user_and_assistant_surfaces() {
         let theme = crate::theme::active_theme();
         let mut ui = crate::ui::UI::new();
         ui.tabs[0].messages.push(crate::app::message::Message::new(
@@ -1732,7 +1735,7 @@ mod tests {
             .iter()
             .find(|line| line.to_string().contains("Answer"))
             .expect("assistant answer line");
-        assert_eq!(assistant_line.style.bg, None);
+        assert_eq!(assistant_line.style.bg, Some(theme.assistant_bubble));
     }
 
     #[test]
@@ -1894,14 +1897,12 @@ mod tests {
         }
 
         // Then
-        assert!(
-            terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .any(|cell| cell.symbol().contains("\u{1b}]66;"))
-        );
+        assert!(terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .any(|cell| cell.symbol().contains("\u{1b}]66;")));
     }
 
     #[test]
@@ -1942,14 +1943,12 @@ mod tests {
             .draw(|frame| chat.render_messages(frame, Rect::new(0, 0, 40, 1)))
             .expect("render clipped heading");
 
-        assert!(
-            !terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .any(|cell| cell.symbol().contains("\u{1b}]66;"))
-        );
+        assert!(!terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .any(|cell| cell.symbol().contains("\u{1b}]66;")));
     }
 
     #[test]
@@ -2023,6 +2022,11 @@ mod tests {
 
         assert!(chat.state.chat_scrollbar_area.is_some());
         assert!(chat.state.input_text_area.is_some());
+        let input_area = chat.state.input_area.expect("input area");
+        assert_eq!(
+            terminal.backend().buffer()[(input_area.x, input_area.y)].bg,
+            crate::theme::active_theme().panel
+        );
     }
 
     #[test]

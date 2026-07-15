@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
-use rusqlite::{Connection, ffi::sqlite3_auto_extension, params};
+use rusqlite::{ffi::sqlite3_auto_extension, params, Connection};
 use thiserror::Error;
 
 use super::embedding::{DIMENSIONS, MODEL_ID};
@@ -144,7 +144,7 @@ fn register_sqlite_vec() -> Result<(), IndexError> {
 mod tests {
     use std::fs;
 
-    use super::{MODEL_ID, MemoryIndex};
+    use super::{MemoryIndex, MODEL_ID};
 
     #[test]
     fn cache_rebuilds_when_model_metadata_changes() {

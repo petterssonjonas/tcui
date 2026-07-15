@@ -7,9 +7,9 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 use crate::llm::auth::oauth::{
-    AuthorizationCode, AuthorizationCodeExchange, ClientId, DeviceCode, DeviceCodeLifetime,
-    DevicePollingRequest, OAuthError, PkceVerifier, PollInterval, RedirectUri, TokenEndpoint,
-    TokenService, oauth_cancellation,
+    oauth_cancellation, AuthorizationCode, AuthorizationCodeExchange, ClientId, DeviceCode,
+    DeviceCodeLifetime, DevicePollingRequest, OAuthError, PkceVerifier, PollInterval, RedirectUri,
+    TokenEndpoint, TokenService,
 };
 
 fn exchange_request() -> Result<AuthorizationCodeExchange, OAuthError> {
@@ -22,8 +22,8 @@ fn exchange_request() -> Result<AuthorizationCodeExchange, OAuthError> {
 }
 
 #[tokio::test(start_paused = true)]
-async fn token_body_read_honors_cancellation_without_wall_clock_sleep()
--> Result<(), Box<dyn std::error::Error>> {
+async fn token_body_read_honors_cancellation_without_wall_clock_sleep(
+) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = TokenEndpoint::parse(&format!("http://{}", listener.local_addr()?))?;
     let (headers_sent, headers_received) = oneshot::channel();
@@ -65,8 +65,8 @@ async fn token_body_read_honors_cancellation_without_wall_clock_sleep()
 }
 
 #[tokio::test(start_paused = true)]
-async fn expired_device_request_does_not_open_a_connection()
--> Result<(), Box<dyn std::error::Error>> {
+async fn expired_device_request_does_not_open_a_connection(
+) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = TokenEndpoint::parse(&format!("http://{}", listener.local_addr()?))?;
     let (accepted, mut accepted_receiver) = oneshot::channel();
@@ -102,8 +102,8 @@ async fn expired_device_request_does_not_open_a_connection()
 }
 
 #[tokio::test(start_paused = true)]
-async fn nonresponsive_token_endpoint_honors_monotonic_request_deadline()
--> Result<(), Box<dyn std::error::Error>> {
+async fn nonresponsive_token_endpoint_honors_monotonic_request_deadline(
+) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = TokenEndpoint::parse(&format!("http://{}", listener.local_addr()?))?;
     let (accepted, accepted_receiver) = oneshot::channel();
@@ -139,8 +139,8 @@ async fn nonresponsive_token_endpoint_honors_monotonic_request_deadline()
 }
 
 #[tokio::test(start_paused = true)]
-async fn device_request_honors_its_monotonic_deadline_while_endpoint_is_silent()
--> Result<(), Box<dyn std::error::Error>> {
+async fn device_request_honors_its_monotonic_deadline_while_endpoint_is_silent(
+) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = TokenEndpoint::parse(&format!("http://{}", listener.local_addr()?))?;
     let (accepted, accepted_receiver) = oneshot::channel();

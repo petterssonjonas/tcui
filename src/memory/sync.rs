@@ -1,13 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{params, OptionalExtension};
 
 use super::embedding::{as_blob, embed_many};
 use super::index::MemoryIndex;
 use super::markdown::MemoryChunk;
 use super::paths::MemoryPaths;
-use super::store::{MemoryDocument, MemoryError, is_memory_document_path};
+use super::store::{is_memory_document_path, MemoryDocument, MemoryError};
 
 static SYNC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

@@ -1,8 +1,8 @@
 use chrono::{TimeZone, Utc};
 
 use crate::llm::auth::oauth::{
-    AuthorizationCode, AuthorizationCodeExchange, ClientId, OAuthError, PkceVerifier, RedirectUri,
-    TokenErrorKind, TokenService, oauth_cancellation,
+    oauth_cancellation, AuthorizationCode, AuthorizationCodeExchange, ClientId, OAuthError,
+    PkceVerifier, RedirectUri, TokenErrorKind, TokenService,
 };
 
 use super::token_support::token_fixture;
@@ -17,8 +17,8 @@ fn exchange_request() -> Result<AuthorizationCodeExchange, OAuthError> {
 }
 
 #[tokio::test]
-async fn token_response_accepts_rfc_extension_members_on_success_and_error()
--> Result<(), Box<dyn std::error::Error>> {
+async fn token_response_accepts_rfc_extension_members_on_success_and_error(
+) -> Result<(), Box<dyn std::error::Error>> {
     let (endpoint, _, server) = token_fixture(
         "200 OK",
         r#"{"access_token":"access","token_type":"Bearer","provider_extension":{"nested":true}}"#
@@ -80,8 +80,8 @@ async fn token_response_rejects_non_200_success_status() -> Result<(), Box<dyn s
 }
 
 #[tokio::test]
-async fn token_response_rejects_wrong_types_for_required_success_members()
--> Result<(), Box<dyn std::error::Error>> {
+async fn token_response_rejects_wrong_types_for_required_success_members(
+) -> Result<(), Box<dyn std::error::Error>> {
     let (endpoint, _, server) = token_fixture(
         "200 OK",
         r#"{"access_token":false,"token_type":"Bearer","provider_extension":"ignored"}"#.to_owned(),
@@ -101,8 +101,8 @@ async fn token_response_rejects_wrong_types_for_required_success_members()
 }
 
 #[tokio::test]
-async fn token_response_rejects_a_wrong_type_for_the_required_error_member()
--> Result<(), Box<dyn std::error::Error>> {
+async fn token_response_rejects_a_wrong_type_for_the_required_error_member(
+) -> Result<(), Box<dyn std::error::Error>> {
     let (endpoint, _, server) = token_fixture(
         "400 Bad Request",
         r#"{"error":false,"provider_extension":"ignored"}"#.to_owned(),

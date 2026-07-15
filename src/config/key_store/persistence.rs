@@ -1,9 +1,9 @@
-use super::KeyStoreError;
 use super::format::{self, LoadedKeysFile, StoredKeysFile};
 #[cfg(unix)]
 use super::path_security::ParentIdentity;
 use super::path_security::{open_parent, parent_and_file_name};
 use super::rollback::PreviousFileGuard;
+use super::KeyStoreError;
 #[cfg(unix)]
 use cap_std::fs::OpenOptionsExt;
 use cap_std::fs::{Dir, File, OpenOptions};

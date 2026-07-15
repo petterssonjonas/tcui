@@ -4,11 +4,11 @@ use color_eyre::eyre::eyre;
 use secrecy::ExposeSecret;
 
 use crate::config::AppConfig;
-use crate::llm::auth::codex::{CodexCredentialSource, CodexNativeAdapter, resolve_credential};
+use crate::llm::auth::codex::{resolve_credential, CodexCredentialSource, CodexNativeAdapter};
 use crate::llm::auth::oauth::oauth_cancellation;
 use crate::llm::chat::{
-    ChatRequest, ChatStreamEvent, ChatStreamOutput, TitleTagFilter, ensure_not_empty,
-    flush_title_filter,
+    ensure_not_empty, flush_title_filter, ChatRequest, ChatStreamEvent, ChatStreamOutput,
+    TitleTagFilter,
 };
 
 mod request;
@@ -17,7 +17,7 @@ mod transport;
 
 use request::{build_request_body, codex_headers, validate_reasoning_effort};
 use sse::codex_stream_event;
-use transport::{CodexTransportError, TransportLimits, http_error, read_sse};
+use transport::{http_error, read_sse, CodexTransportError, TransportLimits};
 
 #[derive(Clone)]
 struct CodexSession {

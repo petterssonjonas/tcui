@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 

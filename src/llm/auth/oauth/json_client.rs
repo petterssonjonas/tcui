@@ -1,7 +1,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use reqwest::{Client, Url, redirect::Policy};
+use reqwest::{redirect::Policy, Client, Url};
 use tokio::time::Instant;
 
 use super::http_client::{BoundedOAuthHttpClient, OAuthHttpError};

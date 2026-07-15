@@ -1,7 +1,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use tokio::time::{Instant, timeout_at};
+use tokio::time::{timeout_at, Instant};
 
 mod framing;
 

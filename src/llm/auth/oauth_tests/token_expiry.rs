@@ -2,7 +2,7 @@ use chrono::{TimeZone, Utc};
 
 use std::time::Duration;
 
-use crate::llm::auth::oauth::{ExpirySkew, OAuthError, calculate_expiry};
+use crate::llm::auth::oauth::{calculate_expiry, ExpirySkew, OAuthError};
 
 #[test]
 fn default_expiry_skew_reserves_thirty_seconds_before_expiry() -> Result<(), OAuthError> {

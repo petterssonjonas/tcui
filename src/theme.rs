@@ -110,32 +110,99 @@ const SYSTEM: ThemeSpec = ThemeSpec {
     ansi: SYSTEM_ANSI,
 };
 
-const THEMES: [ThemeSpec; 14] = [
+const THEMES: [ThemeSpec; 15] = [
     SYSTEM,
     ThemeSpec {
-        key: "gruvbox",
-        label: "Gruvbox",
+        key: "gruvbox-dark-low-contrast",
+        label: "Gruvbox Dark Low Contrast",
         is_system: false,
         background: Color::Rgb(29, 32, 33),
         foreground: Color::Rgb(235, 219, 178),
-        muted: Color::Rgb(146, 131, 116),
+        muted: Color::Rgb(168, 153, 132),
         accent: Color::Rgb(131, 165, 152),
-        accent_alt: Color::Rgb(215, 153, 33),
-        border: Color::Rgb(102, 92, 84),
-        panel: Color::Rgb(50, 48, 47),
-        sidebar: Color::Rgb(29, 32, 33),
-        card_bg: Color::Rgb(42, 40, 39),
+        accent_alt: Color::Rgb(184, 187, 38),
+        border: Color::Rgb(60, 56, 54),
+        panel: Color::Rgb(40, 40, 40),
+        sidebar: Color::Rgb(40, 40, 40),
+        card_bg: Color::Rgb(60, 56, 54),
         error: Color::Rgb(251, 73, 52),
         warning: Color::Rgb(250, 189, 47),
         success: Color::Rgb(184, 187, 38),
         info: Color::Rgb(131, 165, 152),
         code_bg: Color::Rgb(29, 32, 33),
-        code_fg: Color::Rgb(235, 219, 178),
-        selection_bg: Color::Rgb(131, 165, 152),
-        selection_fg: Color::Rgb(29, 32, 33),
-        user_bubble: Color::Rgb(69, 133, 136),
-        assistant_bubble: Color::Rgb(80, 73, 69),
-        ansi: SYSTEM_ANSI,
+        code_fg: Color::Rgb(131, 165, 152),
+        selection_bg: Color::Rgb(80, 73, 69),
+        selection_fg: Color::Rgb(131, 165, 152),
+        user_bubble: Color::Rgb(50, 48, 47),
+        assistant_bubble: Color::Rgb(40, 40, 40),
+        ansi: ansi(
+            [
+                Color::Rgb(29, 32, 33),
+                Color::Rgb(204, 36, 29),
+                Color::Rgb(152, 151, 26),
+                Color::Rgb(215, 153, 33),
+                Color::Rgb(69, 133, 136),
+                Color::Rgb(177, 98, 134),
+                Color::Rgb(104, 157, 106),
+                Color::Rgb(168, 153, 132),
+            ],
+            [
+                Color::Rgb(168, 153, 132),
+                Color::Rgb(251, 73, 52),
+                Color::Rgb(184, 187, 38),
+                Color::Rgb(250, 189, 47),
+                Color::Rgb(131, 165, 152),
+                Color::Rgb(211, 134, 155),
+                Color::Rgb(142, 192, 124),
+                Color::Rgb(235, 219, 178),
+            ],
+        ),
+    },
+    ThemeSpec {
+        key: "gruvbox-dark-high-contrast",
+        label: "Gruvbox Dark High Contrast",
+        is_system: false,
+        background: Color::Rgb(29, 32, 33),
+        foreground: Color::Rgb(235, 219, 178),
+        muted: Color::Rgb(168, 153, 132),
+        accent: Color::Rgb(69, 133, 136),
+        accent_alt: Color::Rgb(243, 128, 25),
+        border: Color::Rgb(80, 73, 69),
+        panel: Color::Rgb(40, 40, 40),
+        sidebar: Color::Rgb(40, 40, 40),
+        card_bg: Color::Rgb(60, 56, 54),
+        error: Color::Rgb(204, 36, 29),
+        warning: Color::Rgb(250, 189, 47),
+        success: Color::Rgb(152, 151, 26),
+        info: Color::Rgb(69, 133, 136),
+        code_bg: Color::Rgb(29, 32, 33),
+        code_fg: Color::Rgb(69, 133, 136),
+        selection_bg: Color::Rgb(80, 73, 69),
+        selection_fg: Color::Rgb(69, 133, 136),
+        user_bubble: Color::Rgb(50, 48, 47),
+        assistant_bubble: Color::Rgb(40, 40, 40),
+        ansi: ansi(
+            [
+                Color::Rgb(29, 32, 33),
+                Color::Rgb(204, 36, 29),
+                Color::Rgb(152, 151, 26),
+                Color::Rgb(215, 153, 33),
+                Color::Rgb(69, 133, 136),
+                Color::Rgb(177, 98, 134),
+                Color::Rgb(104, 157, 106),
+                Color::Rgb(168, 153, 132),
+            ],
+            [
+                Color::Rgb(146, 131, 116),
+                Color::Rgb(251, 73, 52),
+                Color::Rgb(184, 187, 38),
+                Color::Rgb(250, 189, 47),
+                Color::Rgb(131, 165, 152),
+                Color::Rgb(211, 134, 155),
+                Color::Rgb(142, 192, 124),
+                Color::Rgb(235, 219, 178),
+            ],
+        ),
     },
     ThemeSpec {
         key: "nord",
@@ -156,10 +223,10 @@ const THEMES: [ThemeSpec; 14] = [
         info: Color::Rgb(136, 192, 208),
         code_bg: Color::Rgb(43, 48, 59),
         code_fg: Color::Rgb(236, 239, 244),
-        selection_bg: Color::Rgb(136, 192, 208),
-        selection_fg: Color::Rgb(46, 52, 64),
-        user_bubble: Color::Rgb(94, 129, 172),
-        assistant_bubble: Color::Rgb(67, 76, 94),
+        selection_bg: Color::Rgb(76, 86, 106),
+        selection_fg: Color::Rgb(216, 222, 233),
+        user_bubble: Color::Rgb(52, 59, 73),
+        assistant_bubble: Color::Rgb(46, 52, 64),
         ansi: SYSTEM_ANSI,
     },
     ThemeSpec {
@@ -181,10 +248,10 @@ const THEMES: [ThemeSpec; 14] = [
         info: Color::Rgb(139, 233, 253),
         code_bg: Color::Rgb(33, 34, 44),
         code_fg: Color::Rgb(248, 248, 242),
-        selection_bg: Color::Rgb(189, 147, 249),
-        selection_fg: Color::Rgb(40, 42, 54),
-        user_bubble: Color::Rgb(68, 71, 90),
-        assistant_bubble: Color::Rgb(56, 59, 77),
+        selection_bg: Color::Rgb(68, 71, 90),
+        selection_fg: Color::Rgb(248, 248, 242),
+        user_bubble: Color::Rgb(42, 44, 57),
+        assistant_bubble: Color::Rgb(35, 37, 49),
         ansi: SYSTEM_ANSI,
     },
     ThemeSpec {
@@ -206,10 +273,10 @@ const THEMES: [ThemeSpec; 14] = [
         info: Color::Rgb(121, 192, 255),
         code_bg: Color::Rgb(22, 27, 34),
         code_fg: Color::Rgb(230, 237, 243),
-        selection_bg: Color::Rgb(47, 129, 247),
-        selection_fg: Color::Rgb(13, 17, 23),
-        user_bubble: Color::Rgb(33, 38, 45),
-        assistant_bubble: Color::Rgb(22, 27, 34),
+        selection_bg: Color::Rgb(48, 54, 61),
+        selection_fg: Color::Rgb(230, 237, 243),
+        user_bubble: Color::Rgb(20, 24, 31),
+        assistant_bubble: Color::Rgb(18, 22, 29),
         ansi: SYSTEM_ANSI,
     },
     ThemeSpec {
@@ -231,10 +298,10 @@ const THEMES: [ThemeSpec; 14] = [
         info: Color::Rgb(125, 207, 255),
         code_bg: Color::Rgb(26, 26, 34),
         code_fg: Color::Rgb(220, 215, 186),
-        selection_bg: Color::Rgb(125, 207, 255),
-        selection_fg: Color::Rgb(31, 31, 40),
-        user_bubble: Color::Rgb(54, 54, 73),
-        assistant_bubble: Color::Rgb(42, 42, 55),
+        selection_bg: Color::Rgb(84, 84, 109),
+        selection_fg: Color::Rgb(220, 215, 186),
+        user_bubble: Color::Rgb(39, 39, 51),
+        assistant_bubble: Color::Rgb(36, 36, 48),
         ansi: SYSTEM_ANSI,
     },
     ThemeSpec {
@@ -256,10 +323,10 @@ const THEMES: [ThemeSpec; 14] = [
         info: Color::Rgb(137, 180, 250),
         code_bg: Color::Rgb(24, 24, 37),
         code_fg: Color::Rgb(205, 214, 244),
-        selection_bg: Color::Rgb(137, 180, 250),
-        selection_fg: Color::Rgb(24, 24, 37),
-        user_bubble: Color::Rgb(69, 71, 90),
-        assistant_bubble: Color::Rgb(49, 50, 68),
+        selection_bg: Color::Rgb(88, 91, 112),
+        selection_fg: Color::Rgb(205, 214, 244),
+        user_bubble: Color::Rgb(36, 37, 52),
+        assistant_bubble: Color::Rgb(24, 24, 37),
         ansi: SYSTEM_ANSI,
     },
     ThemeSpec {
@@ -281,10 +348,10 @@ const THEMES: [ThemeSpec; 14] = [
         info: Color::Rgb(130, 170, 255),
         code_bg: Color::Rgb(31, 41, 46),
         code_fg: Color::Rgb(238, 255, 255),
-        selection_bg: Color::Rgb(130, 170, 255),
-        selection_fg: Color::Rgb(31, 41, 46),
-        user_bubble: Color::Rgb(55, 71, 79),
-        assistant_bubble: Color::Rgb(45, 58, 64),
+        selection_bg: Color::Rgb(55, 71, 79),
+        selection_fg: Color::Rgb(238, 255, 255),
+        user_bubble: Color::Rgb(38, 50, 56),
+        assistant_bubble: Color::Rgb(32, 42, 48),
         ansi: SYSTEM_ANSI,
     },
     ThemeSpec {
@@ -306,10 +373,10 @@ const THEMES: [ThemeSpec; 14] = [
         info: Color::Rgb(102, 255, 153),
         code_bg: Color::Rgb(0, 12, 0),
         code_fg: Color::Rgb(144, 238, 144),
-        selection_bg: Color::Rgb(0, 255, 102),
-        selection_fg: Color::Rgb(5, 14, 8),
-        user_bubble: Color::Rgb(14, 34, 18),
-        assistant_bubble: Color::Rgb(10, 20, 12),
+        selection_bg: Color::Rgb(24, 64, 32),
+        selection_fg: Color::Rgb(144, 238, 144),
+        user_bubble: Color::Rgb(9, 18, 11),
+        assistant_bubble: Color::Rgb(8, 16, 10),
         ansi: SYSTEM_ANSI,
     },
     ThemeSpec {
@@ -331,10 +398,10 @@ const THEMES: [ThemeSpec; 14] = [
         info: Color::Rgb(102, 217, 239),
         code_bg: Color::Rgb(30, 31, 28),
         code_fg: Color::Rgb(248, 248, 242),
-        selection_bg: Color::Rgb(102, 217, 239),
-        selection_fg: Color::Rgb(30, 31, 28),
-        user_bubble: Color::Rgb(73, 72, 62),
-        assistant_bubble: Color::Rgb(49, 50, 42),
+        selection_bg: Color::Rgb(73, 72, 62),
+        selection_fg: Color::Rgb(248, 248, 242),
+        user_bubble: Color::Rgb(46, 47, 39),
+        assistant_bubble: Color::Rgb(43, 44, 36),
         ansi: SYSTEM_ANSI,
     },
     ThemeSpec {
@@ -356,10 +423,10 @@ const THEMES: [ThemeSpec; 14] = [
         info: Color::Rgb(143, 191, 173),
         code_bg: Color::Rgb(53, 53, 53),
         code_fg: Color::Rgb(220, 220, 204),
-        selection_bg: Color::Rgb(143, 191, 173),
-        selection_fg: Color::Rgb(53, 53, 53),
-        user_bubble: Color::Rgb(94, 94, 94),
-        assistant_bubble: Color::Rgb(58, 58, 58),
+        selection_bg: Color::Rgb(94, 94, 94),
+        selection_fg: Color::Rgb(220, 220, 204),
+        user_bubble: Color::Rgb(56, 56, 56),
+        assistant_bubble: Color::Rgb(54, 54, 54),
         ansi: SYSTEM_ANSI,
     },
     ThemeSpec {
@@ -381,10 +448,10 @@ const THEMES: [ThemeSpec; 14] = [
         info: Color::Rgb(38, 139, 210),
         code_bg: Color::Rgb(7, 54, 66),
         code_fg: Color::Rgb(147, 161, 161),
-        selection_bg: Color::Rgb(38, 139, 210),
-        selection_fg: Color::Rgb(0, 43, 54),
-        user_bubble: Color::Rgb(7, 54, 66),
-        assistant_bubble: Color::Rgb(0, 51, 63),
+        selection_bg: Color::Rgb(7, 54, 66),
+        selection_fg: Color::Rgb(131, 148, 150),
+        user_bubble: Color::Rgb(0, 48, 60),
+        assistant_bubble: Color::Rgb(0, 46, 57),
         ansi: SYSTEM_ANSI,
     },
     ThemeSpec {
@@ -406,10 +473,10 @@ const THEMES: [ThemeSpec; 14] = [
         info: Color::Rgb(122, 162, 247),
         code_bg: Color::Rgb(22, 22, 30),
         code_fg: Color::Rgb(192, 202, 245),
-        selection_bg: Color::Rgb(122, 162, 247),
-        selection_fg: Color::Rgb(22, 22, 30),
-        user_bubble: Color::Rgb(49, 53, 82),
-        assistant_bubble: Color::Rgb(36, 40, 59),
+        selection_bg: Color::Rgb(65, 72, 104),
+        selection_fg: Color::Rgb(192, 202, 245),
+        user_bubble: Color::Rgb(33, 37, 56),
+        assistant_bubble: Color::Rgb(31, 35, 53),
         ansi: SYSTEM_ANSI,
     },
     ThemeSpec {
@@ -431,10 +498,10 @@ const THEMES: [ThemeSpec; 14] = [
         info: Color::Rgb(59, 130, 246),
         code_bg: Color::Rgb(10, 14, 20),
         code_fg: Color::Rgb(229, 231, 235),
-        selection_bg: Color::Rgb(0, 184, 148),
-        selection_fg: Color::Rgb(10, 14, 20),
-        user_bubble: Color::Rgb(30, 41, 59),
-        assistant_bubble: Color::Rgb(20, 25, 34),
+        selection_bg: Color::Rgb(39, 49, 66),
+        selection_fg: Color::Rgb(229, 231, 235),
+        user_bubble: Color::Rgb(18, 23, 32),
+        assistant_bubble: Color::Rgb(17, 22, 30),
         ansi: SYSTEM_ANSI,
     },
 ];
@@ -461,6 +528,11 @@ pub fn resolve_theme(name: &str) -> ThemeSpec {
 
 pub fn find_theme(name: &str) -> Option<ThemeSpec> {
     let normalized = normalize_key(name);
+    let normalized = if normalized == "gruvbox" {
+        "gruvboxdarklowcontrast"
+    } else {
+        normalized.as_str()
+    };
     THEMES.iter().copied().find(|theme| {
         normalize_key(theme.key) == normalized || normalize_key(theme.label) == normalized
     })
@@ -484,4 +556,39 @@ fn normalize_key(value: &str) -> String {
         .filter(|ch| ch.is_ascii_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gruvbox_variants_match_exported_surface_and_accent_colors() {
+        let low = find_theme("gruvbox-dark-low-contrast").expect("low contrast theme");
+        let high = find_theme("gruvbox-dark-high-contrast").expect("high contrast theme");
+
+        assert_eq!(find_theme("gruvbox"), Some(low));
+        assert_eq!(low.background, Color::Rgb(29, 32, 33));
+        assert_eq!(low.panel, Color::Rgb(40, 40, 40));
+        assert_eq!(low.sidebar, Color::Rgb(40, 40, 40));
+        assert_eq!(low.user_bubble, Color::Rgb(50, 48, 47));
+        assert_eq!(low.assistant_bubble, Color::Rgb(40, 40, 40));
+        assert_eq!(low.accent, Color::Rgb(131, 165, 152));
+        assert_eq!(low.ansi[0], Color::Rgb(29, 32, 33));
+        assert_eq!(low.ansi[8], Color::Rgb(168, 153, 132));
+        assert_eq!(low.ansi[15], Color::Rgb(235, 219, 178));
+
+        assert_eq!(high.background, Color::Rgb(29, 32, 33));
+        assert_eq!(high.panel, Color::Rgb(40, 40, 40));
+        assert_eq!(high.sidebar, Color::Rgb(40, 40, 40));
+        assert_eq!(high.user_bubble, Color::Rgb(50, 48, 47));
+        assert_eq!(high.assistant_bubble, Color::Rgb(40, 40, 40));
+        assert_eq!(high.accent, Color::Rgb(69, 133, 136));
+        assert_eq!(high.ansi[0], Color::Rgb(29, 32, 33));
+        assert_eq!(high.ansi[8], Color::Rgb(146, 131, 116));
+        assert_eq!(high.ansi[15], Color::Rgb(235, 219, 178));
+        for index in (0..16).filter(|index| *index != 8) {
+            assert_eq!(high.ansi[index], low.ansi[index]);
+        }
+    }
 }

@@ -3,7 +3,7 @@
     reason = "Tests serialize process-global HOME and XDG fixture paths through async OAuth flows."
 )]
 
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::codex::{CodexCredentialSource, CodexNativeAdapter};
@@ -13,8 +13,8 @@ use crate::config::{AppConfig, KeyStore};
 use crate::llm::auth::oauth::oauth_cancellation;
 
 #[tokio::test]
-async fn native_device_login_reports_missing_codex_entitlement()
--> Result<(), Box<dyn std::error::Error>> {
+async fn native_device_login_reports_missing_codex_entitlement(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");
@@ -46,8 +46,8 @@ async fn native_device_login_reports_missing_codex_entitlement()
 }
 
 #[tokio::test]
-async fn native_device_login_exchanges_user_code_and_persists_encrypted_credential()
--> Result<(), Box<dyn std::error::Error>> {
+async fn native_device_login_exchanges_user_code_and_persists_encrypted_credential(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");

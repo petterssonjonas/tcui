@@ -2,9 +2,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ratatui::{
-    Frame,
     prelude::*,
     widgets::{Block, Clear, Paragraph, Wrap},
+    Frame,
 };
 
 pub mod artifact_sidebar;
@@ -467,7 +467,8 @@ impl UI {
 
         // Content area
         if let Some(tab_state) = self.tabs.get_mut(self.active_tab) {
-            let pane = Block::default().style(theme.panel_style());
+            let pane =
+                Block::default().style(Style::default().fg(theme.foreground).bg(theme.background));
             let pane_area = pane.inner(content_layout[1]);
             f.render_widget(pane, content_layout[1]);
 
@@ -898,7 +899,7 @@ impl UI {
 #[cfg(test)]
 mod tests {
     use super::UI;
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
     fn artifact_sidebar_starts_collapsed() {
@@ -917,6 +918,21 @@ mod tests {
         let screen = terminal.backend().to_string();
         assert!(screen.contains("Notice"));
         assert!(screen.contains("Update 0.7.0 available"));
+    }
+
+    #[test]
+    fn empty_chat_uses_canvas_and_centered_input_surfaces() {
+        let theme = crate::theme::active_theme();
+        let mut ui = UI::new();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
+
+        terminal.draw(|frame| ui.render(frame)).expect("render ui");
+
+        let chat_area = ui.chat_area.expect("chat area");
+        let input_area = ui.tabs[ui.active_tab].input_area.expect("input area");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(chat_area.x, chat_area.y)].bg, theme.background);
+        assert_eq!(buffer[(input_area.x, input_area.y)].bg, theme.panel);
     }
 
     #[test]
@@ -1000,15 +1016,13 @@ mod tests {
 
         terminal.draw(|frame| ui.render(frame)).expect("render ui");
 
-        assert!(
-            ui.mouse_hit_areas
-                .iter()
-                .any(|(_, action)| *action == super::MouseAction::LeftHandle)
-        );
-        assert!(
-            ui.mouse_hit_areas
-                .iter()
-                .any(|(_, action)| *action == super::MouseAction::RightHandle)
-        );
+        assert!(ui
+            .mouse_hit_areas
+            .iter()
+            .any(|(_, action)| *action == super::MouseAction::LeftHandle));
+        assert!(ui
+            .mouse_hit_areas
+            .iter()
+            .any(|(_, action)| *action == super::MouseAction::RightHandle));
     }
 }

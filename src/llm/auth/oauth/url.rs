@@ -1,8 +1,8 @@
 use std::fmt;
 
 use oauth2::{
-    AuthUrl, ClientId as OAuthClientId, PkceCodeChallenge, RedirectUrl as OAuthRedirectUrl,
-    Scope as OAuthScope, basic::BasicClient,
+    basic::BasicClient, AuthUrl, ClientId as OAuthClientId, PkceCodeChallenge,
+    RedirectUrl as OAuthRedirectUrl, Scope as OAuthScope,
 };
 use reqwest::Url;
 

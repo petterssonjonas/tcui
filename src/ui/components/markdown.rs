@@ -1,5 +1,5 @@
 use crate::config::app_config::{HeadingDownscale, MarkdownMode};
-use crate::ui::components::markdown_model::{RenderOptions, RenderedMarkdown, render_markdown};
+use crate::ui::components::markdown_model::{render_markdown, RenderOptions, RenderedMarkdown};
 use crate::ui::components::terminal_capabilities::TerminalCapabilities;
 
 pub struct MarkdownRenderer {
