@@ -1,11 +1,12 @@
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::{
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::config::app_config::{HeadingDownscale, MarkdownMode};
+use crate::theme::ThemeSpec;
 use crate::ui::components::terminal_capabilities::TerminalCapabilities;
 
 #[derive(Debug, Clone)]
@@ -860,54 +861,93 @@ fn enhanced_heading_tier(level: usize, downscale: HeadingDownscale) -> Option<Ki
 }
 
 fn heading_style(level: usize) -> Style {
-    let theme = crate::theme::active_theme();
-    match level {
-        1 => Style::default()
-            .fg(theme.selection_fg)
-            .bg(theme.warning)
-            .add_modifier(Modifier::BOLD),
-        2 => Style::default()
-            .fg(theme.selection_fg)
-            .bg(theme.info)
-            .add_modifier(Modifier::BOLD),
-        3 => Style::default()
-            .fg(theme.selection_fg)
-            .bg(theme.success)
-            .add_modifier(Modifier::BOLD),
-        4 => Style::default()
-            .fg(theme.warning)
-            .add_modifier(Modifier::BOLD),
-        5 => Style::default()
-            .fg(theme.accent_alt)
-            .add_modifier(Modifier::BOLD),
-        _ => Style::default()
-            .fg(theme.muted)
-            .add_modifier(Modifier::BOLD),
-    }
+    heading_style_for(crate::theme::active_theme(), level)
 }
 
 fn heading_overlay_style(level: usize) -> Style {
-    let theme = crate::theme::active_theme();
-    match level {
-        1 => Style::default()
-            .fg(theme.warning)
-            .bg(theme.background)
-            .add_modifier(Modifier::BOLD),
-        2 => Style::default()
-            .fg(theme.info)
-            .bg(theme.background)
-            .add_modifier(Modifier::BOLD),
-        _ => Style::default()
-            .fg(theme.success)
-            .bg(theme.background)
-            .add_modifier(Modifier::BOLD),
+    heading_style_for(crate::theme::active_theme(), level)
+}
+
+fn heading_style_for(theme: ThemeSpec, level: usize) -> Style {
+    let style = match level {
+        1..=3 => {
+            let background = match level {
+                1 => theme.ansi[4],
+                2 => theme.ansi[2],
+                _ => theme.ansi[5],
+            };
+            Style::default()
+                .fg(contrasting_heading_foreground(theme, background))
+                .bg(background)
+        }
+        4 => Style::default().fg(theme.ansi[5]),
+        5 => Style::default().fg(theme.ansi[6]),
+        _ => Style::default().fg(theme.ansi[7]),
+    };
+    style.add_modifier(Modifier::BOLD)
+}
+
+fn contrasting_heading_foreground(theme: ThemeSpec, background: Color) -> Color {
+    let dark = theme.ansi[0];
+    let light = theme.ansi[15];
+    match (
+        contrast_ratio(background, dark),
+        contrast_ratio(background, light),
+    ) {
+        (Some(dark_ratio), Some(light_ratio)) if dark_ratio >= light_ratio => dark,
+        (Some(_), Some(_)) => light,
+        _ => theme.foreground,
     }
+}
+
+fn contrast_ratio(left: Color, right: Color) -> Option<f64> {
+    let left = relative_luminance(left)?;
+    let right = relative_luminance(right)?;
+    let (lighter, darker) = if left >= right {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    Some((lighter + 0.05) / (darker + 0.05))
+}
+
+fn relative_luminance(color: Color) -> Option<f64> {
+    let (red, green, blue) = match color {
+        Color::Black => (0, 0, 0),
+        Color::Red => (128, 0, 0),
+        Color::Green => (0, 128, 0),
+        Color::Yellow => (128, 128, 0),
+        Color::Blue => (0, 0, 128),
+        Color::Magenta => (128, 0, 128),
+        Color::Cyan => (0, 128, 128),
+        Color::Gray => (192, 192, 192),
+        Color::DarkGray => (128, 128, 128),
+        Color::LightRed => (255, 0, 0),
+        Color::LightGreen => (0, 255, 0),
+        Color::LightYellow => (255, 255, 0),
+        Color::LightBlue => (0, 0, 255),
+        Color::LightMagenta => (255, 0, 255),
+        Color::LightCyan => (0, 255, 255),
+        Color::White => (255, 255, 255),
+        Color::Rgb(red, green, blue) => (red, green, blue),
+        Color::Reset | Color::Indexed(_) => return None,
+    };
+    let linear = |channel: u8| {
+        let channel = f64::from(channel) / 255.0;
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    Some(0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{RenderOptions, render_markdown};
+    use super::{heading_style_for, render_markdown, RenderOptions};
     use crate::config::app_config::{HeadingDownscale, MarkdownMode};
+    use crate::theme::find_theme;
     use crate::ui::components::terminal_capabilities::TerminalCapabilities;
 
     fn opts(width: usize) -> RenderOptions {
@@ -918,6 +958,47 @@ mod tests {
             kitty_heading_downscale: HeadingDownscale::None,
             image_protocol_enabled: false,
             terminal_capabilities: TerminalCapabilities::detect(),
+        }
+    }
+
+    #[test]
+    fn heading_styles_use_standardized_ansi_roles() {
+        let low = find_theme("gruvbox-dark-low-contrast").expect("low contrast theme");
+        let high = find_theme("gruvbox-dark-high-contrast").expect("high contrast theme");
+
+        let low_styles = (1..=6)
+            .map(|level| heading_style_for(low, level))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            (low_styles[0].fg, low_styles[0].bg),
+            (Some(low.ansi[0]), Some(low.ansi[4]))
+        );
+        assert_eq!(
+            (low_styles[1].fg, low_styles[1].bg),
+            (Some(low.ansi[0]), Some(low.ansi[2]))
+        );
+        assert_eq!(
+            (low_styles[2].fg, low_styles[2].bg),
+            (Some(low.ansi[0]), Some(low.ansi[5]))
+        );
+        assert_eq!(
+            (low_styles[3].fg, low_styles[3].bg),
+            (Some(low.ansi[5]), None)
+        );
+        assert_eq!(
+            (low_styles[4].fg, low_styles[4].bg),
+            (Some(low.ansi[6]), None)
+        );
+        assert_eq!(
+            (low_styles[5].fg, low_styles[5].bg),
+            (Some(low.ansi[7]), None)
+        );
+
+        for level in 1..=6 {
+            assert_eq!(
+                heading_style_for(high, level),
+                heading_style_for(low, level)
+            );
         }
     }
 
