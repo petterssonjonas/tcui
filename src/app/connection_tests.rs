@@ -40,8 +40,8 @@ async fn cloud_probe_sends_a_bounded_authenticated_openrouter_models_request() {
 }
 
 #[tokio::test]
-async fn codex_connection_check_treats_a_resolved_credential_as_ready_without_probing()
--> color_eyre::Result<()> {
+async fn codex_connection_check_treats_a_resolved_credential_as_ready_without_probing(
+) -> color_eyre::Result<()> {
     // Given
     let credential = Credential::api_key_for_test("Codex", "external-cli-token");
 

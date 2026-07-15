@@ -13,8 +13,8 @@ use crate::config::{AppConfig, KeyStore};
 use crate::llm::auth::oauth::oauth_cancellation;
 
 #[tokio::test]
-async fn native_refresh_rotates_tokens_and_preserves_account_identity()
--> Result<(), Box<dyn std::error::Error>> {
+async fn native_refresh_rotates_tokens_and_preserves_account_identity(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");

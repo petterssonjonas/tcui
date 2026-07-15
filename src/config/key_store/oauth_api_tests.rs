@@ -1,4 +1,4 @@
-use super::test_support::{TestEnv, env_lock};
+use super::test_support::{env_lock, TestEnv};
 use super::*;
 use chrono::{DateTime, Utc};
 

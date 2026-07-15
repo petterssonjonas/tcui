@@ -1,6 +1,6 @@
 use crate::llm::auth::oauth::{
-    HeadlessAuthorizationInput, HeadlessInput, OAuthError, RedirectUri, State,
-    complete_headless_authorization,
+    complete_headless_authorization, HeadlessAuthorizationInput, HeadlessInput, OAuthError,
+    RedirectUri, State,
 };
 
 struct FixedInput(Option<HeadlessAuthorizationInput>);

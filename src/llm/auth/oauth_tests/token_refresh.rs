@@ -2,7 +2,7 @@ use chrono::Utc;
 use secrecy::ExposeSecret;
 
 use crate::llm::auth::oauth::{
-    ClientId, OAuthError, RefreshToken, RefreshTokenExchange, TokenService, oauth_cancellation,
+    oauth_cancellation, ClientId, OAuthError, RefreshToken, RefreshTokenExchange, TokenService,
 };
 
 use super::token_support::token_fixture;
@@ -15,8 +15,8 @@ fn refresh_request() -> Result<RefreshTokenExchange, OAuthError> {
 }
 
 #[tokio::test]
-async fn refresh_rotates_refresh_token_when_server_returns_one()
--> Result<(), Box<dyn std::error::Error>> {
+async fn refresh_rotates_refresh_token_when_server_returns_one(
+) -> Result<(), Box<dyn std::error::Error>> {
     let (endpoint, request_receiver, server) = token_fixture(
         "200 OK",
         r#"{"access_token":"access-secret","token_type":"Bearer","refresh_token":"rotated-secret"}"#.to_owned(),
@@ -43,8 +43,8 @@ async fn refresh_rotates_refresh_token_when_server_returns_one()
 }
 
 #[tokio::test]
-async fn refresh_preserves_prior_token_when_server_omits_rotation()
--> Result<(), Box<dyn std::error::Error>> {
+async fn refresh_preserves_prior_token_when_server_omits_rotation(
+) -> Result<(), Box<dyn std::error::Error>> {
     let (endpoint, _, server) = token_fixture(
         "200 OK",
         r#"{"access_token":"access-secret","token_type":"Bearer"}"#.to_owned(),

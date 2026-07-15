@@ -2,14 +2,14 @@ use std::path::{Path, PathBuf};
 
 use image::DynamicImage;
 use ratatui::{
-    Frame,
     layout::{Rect, Size},
+    Frame,
 };
 use ratatui_image::{
-    Resize, StatefulImage,
     picker::{Picker, ProtocolType},
     protocol::StatefulProtocol,
     sliced::{SignedPosition, SlicedImage, SlicedProtocol},
+    Resize, StatefulImage,
 };
 
 use crate::ui::components::terminal_capabilities::TerminalCapabilities;
@@ -128,13 +128,13 @@ fn picker_for(image_protocol: &str, caps: TerminalCapabilities) -> Option<Picker
 
 #[cfg(test)]
 mod tests {
-    use super::{ImageBlockState, picker_for, resolve_local_path};
+    use super::{picker_for, resolve_local_path, ImageBlockState};
     use crate::ui::components::terminal_capabilities::{TerminalCapabilities, TerminalKind};
     use image::{DynamicImage, Rgba, RgbaImage};
     use ratatui::{
-        Terminal,
         backend::TestBackend,
         layout::{Rect, Size},
+        Terminal,
     };
     use ratatui_image::picker::ProtocolType;
     use ratatui_image::sliced::SignedPosition;
@@ -179,14 +179,12 @@ mod tests {
             .expect("render image");
 
         // Then
-        assert!(
-            terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .any(|cell| cell.symbol().contains("\u{1b}_G"))
-        );
+        assert!(terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .any(|cell| cell.symbol().contains("\u{1b}_G")));
         std::fs::remove_file(path).expect("remove test png");
     }
 

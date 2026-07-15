@@ -5,13 +5,13 @@
 
 use std::os::unix::fs::PermissionsExt;
 
-use super::codex::{CodexCliError, login_with_cli, logout_external_cli};
+use super::codex::{login_with_cli, logout_external_cli, CodexCliError};
 use super::codex_test_support::TestEnvironment;
 use crate::llm::auth::oauth::oauth_cancellation;
 
 #[tokio::test]
-async fn default_cli_login_invokes_codex_login_and_reads_credential_in_place()
--> Result<(), Box<dyn std::error::Error>> {
+async fn default_cli_login_invokes_codex_login_and_reads_credential_in_place(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");
@@ -28,8 +28,8 @@ async fn default_cli_login_invokes_codex_login_and_reads_credential_in_place()
 }
 
 #[tokio::test]
-async fn headless_cli_login_invokes_codex_login_with_device_auth()
--> Result<(), Box<dyn std::error::Error>> {
+async fn headless_cli_login_invokes_codex_login_with_device_auth(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");
@@ -47,8 +47,8 @@ async fn headless_cli_login_invokes_codex_login_with_device_auth()
 }
 
 #[tokio::test]
-async fn valid_external_auth_is_reused_without_invoking_codex()
--> Result<(), Box<dyn std::error::Error>> {
+async fn valid_external_auth_is_reused_without_invoking_codex(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");
@@ -67,8 +67,8 @@ async fn valid_external_auth_is_reused_without_invoking_codex()
 }
 
 #[tokio::test]
-async fn nonzero_cli_login_returns_typed_error_without_creating_tcui_storage()
--> Result<(), Box<dyn std::error::Error>> {
+async fn nonzero_cli_login_returns_typed_error_without_creating_tcui_storage(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");
@@ -84,8 +84,8 @@ async fn nonzero_cli_login_returns_typed_error_without_creating_tcui_storage()
 }
 
 #[tokio::test]
-async fn cancelled_cli_login_kills_the_child_and_returns_typed_error()
--> Result<(), Box<dyn std::error::Error>> {
+async fn cancelled_cli_login_kills_the_child_and_returns_typed_error(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");
@@ -102,8 +102,8 @@ async fn cancelled_cli_login_kills_the_child_and_returns_typed_error()
 
 #[cfg(unix)]
 #[tokio::test]
-async fn cancelled_codex_process_group_terminates_the_grandchild()
--> Result<(), Box<dyn std::error::Error>> {
+async fn cancelled_codex_process_group_terminates_the_grandchild(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");
@@ -126,8 +126,8 @@ async fn cancelled_codex_process_group_terminates_the_grandchild()
 }
 
 #[tokio::test]
-async fn malformed_external_auth_with_missing_cli_returns_native_fallback_guidance()
--> Result<(), Box<dyn std::error::Error>> {
+async fn malformed_external_auth_with_missing_cli_returns_native_fallback_guidance(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");
@@ -146,8 +146,8 @@ async fn malformed_external_auth_with_missing_cli_returns_native_fallback_guidan
 }
 
 #[tokio::test]
-async fn external_logout_delegates_to_codex_and_requires_auth_file_removal()
--> Result<(), Box<dyn std::error::Error>> {
+async fn external_logout_delegates_to_codex_and_requires_auth_file_removal(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");

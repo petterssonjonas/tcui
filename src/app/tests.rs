@@ -167,12 +167,10 @@ fn skills_popup_labels_description_and_origin_but_inserts_only_name() {
                 "@save ".to_string()
             ))
         );
-        assert!(
-            popup
-                .items
-                .iter()
-                .any(|item| item.label.starts_with("@research "))
-        );
+        assert!(popup
+            .items
+            .iter()
+            .any(|item| item.label.starts_with("@research ")));
     });
 }
 
@@ -247,12 +245,10 @@ fn inline_at_completion_discovers_research_skill() {
 
         // Then
         let popup = app.ui.list_popup.as_ref().expect("skill completion popup");
-        assert!(
-            popup
-                .items
-                .iter()
-                .any(|item| item.label.contains("@research"))
-        );
+        assert!(popup
+            .items
+            .iter()
+            .any(|item| item.label.contains("@research")));
     });
 }
 
@@ -475,12 +471,11 @@ selected_model = "llama3.1"
         None,
     );
 
-    assert!(
-        app.ui
-            .db_providers
-            .iter()
-            .any(|(name, _, _, _, _)| name == crate::config::LOCAL_PROVIDER_NAME)
-    );
+    assert!(app
+        .ui
+        .db_providers
+        .iter()
+        .any(|(name, _, _, _, _)| name == crate::config::LOCAL_PROVIDER_NAME));
     assert_eq!(
         app.ui.tabs[0].tab.provider,
         crate::config::LOCAL_PROVIDER_NAME
@@ -554,12 +549,10 @@ fn typing_slash_opens_command_popup() {
         let popup = app.ui.list_popup.as_ref().expect("command popup");
         assert_eq!(popup.title, "Commands");
         assert!(popup.items.iter().any(|item| item.label.contains("/theme")));
-        assert!(
-            popup
-                .items
-                .iter()
-                .any(|item| item.label.contains("/remindme"))
-        );
+        assert!(popup
+            .items
+            .iter()
+            .any(|item| item.label.contains("/remindme")));
     });
 }
 
@@ -708,12 +701,10 @@ fn inline_at_completion_discovers_memory_skills() {
         // Then
         let popup = app.ui.list_popup.as_ref().expect("skill completion popup");
         assert_eq!(popup.title, "Skills");
-        assert!(
-            popup
-                .items
-                .iter()
-                .any(|item| item.label.contains("@remember"))
-        );
+        assert!(popup
+            .items
+            .iter()
+            .any(|item| item.label.contains("@remember")));
     });
 }
 
@@ -785,12 +776,11 @@ fn send_message_without_tokio_runtime_returns_error_without_persisting_or_queuei
         // Given
         assert!(tokio::runtime::Handle::try_current().is_err());
         let conversation_id = app.ui.tabs[0].active_conversation;
-        assert!(
-            app.storage
-                .get_messages(conversation_id)
-                .expect("read initial messages")
-                .is_empty()
-        );
+        assert!(app
+            .storage
+            .get_messages(conversation_id)
+            .expect("read initial messages")
+            .is_empty());
 
         // When
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -799,12 +789,11 @@ fn send_message_without_tokio_runtime_returns_error_without_persisting_or_queuei
 
         // Then
         assert!(matches!(result, Ok(Err(_))));
-        assert!(
-            app.storage
-                .get_messages(conversation_id)
-                .expect("read messages after rejected send")
-                .is_empty()
-        );
+        assert!(app
+            .storage
+            .get_messages(conversation_id)
+            .expect("read messages after rejected send")
+            .is_empty());
         assert!(app.ui.tabs[0].messages.is_empty());
         assert!(matches!(
             app.action_rx.try_recv(),
@@ -859,11 +848,9 @@ fn slash_remindme_is_handled_without_model_streaming() {
         assert_eq!(tab.messages.len(), 2);
         assert_eq!(tab.messages[0].role, "user");
         assert_eq!(tab.messages[1].role, "assistant");
-        assert!(
-            tab.messages[1]
-                .content
-                .contains("Scheduled one-shot reminder")
-        );
+        assert!(tab.messages[1]
+            .content
+            .contains("Scheduled one-shot reminder"));
 
         std::env::remove_var("TCUI_REMINDER_SYSTEMD_RUN");
     });
@@ -1060,18 +1047,14 @@ fn deleting_inactive_conversation_keeps_active_chat_loaded() {
             .expect("delete first conversation");
 
         assert_eq!(app.ui.tabs[0].active_conversation, second);
-        assert!(
-            app.ui.tabs[0]
-                .conversations
-                .iter()
-                .all(|conversation| conversation.id != first)
-        );
-        assert!(
-            app.ui.tabs[0]
-                .conversations
-                .iter()
-                .any(|conversation| conversation.id == second)
-        );
+        assert!(app.ui.tabs[0]
+            .conversations
+            .iter()
+            .all(|conversation| conversation.id != first));
+        assert!(app.ui.tabs[0]
+            .conversations
+            .iter()
+            .any(|conversation| conversation.id == second));
     });
 }
 

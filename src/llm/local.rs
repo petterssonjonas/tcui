@@ -2,7 +2,7 @@ use color_eyre::eyre::eyre;
 use serde::Deserialize;
 
 use crate::{
-    config::{LOCAL_PROVIDER_NAME, LocalInferenceConfig, LocalServerType},
+    config::{LocalInferenceConfig, LocalServerType, LOCAL_PROVIDER_NAME},
     ui::ModelInfo,
 };
 

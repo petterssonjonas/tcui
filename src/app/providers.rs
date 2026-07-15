@@ -225,11 +225,9 @@ mod tests {
 
         let entries = TuiApp::provider_entries_with_local(&config, None);
 
-        assert!(
-            entries
-                .iter()
-                .any(|(name, _, _, _, _)| name == crate::config::LOCAL_PROVIDER_NAME)
-        );
+        assert!(entries
+            .iter()
+            .any(|(name, _, _, _, _)| name == crate::config::LOCAL_PROVIDER_NAME));
     }
 
     #[test]
@@ -239,11 +237,9 @@ mod tests {
 
         let entries = TuiApp::provider_entries_with_local(&config, None);
 
-        assert!(
-            !entries
-                .iter()
-                .any(|(name, _, _, _, _)| name == crate::config::LOCAL_PROVIDER_NAME)
-        );
+        assert!(!entries
+            .iter()
+            .any(|(name, _, _, _, _)| name == crate::config::LOCAL_PROVIDER_NAME));
     }
 
     #[test]

@@ -1,13 +1,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use color_eyre::{Result, eyre::eyre};
+use color_eyre::{eyre::eyre, Result};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::app::message::Message;
 use crate::storage::crypto::{
-    SharedKey, decrypt_shared_text_with_key, read_encrypted_document, write_encrypted_document,
+    decrypt_shared_text_with_key, read_encrypted_document, write_encrypted_document, SharedKey,
 };
 use crate::storage::db::ConversationEntry;
 use crate::storage::paths::TcuiDataPaths;

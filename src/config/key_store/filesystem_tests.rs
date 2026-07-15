@@ -3,11 +3,10 @@ use super::persistence::{
 };
 #[cfg(unix)]
 use super::rollback::{
-    PreviousFileGuard, inject_commit_backup_remove_failure,
-    inject_persistent_restore_backup_rename_failure, inject_restore_backup_rename_failure,
-    inject_restore_target_remove_failure,
+    inject_commit_backup_remove_failure, inject_persistent_restore_backup_rename_failure,
+    inject_restore_backup_rename_failure, inject_restore_target_remove_failure, PreviousFileGuard,
 };
-use super::test_support::{TestEnv, env_lock};
+use super::test_support::{env_lock, TestEnv};
 use super::*;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -84,12 +83,10 @@ fn write_rejects_key_file_replaced_with_symlink_before_atomic_rename() {
     .expect_err("symlink replacement must fail");
 
     assert!(matches!(error, KeyStoreError::UnsafePath));
-    assert!(
-        std::fs::symlink_metadata(&path)
-            .expect("inspect replacement key path")
-            .file_type()
-            .is_symlink()
-    );
+    assert!(std::fs::symlink_metadata(&path)
+        .expect("inspect replacement key path")
+        .file_type()
+        .is_symlink());
     assert_eq!(
         std::fs::read_to_string(target).expect("read symlink target"),
         original

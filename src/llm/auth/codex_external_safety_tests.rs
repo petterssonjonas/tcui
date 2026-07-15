@@ -1,7 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-use super::codex::{CodexCredentialError, external_metadata_is_safe, read_external_credential};
+use super::codex::{external_metadata_is_safe, read_external_credential, CodexCredentialError};
 use super::codex_test_support::TestEnvironment;
 
 #[cfg(unix)]
@@ -27,8 +27,8 @@ fn external_auth_accepts_owner_only_file_without_mutation() -> Result<(), Box<dy
 
 #[cfg(unix)]
 #[test]
-fn external_auth_rejects_group_readable_file_without_mutation()
--> Result<(), Box<dyn std::error::Error>> {
+fn external_auth_rejects_group_readable_file_without_mutation(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");

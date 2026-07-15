@@ -15,8 +15,8 @@ use crate::config::{AppConfig, KeyStore};
 use crate::llm::auth::oauth::oauth_cancellation;
 
 #[tokio::test]
-async fn native_logout_revokes_refresh_token_then_removes_only_tcui_credential()
--> Result<(), Box<dyn std::error::Error>> {
+async fn native_logout_revokes_refresh_token_then_removes_only_tcui_credential(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");
@@ -42,8 +42,8 @@ async fn native_logout_revokes_refresh_token_then_removes_only_tcui_credential()
 }
 
 #[tokio::test]
-async fn native_logout_removes_local_credential_after_revoke_error_without_touching_external()
--> Result<(), Box<dyn std::error::Error>> {
+async fn native_logout_removes_local_credential_after_revoke_error_without_touching_external(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");
@@ -69,8 +69,8 @@ async fn native_logout_removes_local_credential_after_revoke_error_without_touch
 }
 
 #[tokio::test]
-async fn native_logout_removes_local_credential_after_revoke_timeout()
--> Result<(), Box<dyn std::error::Error>> {
+async fn native_logout_removes_local_credential_after_revoke_timeout(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");
@@ -93,8 +93,8 @@ async fn native_logout_removes_local_credential_after_revoke_timeout()
 }
 
 #[tokio::test]
-async fn native_logout_removes_local_credential_after_revoke_transport_failure()
--> Result<(), Box<dyn std::error::Error>> {
+async fn native_logout_removes_local_credential_after_revoke_transport_failure(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");

@@ -1,5 +1,5 @@
 use crate::{
-    llm::auth::{Credential, CredentialRequest, resolve_provider_credential},
+    llm::auth::{resolve_provider_credential, Credential, CredentialRequest},
     ui::ModelInfo,
 };
 use secrecy::ExposeSecret;

@@ -1,8 +1,8 @@
 use futures::StreamExt;
 use secrecy::ExposeSecret;
 use std::io::IsTerminal;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use super::{Action, Message, TuiApp};
 use crate::app::action::MouseClickAction;

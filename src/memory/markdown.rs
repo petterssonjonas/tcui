@@ -156,12 +156,10 @@ mod tests {
 
         // Then
         assert_eq!(parsed.title, "Preferred editor");
-        assert!(
-            parsed
-                .frontmatter_raw
-                .as_deref()
-                .is_some_and(|raw| raw.contains("kind: preference"))
-        );
+        assert!(parsed
+            .frontmatter_raw
+            .as_deref()
+            .is_some_and(|raw| raw.contains("kind: preference")));
         assert!(!parsed.chunks.is_empty());
         assert!(parsed.chunks.iter().all(|chunk| {
             markdown

@@ -107,8 +107,8 @@ async fn bounded_sse_rejects_total_and_per_event_limits() -> Result<(), Box<dyn 
 }
 
 #[tokio::test]
-async fn bounded_sse_rejects_invalid_utf8_and_unterminated_events()
--> Result<(), Box<dyn std::error::Error>> {
+async fn bounded_sse_rejects_invalid_utf8_and_unterminated_events(
+) -> Result<(), Box<dyn std::error::Error>> {
     let invalid_utf8_response = response_with("200 OK", b"data: \xff\n\n").await?;
     let invalid_utf8_error = transport::read_sse(
         invalid_utf8_response,
@@ -138,8 +138,8 @@ async fn bounded_sse_rejects_invalid_utf8_and_unterminated_events()
 }
 
 #[tokio::test]
-async fn bounded_sse_enforces_its_absolute_stream_deadline()
--> Result<(), Box<dyn std::error::Error>> {
+async fn bounded_sse_enforces_its_absolute_stream_deadline(
+) -> Result<(), Box<dyn std::error::Error>> {
     let (response, server) = stalled_response().await?;
     let error = transport::read_sse(
         response,
@@ -159,8 +159,8 @@ async fn bounded_sse_enforces_its_absolute_stream_deadline()
 }
 
 #[tokio::test]
-async fn bounded_http_errors_are_typed_redacted_and_limited()
--> Result<(), Box<dyn std::error::Error>> {
+async fn bounded_http_errors_are_typed_redacted_and_limited(
+) -> Result<(), Box<dyn std::error::Error>> {
     let oversized_response = response_with("400 Bad Request", &[b'x'; 65]).await?;
     let oversized_error = transport::http_error(
         oversized_response,
@@ -242,8 +242,8 @@ async fn response_with(
     Ok(response)
 }
 
-async fn stalled_response()
--> Result<(reqwest::Response, tokio::task::JoinHandle<io::Result<()>>), Box<dyn std::error::Error>>
+async fn stalled_response(
+) -> Result<(reqwest::Response, tokio::task::JoinHandle<io::Result<()>>), Box<dyn std::error::Error>>
 {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("http://{}", listener.local_addr()?);

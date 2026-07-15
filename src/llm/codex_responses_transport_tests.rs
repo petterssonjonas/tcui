@@ -1,6 +1,6 @@
 use std::io;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -10,8 +10,8 @@ use super::*;
 use crate::app::message::Message;
 
 #[tokio::test]
-async fn transport_retries_once_with_account_scoped_responses_headers()
--> Result<(), Box<dyn std::error::Error>> {
+async fn transport_retries_once_with_account_scoped_responses_headers(
+) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("http://{}", listener.local_addr()?);
     let server = tokio::spawn(async move {
@@ -82,8 +82,8 @@ async fn transport_retries_once_with_account_scoped_responses_headers()
 }
 
 #[tokio::test]
-async fn transport_stops_after_a_second_unauthorized_response()
--> Result<(), Box<dyn std::error::Error>> {
+async fn transport_stops_after_a_second_unauthorized_response(
+) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("http://{}", listener.local_addr()?);
     let server = tokio::spawn(async move {
@@ -122,8 +122,8 @@ async fn transport_stops_after_a_second_unauthorized_response()
 }
 
 #[tokio::test]
-async fn dropping_the_transport_future_cancels_a_stalled_stream()
--> Result<(), Box<dyn std::error::Error>> {
+async fn dropping_the_transport_future_cancels_a_stalled_stream(
+) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("http://{}", listener.local_addr()?);
     let server = tokio::spawn(async move {
@@ -154,8 +154,8 @@ async fn dropping_the_transport_future_cancels_a_stalled_stream()
 }
 
 #[tokio::test]
-async fn unsupported_reasoning_effort_is_rejected_before_network_connection()
--> Result<(), Box<dyn std::error::Error>> {
+async fn unsupported_reasoning_effort_is_rejected_before_network_connection(
+) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("http://{}", listener.local_addr()?);
     let mut request = request(endpoint);
@@ -169,11 +169,9 @@ async fn unsupported_reasoning_effort_is_rejected_before_network_connection()
     let Err(error) = result else {
         return Err("unsupported effort reached the network".into());
     };
-    assert!(
-        error
-            .to_string()
-            .contains("Supported efforts: low, medium, high")
-    );
+    assert!(error
+        .to_string()
+        .contains("Supported efforts: low, medium, high"));
     assert!(
         connection.is_err(),
         "the request opened a network connection"

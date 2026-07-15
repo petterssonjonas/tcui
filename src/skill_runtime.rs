@@ -1,12 +1,12 @@
-use color_eyre::{Result, eyre::eyre};
+use color_eyre::{eyre::eyre, Result};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 use crate::app::Message;
 use crate::config::AppConfig;
-use crate::llm::chat::{ChatRequest, stream_chat};
-use crate::mcp::{McpClient, McpToolSummary, merged_configs, profile_by_name, profile_by_skill};
+use crate::llm::chat::{stream_chat, ChatRequest};
+use crate::mcp::{merged_configs, profile_by_name, profile_by_skill, McpClient, McpToolSummary};
 use crate::skills::{Skill, SkillCatalog};
 
 const MAX_SKILL_CHARS: usize = 20_000;

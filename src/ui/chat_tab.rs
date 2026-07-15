@@ -1,14 +1,14 @@
 #![allow(dead_code)]
 use crate::config::app_config::{HeadingDownscale, MarkdownMode, TextAlignment};
-use crate::ui::ModelInfo;
-use crate::ui::components::image_block::{ImageBlockState, is_local_image_source};
+use crate::ui::components::image_block::{is_local_image_source, ImageBlockState};
 use crate::ui::components::markdown::MarkdownRenderer;
 use crate::ui::components::markdown_model::{KittyHeadingTier, LinkTarget, RenderedImage};
+use crate::ui::ModelInfo;
 use ratatui::{
-    Frame,
     layout::{Rect, Size},
     prelude::*,
     widgets::*,
+    Frame,
 };
 use ratatui_image::sliced::SignedPosition;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -1438,7 +1438,7 @@ fn aligned_line_x(area: Rect, line: &Line<'_>) -> u16 {
 mod tests {
     use super::*;
     use crate::ui::components::terminal_capabilities::{TerminalCapabilities, TerminalKind};
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
     fn skill_mentions_on_one_line_have_independent_hit_areas() {
@@ -1897,14 +1897,12 @@ mod tests {
         }
 
         // Then
-        assert!(
-            terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .any(|cell| cell.symbol().contains("\u{1b}]66;"))
-        );
+        assert!(terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .any(|cell| cell.symbol().contains("\u{1b}]66;")));
     }
 
     #[test]
@@ -1945,14 +1943,12 @@ mod tests {
             .draw(|frame| chat.render_messages(frame, Rect::new(0, 0, 40, 1)))
             .expect("render clipped heading");
 
-        assert!(
-            !terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .any(|cell| cell.symbol().contains("\u{1b}]66;"))
-        );
+        assert!(!terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .any(|cell| cell.symbol().contains("\u{1b}]66;")));
     }
 
     #[test]

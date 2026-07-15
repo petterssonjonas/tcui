@@ -5,7 +5,7 @@
 
 use std::sync::Mutex;
 
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 
@@ -13,11 +13,11 @@ use super::codex::{CodexCredentialSource, CodexNativeAdapter};
 use super::codex_test_support::TestEnvironment;
 use crate::config::key_store::{OAuthCredentialOwnership, OAuthCredentialSource};
 use crate::config::{AppConfig, KeyStore};
-use crate::llm::auth::oauth::{BrowserLauncher, OAuthError, oauth_cancellation};
+use crate::llm::auth::oauth::{oauth_cancellation, BrowserLauncher, OAuthError};
 
 #[tokio::test]
-async fn native_browser_login_persists_encrypted_account_scoped_credential()
--> Result<(), Box<dyn std::error::Error>> {
+async fn native_browser_login_persists_encrypted_account_scoped_credential(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");
@@ -60,16 +60,12 @@ async fn native_browser_login_persists_encrypted_account_scoped_credential()
     let credential = task.await??;
     let request = token_server.await??;
 
-    assert!(
-        authorization_url
-            .query_pairs()
-            .any(|(key, value)| key == "codex_cli_simplified_flow" && value == "true")
-    );
-    assert!(
-        authorization_url
-            .query_pairs()
-            .any(|(key, value)| key == "id_token_add_organizations" && value == "true")
-    );
+    assert!(authorization_url
+        .query_pairs()
+        .any(|(key, value)| key == "codex_cli_simplified_flow" && value == "true"));
+    assert!(authorization_url
+        .query_pairs()
+        .any(|(key, value)| key == "id_token_add_organizations" && value == "true"));
     assert!(request.contains("grant_type=authorization_code"));
     assert_eq!(credential.source(), CodexCredentialSource::TcuiNative);
     assert_eq!(credential.account_id(), Some("native-account"));

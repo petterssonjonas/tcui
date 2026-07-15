@@ -4,20 +4,20 @@
 )]
 
 use secrecy::ExposeSecret;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::{Barrier, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Barrier};
 
-use super::CredentialRequest;
 use super::resolver::resolve_provider_credential_with_native_adapter;
 use super::resolver_tests::NativeTestEnvironment;
-use crate::config::KeyStore;
+use super::CredentialRequest;
 use crate::config::key_store::{OAuthCredential, OAuthCredentialOwnership, OAuthCredentialSource};
+use crate::config::KeyStore;
 
 const SURVIVING_CALLERS: usize = 16;
 

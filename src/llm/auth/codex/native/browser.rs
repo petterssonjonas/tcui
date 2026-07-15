@@ -1,8 +1,8 @@
 use crate::config::AppConfig;
 use crate::llm::auth::oauth::{
-    AuthorizationCodeExchange, AuthorizationRequest, BrowserLauncher, CallbackPath,
-    CallbackTimeout, LoopbackCallback, LoopbackCallbackConfig, OAuthCancellation, PkceVerifier,
-    State, TokenService, open_authorization_url,
+    open_authorization_url, AuthorizationCodeExchange, AuthorizationRequest, BrowserLauncher,
+    CallbackPath, CallbackTimeout, LoopbackCallback, LoopbackCallbackConfig, OAuthCancellation,
+    PkceVerifier, State, TokenService,
 };
 
 use super::error::CodexNativeError;

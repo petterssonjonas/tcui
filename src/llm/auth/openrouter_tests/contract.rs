@@ -18,8 +18,8 @@ impl HeadlessInput for PastedInput {
 }
 
 #[test]
-fn headless_authorization_url_uses_only_documented_openrouter_pkce_parameters()
--> Result<(), Box<dyn std::error::Error>> {
+fn headless_authorization_url_uses_only_documented_openrouter_pkce_parameters(
+) -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let adapter = OpenRouterAdapter::production()?;
     let redirect_uri = RedirectUri::parse("https://tcui.invalid/oauth/openrouter")?;
@@ -47,8 +47,8 @@ fn headless_authorization_url_uses_only_documented_openrouter_pkce_parameters()
 }
 
 #[test]
-fn headless_completion_accepts_documented_direct_code_without_undocumented_state()
--> Result<(), Box<dyn std::error::Error>> {
+fn headless_completion_accepts_documented_direct_code_without_undocumented_state(
+) -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let adapter = OpenRouterAdapter::production()?;
     let authorization =
@@ -66,8 +66,8 @@ fn headless_completion_accepts_documented_direct_code_without_undocumented_state
 }
 
 #[test]
-fn headless_completion_validates_documented_pasted_redirect_without_state()
--> Result<(), Box<dyn std::error::Error>> {
+fn headless_completion_validates_documented_pasted_redirect_without_state(
+) -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let adapter = OpenRouterAdapter::production()?;
     let authorization =

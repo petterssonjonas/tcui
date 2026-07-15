@@ -198,7 +198,7 @@ fn extract_request(request: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReminderRecord, ReminderSchedule, extract_request, handle_request, store};
+    use super::{extract_request, handle_request, store, ReminderRecord, ReminderSchedule};
     use crate::config::AppConfig;
     use chrono::{Local, NaiveTime};
     use std::sync::Mutex;

@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, TimeDelta, Utc};
 use oauth2::{
-    AccessToken as OAuthAccessToken, ExtraTokenFields, RefreshToken as OAuthRefreshToken,
-    StandardTokenResponse, TokenResponse, basic::BasicTokenType,
+    basic::BasicTokenType, AccessToken as OAuthAccessToken, ExtraTokenFields,
+    RefreshToken as OAuthRefreshToken, StandardTokenResponse, TokenResponse,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};

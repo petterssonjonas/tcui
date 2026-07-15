@@ -2,9 +2,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ratatui::{
-    Frame,
     prelude::*,
     widgets::{Block, Clear, Paragraph, Wrap},
+    Frame,
 };
 
 pub mod artifact_sidebar;
@@ -899,7 +899,7 @@ impl UI {
 #[cfg(test)]
 mod tests {
     use super::UI;
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
     fn artifact_sidebar_starts_collapsed() {
@@ -1016,15 +1016,13 @@ mod tests {
 
         terminal.draw(|frame| ui.render(frame)).expect("render ui");
 
-        assert!(
-            ui.mouse_hit_areas
-                .iter()
-                .any(|(_, action)| *action == super::MouseAction::LeftHandle)
-        );
-        assert!(
-            ui.mouse_hit_areas
-                .iter()
-                .any(|(_, action)| *action == super::MouseAction::RightHandle)
-        );
+        assert!(ui
+            .mouse_hit_areas
+            .iter()
+            .any(|(_, action)| *action == super::MouseAction::LeftHandle));
+        assert!(ui
+            .mouse_hit_areas
+            .iter()
+            .any(|(_, action)| *action == super::MouseAction::RightHandle));
     }
 }

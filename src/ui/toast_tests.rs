@@ -1,5 +1,5 @@
 use crate::{config::ToastPosition, ui::toast::*};
-use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+use ratatui::{backend::TestBackend, layout::Rect, Terminal};
 
 #[test]
 fn stack_keeps_only_five_newest_toasts() {

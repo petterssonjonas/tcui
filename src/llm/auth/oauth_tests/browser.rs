@@ -2,7 +2,7 @@ use std::cell::Cell;
 
 use reqwest::Url;
 
-use crate::llm::auth::oauth::{BrowserLauncher, OAuthError, SystemBrowser, open_authorization_url};
+use crate::llm::auth::oauth::{open_authorization_url, BrowserLauncher, OAuthError, SystemBrowser};
 
 struct RecordingBrowser {
     opened: Cell<bool>,

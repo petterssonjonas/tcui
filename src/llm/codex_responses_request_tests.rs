@@ -2,7 +2,7 @@ use serde_json::json;
 
 use super::*;
 use crate::app::message::Message;
-use crate::llm::chat::{ChatRequest, stream_chat};
+use crate::llm::chat::{stream_chat, ChatRequest};
 
 #[test]
 fn request_body_maps_system_messages_and_reasoning_to_responses_input() {
@@ -124,8 +124,8 @@ fn codex_trust_accepts_only_the_subscription_backend() {
 }
 
 #[test]
-fn request_rejects_reasoning_effort_not_advertised_by_the_selected_model()
--> Result<(), Box<dyn std::error::Error>> {
+fn request_rejects_reasoning_effort_not_advertised_by_the_selected_model(
+) -> Result<(), Box<dyn std::error::Error>> {
     let request = ChatRequest {
         provider: "Codex".to_string(),
         endpoint: "https://chatgpt.com/backend-api/codex".to_string(),
@@ -154,8 +154,8 @@ fn request_rejects_reasoning_effort_not_advertised_by_the_selected_model()
 }
 
 #[test]
-fn request_serializes_the_same_trimmed_effort_that_validation_accepts()
--> Result<(), Box<dyn std::error::Error>> {
+fn request_serializes_the_same_trimmed_effort_that_validation_accepts(
+) -> Result<(), Box<dyn std::error::Error>> {
     let request = ChatRequest {
         provider: "Codex".to_string(),
         endpoint: "https://chatgpt.com/backend-api/codex".to_string(),
@@ -193,9 +193,7 @@ async fn codex_oauth_token_is_rejected_before_the_public_responses_endpoint() {
         .await
         .expect_err("the public endpoint must be rejected before OAuth use");
 
-    assert!(
-        error.to_string().contains(
-            "Codex OAuth credentials can only be sent to the ChatGPT subscription endpoint"
-        )
-    );
+    assert!(error
+        .to_string()
+        .contains("Codex OAuth credentials can only be sent to the ChatGPT subscription endpoint"));
 }

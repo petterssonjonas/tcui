@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use secrecy::{ExposeSecret, SecretString};
-use tokio::time::{Instant, sleep_until};
+use tokio::time::{sleep_until, Instant};
 
 use super::deadline::OperationDeadline;
 use super::token_values::TokenSet;

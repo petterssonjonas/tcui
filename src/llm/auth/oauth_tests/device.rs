@@ -4,8 +4,8 @@ use chrono::Utc;
 use secrecy::ExposeSecret;
 
 use crate::llm::auth::oauth::{
-    ClientId, DeviceCode, DeviceCodeLifetime, DevicePollingRequest, OAuthError, PollInterval,
-    TokenService, oauth_cancellation,
+    oauth_cancellation, ClientId, DeviceCode, DeviceCodeLifetime, DevicePollingRequest, OAuthError,
+    PollInterval, TokenService,
 };
 
 use super::token_support::token_sequence_fixture;
@@ -25,8 +25,8 @@ fn device_request(
 }
 
 #[tokio::test]
-async fn device_polling_handles_pending_slow_down_then_success()
--> Result<(), Box<dyn std::error::Error>> {
+async fn device_polling_handles_pending_slow_down_then_success(
+) -> Result<(), Box<dyn std::error::Error>> {
     let (endpoint, server) = token_sequence_fixture(vec![
         (
             "400 Bad Request",
@@ -64,8 +64,8 @@ async fn device_polling_handles_pending_slow_down_then_success()
 }
 
 #[tokio::test]
-async fn device_polling_returns_distinct_denied_and_expired_errors()
--> Result<(), Box<dyn std::error::Error>> {
+async fn device_polling_returns_distinct_denied_and_expired_errors(
+) -> Result<(), Box<dyn std::error::Error>> {
     let (endpoint, server) = token_sequence_fixture(vec![(
         "400 Bad Request",
         r#"{"error":"access_denied"}"#.to_owned(),
@@ -113,8 +113,8 @@ async fn device_polling_returns_distinct_denied_and_expired_errors()
 }
 
 #[tokio::test]
-async fn device_polling_stops_on_deadline_cancellation_and_interval_overflow()
--> Result<(), OAuthError> {
+async fn device_polling_stops_on_deadline_cancellation_and_interval_overflow(
+) -> Result<(), OAuthError> {
     let client = reqwest::Client::new();
     let endpoint = crate::llm::auth::oauth::TokenEndpoint::parse("http://127.0.0.1:9")?;
     let service = TokenService::new(&client, endpoint);

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use color_eyre::{Result, eyre::eyre};
+use color_eyre::{eyre::eyre, Result};
 
 pub(super) fn asset_name_for_platform() -> Result<String> {
     match (std::env::consts::OS, std::env::consts::ARCH) {

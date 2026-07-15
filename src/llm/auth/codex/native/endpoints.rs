@@ -106,7 +106,7 @@ impl CodexNativeEndpoints {
 #[cfg(test)]
 mod tests {
     use super::{
-        AUTHORIZATION_ENDPOINT, CLIENT_ID, CodexNativeEndpoints, DEVICE_REDIRECT_URI,
+        CodexNativeEndpoints, AUTHORIZATION_ENDPOINT, CLIENT_ID, DEVICE_REDIRECT_URI,
         DEVICE_TOKEN_ENDPOINT, DEVICE_USER_CODE_ENDPOINT, REVOCATION_ENDPOINT, TOKEN_ENDPOINT,
     };
 

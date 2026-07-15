@@ -7,7 +7,7 @@ use crate::config::key_store::{
 };
 use crate::config::{AppConfig, KeyStore};
 use crate::llm::auth::{
-    oauth::{RedirectUri, oauth_cancellation},
+    oauth::{oauth_cancellation, RedirectUri},
     read_provider_api_key,
 };
 use crate::storage::Storage;
@@ -78,8 +78,8 @@ fn local_credential(value: &str) -> Credential {
     clippy::await_holding_lock,
     reason = "The process-wide environment fixture must remain isolated through async cleanup."
 )]
-async fn successful_exchange_replaces_prior_key_without_serializing_either_secret()
--> Result<(), Box<dyn std::error::Error>> {
+async fn successful_exchange_replaces_prior_key_without_serializing_either_secret(
+) -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let _guard = crate::test_support::env_lock()
         .lock()
@@ -126,8 +126,8 @@ async fn successful_exchange_replaces_prior_key_without_serializing_either_secre
     clippy::await_holding_lock,
     reason = "The process-wide environment fixture must remain isolated through async cleanup."
 )]
-async fn documented_code_creation_exchange_resolve_and_local_logout_round_trip()
--> Result<(), Box<dyn std::error::Error>> {
+async fn documented_code_creation_exchange_resolve_and_local_logout_round_trip(
+) -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let _guard = crate::test_support::env_lock()
         .lock()
@@ -173,11 +173,9 @@ async fn documented_code_creation_exchange_resolve_and_local_logout_round_trip()
     let create: serde_json::Value = serde_json::from_str(body(&requests[0]))?;
     let exchange: serde_json::Value = serde_json::from_str(body(&requests[1]))?;
     assert!(requests[0].starts_with("POST /auth/keys/code HTTP/1.1"));
-    assert!(
-        requests[0]
-            .to_ascii_lowercase()
-            .contains("authorization: bearer management-key")
-    );
+    assert!(requests[0]
+        .to_ascii_lowercase()
+        .contains("authorization: bearer management-key"));
     assert_eq!(create["callback_url"], "http://127.0.0.1:7777/callback");
     assert_eq!(create["code_challenge_method"], "S256");
     assert_eq!(exchange["code"], "created-code");

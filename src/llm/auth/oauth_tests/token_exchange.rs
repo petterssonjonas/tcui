@@ -2,8 +2,8 @@ use chrono::{TimeDelta, TimeZone, Utc};
 use secrecy::ExposeSecret;
 
 use crate::llm::auth::oauth::{
-    AuthorizationCode, AuthorizationCodeExchange, ClientId, ExpirySkew, OAuthError, PkceVerifier,
-    RedirectUri, TokenErrorKind, TokenService, oauth_cancellation,
+    oauth_cancellation, AuthorizationCode, AuthorizationCodeExchange, ClientId, ExpirySkew,
+    OAuthError, PkceVerifier, RedirectUri, TokenErrorKind, TokenService,
 };
 
 use super::token_support::token_fixture;
@@ -18,8 +18,8 @@ fn exchange_request() -> Result<AuthorizationCodeExchange, OAuthError> {
 }
 
 #[tokio::test]
-async fn authorization_code_exchange_posts_pkce_form_and_parses_strict_success()
--> Result<(), Box<dyn std::error::Error>> {
+async fn authorization_code_exchange_posts_pkce_form_and_parses_strict_success(
+) -> Result<(), Box<dyn std::error::Error>> {
     let (endpoint, request_receiver, server) = token_fixture(
         "200 OK",
         r#"{"access_token":"access-secret","token_type":"Bearer","expires_in":60,"refresh_token":"refresh-secret","id_token":"header.account-claims.signature"}"#.to_owned(),
@@ -68,8 +68,8 @@ async fn authorization_code_exchange_posts_pkce_form_and_parses_strict_success()
 }
 
 #[tokio::test]
-async fn token_exchange_rejects_malformed_and_error_json_without_secret_output()
--> Result<(), Box<dyn std::error::Error>> {
+async fn token_exchange_rejects_malformed_and_error_json_without_secret_output(
+) -> Result<(), Box<dyn std::error::Error>> {
     let (endpoint, _, server) =
         token_fixture("200 OK", "{\"access_token\":\"only-token\"}".to_owned()).await?;
     let client = reqwest::Client::new();
@@ -98,12 +98,10 @@ async fn token_exchange_rejects_malformed_and_error_json_without_secret_output()
         &rejected,
         Err(OAuthError::TokenServer(TokenErrorKind::InvalidGrant))
     ));
-    assert!(
-        !rejected
-            .unwrap_err()
-            .to_string()
-            .contains("authorization-code-secret")
-    );
+    assert!(!rejected
+        .unwrap_err()
+        .to_string()
+        .contains("authorization-code-secret"));
     Ok(())
 }
 

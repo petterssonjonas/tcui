@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use ratatui::{Frame, prelude::*, widgets::*};
+use ratatui::{prelude::*, widgets::*, Frame};
 
 const TITLE_HEIGHT: u16 = 3;
 const NEW_CHAT_HEIGHT: u16 = 3;
@@ -386,7 +386,7 @@ fn next_rect(list_area: Rect, cursor_y: &mut u16, height: u16) -> Option<Rect> {
 mod tests {
     use super::{Sidebar, SidebarAction};
     use crate::ui::ConversationEntry;
-    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
 
     #[test]
     fn sidebar_hit_targets_include_chat_card_actions() {
@@ -410,22 +410,18 @@ mod tests {
         let hits = sidebar.hit_targets(Rect::new(0, 0, 28, 24));
 
         assert!(hits.iter().any(|hit| hit.action == SidebarAction::NewChat));
-        assert!(
-            hits.iter()
-                .any(|hit| hit.action == SidebarAction::LoadConversation(1))
-        );
-        assert!(
-            hits.iter()
-                .any(|hit| hit.action == SidebarAction::TogglePinned(1))
-        );
-        assert!(
-            hits.iter()
-                .any(|hit| hit.action == SidebarAction::ExportConversation(2))
-        );
-        assert!(
-            hits.iter()
-                .any(|hit| hit.action == SidebarAction::DeleteConversation(2))
-        );
+        assert!(hits
+            .iter()
+            .any(|hit| hit.action == SidebarAction::LoadConversation(1)));
+        assert!(hits
+            .iter()
+            .any(|hit| hit.action == SidebarAction::TogglePinned(1)));
+        assert!(hits
+            .iter()
+            .any(|hit| hit.action == SidebarAction::ExportConversation(2)));
+        assert!(hits
+            .iter()
+            .any(|hit| hit.action == SidebarAction::DeleteConversation(2)));
         let pinned_body = hits
             .iter()
             .find(|hit| hit.action == SidebarAction::LoadConversation(1))

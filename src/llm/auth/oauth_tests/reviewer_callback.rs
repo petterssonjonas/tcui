@@ -1,13 +1,13 @@
 use crate::llm::auth::oauth::{
-    CallbackPath, CallbackTimeout, LoopbackCallback, LoopbackCallbackConfig, OAuthError, State,
-    oauth_cancellation,
+    oauth_cancellation, CallbackPath, CallbackTimeout, LoopbackCallback, LoopbackCallbackConfig,
+    OAuthError, State,
 };
 
 use super::callback_support::{callback_fixture, request_for, send_raw_callback};
 
 #[tokio::test]
-async fn loopback_callback_accepts_valid_response_after_retryable_local_noise()
--> Result<(), Box<dyn std::error::Error>> {
+async fn loopback_callback_accepts_valid_response_after_retryable_local_noise(
+) -> Result<(), Box<dyn std::error::Error>> {
     let (callback, state) = callback_fixture().await?;
     let redirect_uri = callback.redirect_uri().clone();
     let (cancellation, _) = oauth_cancellation();
@@ -35,8 +35,8 @@ async fn loopback_callback_accepts_valid_response_after_retryable_local_noise()
 }
 
 #[tokio::test]
-async fn loopback_callback_bounds_repeated_invalid_connections()
--> Result<(), Box<dyn std::error::Error>> {
+async fn loopback_callback_bounds_repeated_invalid_connections(
+) -> Result<(), Box<dyn std::error::Error>> {
     let state = State::generate()?;
     let callback = LoopbackCallback::bind(
         LoopbackCallbackConfig::new(
@@ -68,8 +68,8 @@ async fn loopback_callback_bounds_repeated_invalid_connections()
 }
 
 #[tokio::test]
-async fn loopback_callback_rejects_invalid_percent_encoding_then_accepts_valid()
--> Result<(), Box<dyn std::error::Error>> {
+async fn loopback_callback_rejects_invalid_percent_encoding_then_accepts_valid(
+) -> Result<(), Box<dyn std::error::Error>> {
     let (callback, state) = callback_fixture().await?;
     let redirect_uri = callback.redirect_uri().clone();
     let valid_request = request_for(&callback, &format!("code=ok&state={state}"));

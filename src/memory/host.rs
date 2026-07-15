@@ -1,9 +1,9 @@
 use std::path::Path;
 
-use super::MemoryActivity;
 use super::recall::format_recall_context;
 use super::store::{MemoryError, MemoryStore};
 use super::write::WriteOutcome;
+use super::MemoryActivity;
 
 pub(crate) const AUTO_CAPTURE_POLICY: &str = "\n\nWhen the user states a durable preference or fact useful in future chats, invoke remember with one concise factual sentence. Do not save secrets, temporary requests, speculation, or sensitive third-party information.";
 

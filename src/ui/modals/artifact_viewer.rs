@@ -1,4 +1,4 @@
-use ratatui::{Frame, prelude::*, widgets::*};
+use ratatui::{prelude::*, widgets::*, Frame};
 
 use crate::config::app_config::{HeadingDownscale, MarkdownMode};
 use crate::ui::artifact_sidebar::{ArtifactEntry, ArtifactHandle, ArtifactKind};
@@ -229,7 +229,7 @@ mod tests {
     use super::{ArtifactViewerProps, ArtifactViewerState};
     use crate::config::app_config::{HeadingDownscale, MarkdownMode};
     use crate::ui::components::terminal_capabilities::{TerminalCapabilities, TerminalKind};
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
     fn preview_scroll_is_clamped_to_rendered_content() {

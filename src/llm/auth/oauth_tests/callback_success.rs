@@ -1,10 +1,10 @@
-use crate::llm::auth::oauth::{OAuthError, oauth_cancellation};
+use crate::llm::auth::oauth::{oauth_cancellation, OAuthError};
 
 use super::callback_support::{callback_fixture, request_for, send_raw_callback};
 
 #[tokio::test]
-async fn loopback_callback_returns_code_for_exact_path_method_and_state()
--> Result<(), Box<dyn std::error::Error>> {
+async fn loopback_callback_returns_code_for_exact_path_method_and_state(
+) -> Result<(), Box<dyn std::error::Error>> {
     let (callback, state) = callback_fixture().await?;
     let request = request_for(&callback, &format!("code=authorization-code&state={state}"));
     let redirect_uri = callback.redirect_uri().clone();
@@ -21,8 +21,8 @@ async fn loopback_callback_returns_code_for_exact_path_method_and_state()
 }
 
 #[tokio::test]
-async fn loopback_callback_propagates_authorization_server_error()
--> Result<(), Box<dyn std::error::Error>> {
+async fn loopback_callback_propagates_authorization_server_error(
+) -> Result<(), Box<dyn std::error::Error>> {
     let (callback, state) = callback_fixture().await?;
     let request = request_for(
         &callback,

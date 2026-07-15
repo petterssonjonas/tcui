@@ -3,9 +3,8 @@ use std::fmt;
 use reqwest::Url;
 
 use super::super::oauth::{
-    AuthorizationCode, BrowserLauncher, HeadlessInput, LoopbackCallback, OAuthCancellation,
-    PkceVerifier, RedirectUri, complete_headless_authorization_without_state,
-    open_authorization_url,
+    complete_headless_authorization_without_state, open_authorization_url, AuthorizationCode,
+    BrowserLauncher, HeadlessInput, LoopbackCallback, OAuthCancellation, PkceVerifier, RedirectUri,
 };
 use super::OpenRouterError;
 

@@ -5,15 +5,15 @@ use std::time::{Duration, Instant};
 
 use super::process::ProcessGuard;
 use super::support::{
-    CliEnvironment, JsonEndpoint, configure_codex_native, configure_openrouter,
-    configure_openrouter_url,
+    configure_codex_native, configure_openrouter, configure_openrouter_url, CliEnvironment,
+    JsonEndpoint,
 };
 
 const STRESS_ITERATIONS: usize = 10;
 
 #[test]
-fn auth_cli_maps_openrouter_denial_timeout_and_network_failure_to_stable_exits()
--> Result<(), Box<dyn std::error::Error>> {
+fn auth_cli_maps_openrouter_denial_timeout_and_network_failure_to_stable_exits(
+) -> Result<(), Box<dyn std::error::Error>> {
     let denied_environment = CliEnvironment::new("openrouter-denied")?;
     let denied_endpoint = JsonEndpoint::respond_once_after(
         "403 Forbidden",
@@ -54,22 +54,18 @@ fn auth_cli_maps_openrouter_denial_timeout_and_network_failure_to_stable_exits()
     assert_eq!(denied_output.status.code(), Some(11));
     assert_eq!(timeout_output.status.code(), Some(14));
     assert_eq!(no_network_output.status.code(), Some(14));
-    assert!(
-        !std::fs::read_to_string(timeout_environment.key_path())
-            .unwrap_or_default()
-            .contains("late-key-canary")
-    );
-    assert!(
-        !std::fs::read_to_string(no_network_environment.key_path())
-            .unwrap_or_default()
-            .contains("headless-code")
-    );
+    assert!(!std::fs::read_to_string(timeout_environment.key_path())
+        .unwrap_or_default()
+        .contains("late-key-canary"));
+    assert!(!std::fs::read_to_string(no_network_environment.key_path())
+        .unwrap_or_default()
+        .contains("headless-code"));
     Ok(())
 }
 
 #[test]
-fn auth_cli_maps_native_browser_failure_without_persisting_a_credential()
--> Result<(), Box<dyn std::error::Error>> {
+fn auth_cli_maps_native_browser_failure_without_persisting_a_credential(
+) -> Result<(), Box<dyn std::error::Error>> {
     let browser_environment = CliEnvironment::new("browser-failure")?;
 
     let browser_failure = browser_environment
@@ -79,17 +75,15 @@ fn auth_cli_maps_native_browser_failure_without_persisting_a_credential()
 
     assert_eq!(browser_failure.status.code(), Some(14));
     assert!(String::from_utf8(browser_failure.stdout)?.contains("Codex native authorization URL:"));
-    assert!(
-        !std::fs::read_to_string(browser_environment.key_path())
-            .unwrap_or_default()
-            .contains("access_token")
-    );
+    assert!(!std::fs::read_to_string(browser_environment.key_path())
+        .unwrap_or_default()
+        .contains("access_token"));
     Ok(())
 }
 
 #[test]
-fn auth_cli_prints_native_device_details_before_cancellation()
--> Result<(), Box<dyn std::error::Error>> {
+fn auth_cli_prints_native_device_details_before_cancellation(
+) -> Result<(), Box<dyn std::error::Error>> {
     let device_environment = CliEnvironment::new("device-code")?;
     let device_endpoint = JsonEndpoint::respond_then_hold(
         r#"{"device_auth_id":"device-id","user_code":"DEVICE-CODE","interval":5}"#,
@@ -130,8 +124,8 @@ fn auth_cli_prints_native_device_details_before_cancellation()
 }
 
 #[test]
-fn auth_cli_sigint_cancels_codex_subprocess_and_headless_openrouter_input()
--> Result<(), Box<dyn std::error::Error>> {
+fn auth_cli_sigint_cancels_codex_subprocess_and_headless_openrouter_input(
+) -> Result<(), Box<dyn std::error::Error>> {
     sigint_cancels_codex_and_openrouter()
 }
 
@@ -145,8 +139,8 @@ fn auth_cli_sigint_stress_matrix() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn auth_cli_sigint_escalates_codex_group_from_term_to_kill()
--> Result<(), Box<dyn std::error::Error>> {
+fn auth_cli_sigint_escalates_codex_group_from_term_to_kill(
+) -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let environment = CliEnvironment::new("sigint-codex-escalation")?;
     let marker = environment.marker_path();

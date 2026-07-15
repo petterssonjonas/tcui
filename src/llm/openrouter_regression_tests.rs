@@ -5,12 +5,12 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 use crate::app::message::Message;
-use crate::llm::chat::{ChatRequest, stream_chat};
+use crate::llm::chat::{stream_chat, ChatRequest};
 use crate::llm::model_fetcher::fetch_models;
 
 #[tokio::test]
-async fn openrouter_chat_keeps_existing_attribution_headers()
--> Result<(), Box<dyn std::error::Error>> {
+async fn openrouter_chat_keeps_existing_attribution_headers(
+) -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("http://{}", listener.local_addr()?);
@@ -57,8 +57,8 @@ async fn openrouter_chat_keeps_existing_attribution_headers()
 }
 
 #[tokio::test]
-async fn openrouter_model_fetch_keeps_existing_headers_and_parsing()
--> Result<(), Box<dyn std::error::Error>> {
+async fn openrouter_model_fetch_keeps_existing_headers_and_parsing(
+) -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("http://{}", listener.local_addr()?);

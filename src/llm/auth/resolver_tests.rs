@@ -3,13 +3,13 @@
     reason = "Resolver fixtures isolate process-global HOME and XDG paths across async refreshes."
 )]
 
-use super::{CredentialError, CredentialRequest, CredentialSource, resolve_provider_credential};
+use super::{resolve_provider_credential, CredentialError, CredentialRequest, CredentialSource};
 use chrono::{Duration, Utc};
 use secrecy::ExposeSecret;
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;

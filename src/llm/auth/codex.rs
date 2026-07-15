@@ -3,7 +3,9 @@ mod credential;
 mod native;
 mod status;
 
-pub(crate) use cli::{CodexCliError, login_with_cli, logout_external_cli};
+pub(crate) use cli::{login_with_cli, logout_external_cli, CodexCliError};
+#[cfg(test)]
+pub(crate) use credential::{external_metadata_is_safe, CodexCredentialError};
 #[cfg_attr(
     not(test),
     expect(
@@ -12,11 +14,9 @@ pub(crate) use cli::{CodexCliError, login_with_cli, logout_external_cli};
     )
 )]
 pub(crate) use credential::{
-    CodexCredential, CodexCredentialSource, read_external_credential, resolve_credential,
+    read_external_credential, resolve_credential, CodexCredential, CodexCredentialSource,
 };
-#[cfg(test)]
-pub(crate) use credential::{CodexCredentialError, external_metadata_is_safe};
 #[cfg(test)]
 pub(crate) use native::CodexRevocationFailure;
 pub(crate) use native::{CodexNativeAdapter, CodexNativeError, CodexNativeLogout};
-pub(crate) use status::{CodexStatus, codex_status};
+pub(crate) use status::{codex_status, CodexStatus};

@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use tokio::process::{Child, Command};
 
-use super::credential::{CodexCredential, CodexCredentialError, read_external_credential};
+use super::credential::{read_external_credential, CodexCredential, CodexCredentialError};
 use crate::llm::auth::oauth::OAuthCancellation;
 
 const CLI_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -303,7 +303,9 @@ fn is_absent_io_error(error: &std::io::Error) -> bool {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CodexCliError {
-    #[error("Codex CLI is unavailable. Install Codex and run `codex login`, or choose `--native`.")]
+    #[error(
+        "Codex CLI is unavailable. Install Codex and run `codex login`, or choose `--native`."
+    )]
     MissingCli,
     #[error("Codex CLI could not be launched")]
     Launch,

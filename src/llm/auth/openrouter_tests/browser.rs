@@ -7,8 +7,8 @@ use tokio::net::TcpStream;
 
 use crate::config::AppConfig;
 use crate::llm::auth::oauth::{
-    BrowserLauncher, CallbackPath, CallbackTimeout, LoopbackCallbackConfig, OAuthError,
-    RedirectUri, oauth_cancellation,
+    oauth_cancellation, BrowserLauncher, CallbackPath, CallbackTimeout, LoopbackCallbackConfig,
+    OAuthError, RedirectUri,
 };
 
 use super::fixture::{fixture, response};
@@ -33,8 +33,8 @@ impl BrowserLauncher for RecordingBrowser {
     clippy::await_holding_lock,
     reason = "The process-wide environment fixture must remain isolated through async cleanup."
 )]
-async fn browser_loopback_flow_uses_hardened_callback_then_persists_exchange()
--> Result<(), Box<dyn std::error::Error>> {
+async fn browser_loopback_flow_uses_hardened_callback_then_persists_exchange(
+) -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let _guard = crate::test_support::env_lock()
         .lock()

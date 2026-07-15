@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 use crate::app::message::Message;
 use color_eyre::Result;
-use rusqlite::{Connection, params, types::Type};
+use rusqlite::{params, types::Type, Connection};
 
 use crate::storage::chat_store::{ChatDocument, ChatStore};
 use crate::storage::crypto::{
-    SharedKey, decrypt_shared_text_with_key, encrypt_shared_text_with_key,
+    decrypt_shared_text_with_key, encrypt_shared_text_with_key, SharedKey,
 };
 use crate::storage::paths::TcuiDataPaths;
 
@@ -457,7 +457,7 @@ pub struct ConversationEntry {
 mod tests {
     use super::*;
     use crate::storage::chat_store::ChatDocument;
-    use crate::storage::crypto::{SharedKey, read_encrypted_document};
+    use crate::storage::crypto::{read_encrypted_document, SharedKey};
     use std::path::PathBuf;
     use std::sync::Mutex;
 
@@ -544,12 +544,10 @@ mod tests {
 
         assert!(!chat_path(&data_home, conversation_id).exists());
         assert!(trash_chat_path(&data_home, conversation_id).exists());
-        assert!(
-            storage
-                .get_conversations(0)
-                .expect("list conversations")
-                .is_empty()
-        );
+        assert!(storage
+            .get_conversations(0)
+            .expect("list conversations")
+            .is_empty());
 
         std::fs::remove_dir_all(&root).expect("cleanup temp dir");
         std::env::remove_var("XDG_DATA_HOME");
@@ -646,12 +644,10 @@ mod tests {
         drop(connection);
 
         let storage = Storage::new().expect("create storage");
-        assert!(
-            storage
-                .get_conversations(7)
-                .expect("list active conversations")
-                .is_empty()
-        );
+        assert!(storage
+            .get_conversations(7)
+            .expect("list active conversations")
+            .is_empty());
 
         let archived_path = trash_chat_path(&data_home, 42);
         assert!(archived_path.exists(), "legacy chat should be archived");

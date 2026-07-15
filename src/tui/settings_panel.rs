@@ -5,9 +5,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::tui::components::{ConfirmModal, GroupHeader, SearchField, centered_rect};
+use crate::tui::components::{centered_rect, ConfirmModal, GroupHeader, SearchField};
 use crate::tui::focus::Focus;
-use ratatui::{Frame, prelude::*, widgets::*};
+use ratatui::{prelude::*, widgets::*, Frame};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SettingCategory {
@@ -778,11 +778,9 @@ mod tests {
         assert!(results.iter().any(|(_, setting)| {
             matches!(setting.setting_type, SettingType::Theme("opencode"))
         }));
-        assert!(
-            results
-                .iter()
-                .all(|(_, setting)| { matches!(setting.setting_type, SettingType::Theme(_)) })
-        );
+        assert!(results
+            .iter()
+            .all(|(_, setting)| { matches!(setting.setting_type, SettingType::Theme(_)) }));
     }
 
     #[test]

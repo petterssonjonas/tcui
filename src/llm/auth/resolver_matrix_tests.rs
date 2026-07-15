@@ -12,11 +12,11 @@ use chrono::{Duration, Utc};
 use super::resolver::resolve_provider_credential_with_config;
 use super::resolver_tests::NativeTestEnvironment;
 use super::{CredentialError, CredentialRequest, CredentialSource};
-use crate::config::KeyStore;
 use crate::config::key_store::{
     ApiKeyCredential, ApiKeyCredentialOwnership, ApiKeyCredentialSource, Credential,
     OAuthCredential, OAuthCredentialOwnership, OAuthCredentialSource,
 };
+use crate::config::KeyStore;
 
 const NAMED_PROVIDER_ENDPOINTS: &[(&str, &str)] = &[
     ("Codex", "https://chatgpt.com/backend-api/codex"),

@@ -5,15 +5,15 @@
 
 use super::{CredentialError, CredentialRequest};
 use chrono::{Duration, Utc};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 use super::resolver_tests::NativeTestEnvironment;
-use crate::config::KeyStore;
 use crate::config::key_store::{OAuthCredential, OAuthCredentialOwnership, OAuthCredentialSource};
+use crate::config::KeyStore;
 
 #[tokio::test]
 async fn resolver_propagates_one_native_refresh_failure_to_parallel_callers() {

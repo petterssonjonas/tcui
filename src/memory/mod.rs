@@ -12,10 +12,10 @@ mod store;
 mod sync;
 mod write;
 
-pub(crate) use activity::{MemoryActivity, activities, set_activities};
+pub(crate) use activity::{activities, set_activities, MemoryActivity};
 pub(crate) use config::MemoryConfig;
 pub(crate) use directive::{RememberDirectiveIssue, RememberFilter};
-pub(crate) use host::{AUTO_CAPTURE_POLICY, append_recall, capture, recall, run_skill_operation};
+pub(crate) use host::{append_recall, capture, recall, run_skill_operation, AUTO_CAPTURE_POLICY};
 pub(crate) use mcp_server::run as run_mcp;
 pub(crate) use store::{MemoryDocument, MemoryStore};
 pub(crate) use write::WriteOutcome;

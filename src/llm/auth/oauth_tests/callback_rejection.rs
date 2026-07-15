@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use crate::llm::auth::oauth::{
-    CallbackPath, CallbackTimeout, LoopbackCallback, LoopbackCallbackConfig, OAuthError, State,
-    oauth_cancellation,
+    oauth_cancellation, CallbackPath, CallbackTimeout, LoopbackCallback, LoopbackCallbackConfig,
+    OAuthError, State,
 };
 
 use super::callback_support::{callback_fixture, request_for, send_raw_callback};
@@ -27,8 +27,8 @@ async fn loopback_callback_rejects_exact_state_mismatch() -> Result<(), Box<dyn 
 }
 
 #[tokio::test]
-async fn loopback_callback_rejects_duplicate_code_parameter()
--> Result<(), Box<dyn std::error::Error>> {
+async fn loopback_callback_rejects_duplicate_code_parameter(
+) -> Result<(), Box<dyn std::error::Error>> {
     let (callback, state) = callback_fixture().await?;
     let request = request_for(&callback, &format!("code=one&code=two&state={state}"));
     let redirect_uri = callback.redirect_uri().clone();
@@ -86,8 +86,8 @@ async fn loopback_callback_rejects_wrong_path() -> Result<(), Box<dyn std::error
 }
 
 #[tokio::test]
-async fn loopback_callback_rejects_oversized_and_malformed_requests()
--> Result<(), Box<dyn std::error::Error>> {
+async fn loopback_callback_rejects_oversized_and_malformed_requests(
+) -> Result<(), Box<dyn std::error::Error>> {
     let (callback, state) = callback_fixture().await?;
     let oversized = format!(
         "GET /callback?code=authorization-code&state={state} HTTP/1.1\r\nHost: localhost\r\nX-Padding: {}\r\n\r\n",

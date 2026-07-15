@@ -1,4 +1,4 @@
-use super::{CURRENT_STORE_VERSION, KeyStoreError};
+use super::{KeyStoreError, CURRENT_STORE_VERSION};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::config::key_store::ApiKeyCredentialSource;
 use crate::config::{AppConfig, KeyStore};
 use crate::llm::auth::{
-    codex::{CodexNativeLogout, CodexStatus, codex_status, login_with_cli, logout_external_cli},
+    codex::{codex_status, login_with_cli, logout_external_cli, CodexNativeLogout, CodexStatus},
     oauth::{
         CallbackPath, CallbackTimeout, LoopbackCallbackConfig, OAuthCancellation, RedirectUri,
     },
@@ -12,7 +12,7 @@ use crate::llm::auth::{
 
 use super::adapters::{codex_native_adapter, openrouter_adapter};
 use super::errors::{map_codex_cli, map_native, map_oauth, map_openrouter};
-use super::input::{PrintingBrowser, read_headless_input};
+use super::input::{read_headless_input, PrintingBrowser};
 use super::{
     AuthCommandError, AuthCommandRequest, AuthCommandResult, AuthLoginRequest, AuthLogoutRequest,
     AuthProvider, AuthStatusRequest,

@@ -1,4 +1,4 @@
-use super::{Action, TuiApp, providers::ModelRow};
+use super::{providers::ModelRow, Action, TuiApp};
 use secrecy::ExposeSecret;
 
 const CODEX_CREDENTIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);

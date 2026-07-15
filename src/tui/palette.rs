@@ -4,8 +4,8 @@
 #![allow(dead_code)]
 
 use crate::app::Action;
-use crate::tui::components::{GroupHeader, SearchField, SelectList, centered_rect};
-use ratatui::{Frame, prelude::*, widgets::*};
+use crate::tui::components::{centered_rect, GroupHeader, SearchField, SelectList};
+use ratatui::{prelude::*, widgets::*, Frame};
 
 use CommandCategory as C;
 
