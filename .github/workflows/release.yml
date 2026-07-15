@@ -21,7 +21,7 @@ jobs:
       CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - id: meta
         run: |
           echo "version=$(python3 - <<'PY'
@@ -51,8 +51,20 @@ jobs:
       - run: cp scripts/install.sh target/release/install.sh
       - run: cp LICENSE target/release/LICENSE
       - run: cp assets/models/potion-base-8M/LICENSE target/release/potion-base-8M-LICENSE
+      - name: Generate release PKGBUILD from packaging/PKGBUILD
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          cp packaging/PKGBUILD target/release/PKGBUILD
+          sed -i "s|^pkgver=.*|pkgver=${VERSION}|" target/release/PKGBUILD
       - run: |
           cd target/release
+          # Extract binary checksums into PKGBUILD before checksumming it.
+          X86_SUM="$(sha256sum tcui-x86_64-unknown-linux-gnu.tar.gz | awk '{print $1}')"
+          ARM_SUM="$(sha256sum tcui-aarch64-unknown-linux-gnu.tar.gz | awk '{print $1}')"
+          sed -i \
+            -e "s|^sha256sums_x86_64=('[0-9a-f]*')|sha256sums_x86_64=('${X86_SUM}')|" \
+            -e "s|^sha256sums_aarch64=('[0-9a-f]*')|sha256sums_aarch64=('${ARM_SUM}')|" \
+            PKGBUILD
           sha256sum \
             tcui-x86_64-unknown-linux-gnu.tar.gz \
             tcui-aarch64-unknown-linux-gnu.tar.gz \
@@ -64,18 +76,6 @@ jobs:
             LICENSE \
             potion-base-8M-LICENSE \
             PKGBUILD > SHA256SUMS
-      - name: Generate release PKGBUILD from packaging/PKGBUILD
-        run: |
-          VERSION="${{ steps.meta.outputs.version }}"
-          X86_SUM="$(awk '$2=="tcui-x86_64-unknown-linux-gnu.tar.gz"{print $1}' target/release/SHA256SUMS)"
-          ARM_SUM="$(awk '$2=="tcui-aarch64-unknown-linux-gnu.tar.gz"{print $1}' target/release/SHA256SUMS)"
-          [[ -n "$X86_SUM" && -n "$ARM_SUM" ]] || { echo "missing binary tarball checksums in SHA256SUMS" >&2; exit 1; }
-          cp packaging/PKGBUILD target/release/PKGBUILD
-          sed -i \
-            -e "s|^pkgver=.*|pkgver=${VERSION}|" \
-            -e "s|^sha256sums_x86_64=('[0-9a-f]*')|sha256sums_x86_64=('${X86_SUM}')|" \
-            -e "s|^sha256sums_aarch64=('[0-9a-f]*')|sha256sums_aarch64=('${ARM_SUM}')|" \
-            target/release/PKGBUILD
       - env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}

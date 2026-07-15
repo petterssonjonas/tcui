@@ -10,8 +10,8 @@ use std::thread;
 use std::time::Duration;
 
 #[test]
-fn auth_cli_never_emits_oauth_token_canaries_after_completion()
--> Result<(), Box<dyn std::error::Error>> {
+fn auth_cli_never_emits_oauth_token_canaries_after_completion(
+) -> Result<(), Box<dyn std::error::Error>> {
     // Given
     const ACCESS_TOKEN_CANARY: &str = "eyJ.tcui-secret-canary";
     const REFRESH_TOKEN_CANARY: &str = "rt.tcui-refresh-canary";
