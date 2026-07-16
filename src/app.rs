@@ -22,6 +22,7 @@ mod submission_runtime;
 pub mod tab;
 mod terminal;
 mod update;
+mod vault_profiles;
 
 #[cfg(test)]
 #[path = "app/request_only_document_tests.rs"]

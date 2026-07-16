@@ -809,6 +809,7 @@ pub fn command_action(id: &str) -> Option<crate::app::Action> {
         "show_keybinds" => Some(Action::ShowKeybinds),
         "focus_input" => Some(Action::FocusInput),
         "quit" => Some(Action::ShowQuitConfirm),
+        "manage_vault_profiles" => Some(Action::OpenVaultProfileManager),
         _ => None,
     }
 }
@@ -861,6 +862,7 @@ pub fn all_settings() -> Vec<Setting> {
         setting("show_saved_files", "Saved files", "Show saved files in the Chat files sidebar.", C::Obsidian, T::Bool { enabled: true }, &["saved", "files", "sidebar"], D::Safe),
         setting("show_memories", "Memories", "Show memories in the Chat files sidebar.", C::Obsidian, T::Bool { enabled: true }, &["memory", "files", "sidebar"], D::Safe),
         setting("show_markdown_vault", "Markdown Vault", "Show the Markdown Vault in the Chat files sidebar.", C::Obsidian, T::Bool { enabled: true }, &["markdown", "vault", "obsidian", "sidebar"], D::Safe),
+        setting("manage_vault_profiles", "Manage vault profiles", "Add, rename, move, set defaults, or remove Markdown Vault profiles without changing vault contents.", C::Obsidian, T::Command("manage_vault_profiles"), &["markdown", "vault", "profile", "folder"], D::Safe),
     ]
 }
 
@@ -941,7 +943,7 @@ mod tests {
             .filter(|setting| setting.setting_type == SettingType::Subsection)
             .count();
 
-        assert_eq!(settings.len(), 41);
+        assert_eq!(settings.len(), 42);
         assert_eq!(subsections, 4);
         assert_eq!(SettingCategory::ALL.len(), 13);
     }
@@ -953,7 +955,7 @@ mod tests {
 
         let results = panel.results(&settings);
 
-        assert_eq!(results.len(), 41);
+        assert_eq!(results.len(), 42);
     }
 
     #[test]

@@ -91,6 +91,8 @@ pub struct UI {
     pub list_popup: Option<ListPopup>,
     pub palette: Option<crate::tui::palette::PaletteState>,
     pub settings_v2: Option<crate::tui::settings_panel::SettingsPanelState>,
+    pub vault_profile_manager: Option<crate::tui::vault_profile_ui::VaultProfileManagerState>,
+    pub pending_vault_action: Option<crate::tui::vault_profile_ui::PendingVaultAction>,
     pub keybind_capture: Option<crate::tui::keybind_capture::KeybindCaptureState>,
     pub keybinding_overrides: BTreeMap<String, String>,
     pub show_keybinds: bool,
@@ -148,6 +150,7 @@ pub enum MouseAction {
     ProviderDropdown,
     ModelDropdown,
     SettingsItem(usize),
+    Launcher(launcher::LauncherAction),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -290,6 +293,8 @@ impl UI {
             list_popup: None,
             palette: None,
             settings_v2: None,
+            vault_profile_manager: None,
+            pending_vault_action: None,
             keybind_capture: None,
             keybinding_overrides: BTreeMap::new(),
             show_keybinds: false,
@@ -387,18 +392,47 @@ impl UI {
                 (hit.area, action)
             }));
 
-        if !self.app_tabs.active_view().is_chat() {
-            let _ = launcher::render(
-                f,
-                Rect::new(
+        let active_view = self.app_tabs.active_tab().map(app_tabs::AppTab::view);
+        match active_view {
+            Some(app_tabs::AppView::Launcher) => {
+                let launcher_area = Rect::new(
                     area.x,
                     area.y.saturating_add(1),
                     area.width,
                     area.height.saturating_sub(1),
-                ),
-            );
-            self.render_global_overlays(f, area, 0);
-            return;
+                );
+                self.mouse_hit_areas.extend(
+                    launcher::render(f, launcher_area)
+                        .into_iter()
+                        .map(|hit| (hit.area, MouseAction::Launcher(hit.action))),
+                );
+                self.render_global_overlays(f, area, 0);
+                return;
+            }
+            Some(app_tabs::AppView::MarkdownVault { .. }) => {
+                let workspace = Rect::new(
+                    area.x,
+                    area.y.saturating_add(1),
+                    area.width,
+                    area.height.saturating_sub(1),
+                );
+                f.render_widget(
+                    Block::default()
+                        .style(Style::default().fg(theme.foreground).bg(theme.background)),
+                    workspace,
+                );
+                f.render_widget(
+                    Paragraph::new("Markdown Vault")
+                        .style(Style::default().fg(theme.accent))
+                        .alignment(Alignment::Center),
+                    Rect::new(workspace.x, workspace.y, workspace.width, 1),
+                );
+                self.render_global_overlays(f, area, 0);
+                return;
+            }
+            Some(app_tabs::AppView::Chat) | None => {}
+            #[cfg(test)]
+            Some(app_tabs::AppView::Placeholder { .. }) => return,
         }
 
         let status_bar_rows = self.tui_config.status_bar_rows.clamp(1, 2);
@@ -760,6 +794,10 @@ impl UI {
             );
         }
 
+        if let Some(ref manager) = self.vault_profile_manager {
+            manager.render(f, area);
+        }
+
         if let Some(ref capture) = self.keybind_capture {
             capture.render(f, area);
         }
@@ -1079,7 +1117,7 @@ mod tests {
 
         let screen = terminal.backend().to_string();
         assert!(screen.contains("Launcher"));
-        assert!(screen.contains("Obsidian"));
+        assert!(screen.contains("Markdown Vault"));
         assert!(screen.contains("Memory management"));
         assert!(screen.contains("Pomodoro"));
         assert!(!screen.contains("[New Chat]"));

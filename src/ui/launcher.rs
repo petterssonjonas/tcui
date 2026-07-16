@@ -21,7 +21,7 @@ struct LauncherFeature {
 
 const FEATURES: [LauncherFeature; 9] = [
     LauncherFeature {
-        label: "Obsidian",
+        label: "Markdown Vault",
         action: LauncherAction::MarkdownVault,
     },
     LauncherFeature {

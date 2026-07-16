@@ -80,6 +80,19 @@ impl TuiApp {
             };
         }
 
+        if self.ui.pending_vault_action.is_some() {
+            if let Some(editor) = self.ui.editor_popup.as_mut() {
+                editor.handle_key(key);
+            }
+            self.resolve_pending_vault_action_after_editor_key();
+            return None;
+        }
+
+        if self.ui.vault_profile_manager.is_some() {
+            self.handle_vault_profile_key(key);
+            return None;
+        }
+
         if let Some(palette) = self.ui.palette.as_mut() {
             return match key.code {
                 KeyCode::Esc => {
@@ -496,8 +509,7 @@ impl TuiApp {
                     }
                     KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         let active = self.ui.app_tabs.active_index();
-                        self.ui.app_tabs.close(active);
-                        self.ui.focus = crate::tui::focus::Focus::Chat;
+                        self.request_app_tab_close(active);
                         None
                     }
                     _ => None,
@@ -906,6 +918,10 @@ impl TuiApp {
         let pos = ratatui::layout::Position::new(col, row);
         let area = self.ui.last_area?;
 
+        if self.ui.vault_profile_manager.is_some() || self.ui.pending_vault_action.is_some() {
+            return None;
+        }
+
         if self.ui.delete_confirm.is_some() {
             if let Some(areas) = self.ui.delete_confirm_areas {
                 if areas.yes.contains(pos) {
@@ -1106,8 +1122,7 @@ impl TuiApp {
                     return None;
                 }
                 crate::ui::MouseAction::AppTabClose(index) => {
-                    self.ui.app_tabs.close(index);
-                    self.ui.focus = crate::tui::focus::Focus::Chat;
+                    self.request_app_tab_close(index);
                     return None;
                 }
                 crate::ui::MouseAction::Sidebar(action) => {
@@ -1164,6 +1179,23 @@ impl TuiApp {
                     return Some(Action::MouseClick(MouseClickAction::SelectSettingsItem(
                         index,
                     )));
+                }
+                crate::ui::MouseAction::Launcher(action) => {
+                    return match action {
+                        crate::ui::launcher::LauncherAction::MarkdownVault => {
+                            Some(Action::OpenMarkdownVaultLauncher)
+                        }
+                        crate::ui::launcher::LauncherAction::Settings => {
+                            Some(Action::OpenSettingsPanel)
+                        }
+                        crate::ui::launcher::LauncherAction::MemoryManagement
+                        | crate::ui::launcher::LauncherAction::System
+                        | crate::ui::launcher::LauncherAction::Research
+                        | crate::ui::launcher::LauncherAction::Todo
+                        | crate::ui::launcher::LauncherAction::Kanban
+                        | crate::ui::launcher::LauncherAction::News
+                        | crate::ui::launcher::LauncherAction::Pomodoro => None,
+                    };
                 }
             }
         }

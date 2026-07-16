@@ -458,6 +458,14 @@ impl TuiApp {
                 self.ui.settings_v2 = Some(self.sidebar_settings_panel());
                 Ok(())
             }
+            Action::OpenMarkdownVaultLauncher => {
+                self.open_markdown_vault_launcher();
+                Ok(())
+            }
+            Action::OpenVaultProfileManager => {
+                self.open_vault_profile_manager();
+                Ok(())
+            }
             Action::SetPinnedCommands(pinned) => {
                 if let Some(palette) = self.ui.palette.as_mut() {
                     palette.set_pinned(pinned);

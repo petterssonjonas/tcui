@@ -74,6 +74,8 @@ pub enum Action {
     OpenSettingsPanel,
     SetPinnedCommands(Vec<String>),
     ToggleCollapseThinking,
+    OpenMarkdownVaultLauncher,
+    OpenVaultProfileManager,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

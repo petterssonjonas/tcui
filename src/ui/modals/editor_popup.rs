@@ -110,6 +110,10 @@ impl EditorPopupState {
         self.terminal.is_done()
     }
 
+    pub const fn close_is_pending(&self) -> bool {
+        self.terminal.close_is_pending()
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         if self.terminal.close_is_pending() {
             match key.code {
