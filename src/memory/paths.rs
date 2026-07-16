@@ -118,6 +118,9 @@ mod tests {
     #[test]
     fn paths_reject_absolute_parent_and_non_markdown_targets() {
         // Given
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let root =
             std::env::temp_dir().join(format!("tcui-memory-paths-{}", rand::random::<u64>()));
         fs::create_dir_all(&root).expect("temporary vault");
@@ -145,6 +148,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         // Given
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let root = std::env::temp_dir().join(format!("tcui-memory-root-{}", rand::random::<u64>()));
         let outside =
             std::env::temp_dir().join(format!("tcui-memory-outside-{}", rand::random::<u64>()));
