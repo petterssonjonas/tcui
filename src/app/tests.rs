@@ -18,7 +18,7 @@ pub(super) fn with_test_app(label: &str, test: impl FnOnce(&mut TuiApp)) {
     with_test_app_config(label, AppConfig::default(), test);
 }
 
-fn with_test_app_config(label: &str, config: AppConfig, test: impl FnOnce(&mut TuiApp)) {
+pub(super) fn with_test_app_config(label: &str, config: AppConfig, test: impl FnOnce(&mut TuiApp)) {
     let _guard = env_lock().lock().expect("env lock poisoned");
     let root = unique_temp_dir(label);
     let data_home = root.join("data-home");
@@ -1047,7 +1047,7 @@ fn send_message_without_tokio_runtime_returns_error_without_persisting_or_queuei
 
         // When
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            app.send_message("Hello from test".to_string())
+            futures::executor::block_on(app.send_message("Hello from test".to_string()))
         }));
 
         // Then
@@ -1070,11 +1070,18 @@ fn send_message_creates_conversation_and_saves_user_message() {
     with_test_app("send-message", |app| {
         // Given
         let initial_conversation = app.ui.tabs[0].active_conversation;
+        app.ui.tabs[0].tab.provider = "Ollama".to_string();
+        app.ui.tabs[0].tab.endpoint = Some("http://127.0.0.1:9".to_string());
+        app.ui.tabs[0].tab.model = "send-message-test".to_string();
+        #[cfg(feature = "memory")]
+        {
+            app.config.blocking_write().memory.enabled = false;
+        }
         let runtime = tokio::runtime::Runtime::new().expect("create runtime");
 
         // When
         runtime
-            .block_on(async { app.send_message("Hello from test".to_string()) })
+            .block_on(async { app.send_message("Hello from test".to_string()).await })
             .expect("send message");
 
         // Then
@@ -1104,7 +1111,10 @@ fn slash_remindme_is_handled_without_model_streaming() {
         let runtime = tokio::runtime::Runtime::new().expect("create runtime");
 
         runtime
-            .block_on(async { app.send_message("/remindme in 10m | Stretch".to_string()) })
+            .block_on(async {
+                app.send_message("/remindme in 10m | Stretch".to_string())
+                    .await
+            })
             .expect("schedule reminder");
 
         let tab = &app.ui.tabs[0];

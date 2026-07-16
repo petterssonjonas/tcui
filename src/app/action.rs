@@ -7,6 +7,14 @@ pub enum Action {
     ConfirmQuit,
     CancelModal,
     SendMessage(String),
+    QueuePendingDocument(crate::app::submission::PendingDocumentInput),
+    RemovePendingDocument(crate::app::submission::PendingDocumentId),
+    AwaitSubmissionConfirmation(crate::ui::app_tabs::AppTabId),
+    ConfirmSubmission(crate::ui::app_tabs::AppTabId),
+    SubmissionFailedAfterLaunch(
+        crate::ui::app_tabs::AppTabId,
+        crate::app::submission::SubmissionId,
+    ),
     StreamResponse(usize, usize, String),
     StreamThinking(usize, usize, String),
     #[cfg(feature = "memory")]

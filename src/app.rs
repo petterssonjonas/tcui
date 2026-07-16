@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -16,9 +16,15 @@ mod popups;
 mod providers;
 mod runtime;
 mod settings;
+pub mod submission;
+mod submission_runtime;
 pub mod tab;
 mod terminal;
 mod update;
+
+#[cfg(test)]
+#[path = "app/request_only_document_tests.rs"]
+mod request_only_document_tests;
 
 pub use action::Action;
 pub use generated_file::GeneratedFile;
@@ -41,6 +47,10 @@ pub struct TuiApp {
     pub ctrl_c_count: u32,
     pub last_ctrl_c: Option<std::time::Instant>,
     pub terminal_has_focus: Arc<AtomicBool>,
+    pub(crate) pending_documents:
+        HashMap<crate::ui::app_tabs::AppTabId, submission::PendingDocuments>,
+    pub(crate) submission_states:
+        HashMap<crate::ui::app_tabs::AppTabId, submission::SubmissionState>,
 }
 
 impl TuiApp {
@@ -131,6 +141,8 @@ impl TuiApp {
             ctrl_c_count: 0,
             last_ctrl_c: None,
             terminal_has_focus: Arc::new(AtomicBool::new(true)),
+            pending_documents: HashMap::new(),
+            submission_states: HashMap::new(),
         };
         let mut app = app;
         app.refresh_visible_selectors();
@@ -139,6 +151,34 @@ impl TuiApp {
         app.sync_message_media(app.ui.active_tab);
         app.queue_connection_check_for_active_tab();
         app
+    }
+
+    pub fn pending_documents_mut(&mut self) -> &mut submission::PendingDocuments {
+        let tab_id = self.ui.app_tabs.active_id();
+        self.pending_documents.entry(tab_id).or_default()
+    }
+
+    #[cfg(test)]
+    pub fn submission_state(&self) -> Option<&submission::SubmissionState> {
+        self.submission_states.get(&self.ui.app_tabs.active_id())
+    }
+
+    pub(crate) fn transition_submission(
+        &mut self,
+        tab_id: crate::ui::app_tabs::AppTabId,
+        transition: fn(
+            submission::SubmissionState,
+        ) -> Result<
+            submission::SubmissionState,
+            submission::SubmissionTransitionError,
+        >,
+    ) -> color_eyre::Result<()> {
+        let state = self
+            .submission_states
+            .remove(&tab_id)
+            .ok_or_else(|| color_eyre::eyre::eyre!("submission state is unavailable"))?;
+        self.submission_states.insert(tab_id, transition(state)?);
+        Ok(())
     }
 
     pub(crate) fn load_system_prompt() -> String {

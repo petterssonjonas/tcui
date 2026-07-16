@@ -1,5 +1,6 @@
 use std::future::Future;
 
+use bytes::Bytes;
 use color_eyre::eyre::eyre;
 use secrecy::ExposeSecret;
 
@@ -19,13 +20,33 @@ use request::{build_request_body, codex_headers, validate_reasoning_effort};
 use sse::codex_stream_event;
 use transport::{http_error, read_sse, CodexTransportError, TransportLimits};
 
+pub(crate) fn serialize_request_body(request: &ChatRequest) -> color_eyre::Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&build_request_body(request))?)
+}
+
+pub(crate) fn validate_request(request: &ChatRequest) -> color_eyre::Result<()> {
+    validate_reasoning_effort(request)
+}
+
+pub(crate) fn prepare_session() -> color_eyre::Result<PreparedCodexSession> {
+    let config = AppConfig::load()?;
+    let session = load_session(&config)?;
+    Ok(PreparedCodexSession { session, config })
+}
+
 #[derive(Clone)]
-struct CodexSession {
+pub(crate) struct CodexSession {
     access_token: String,
     account_id: String,
     source: CodexCredentialSource,
 }
 
+pub(crate) struct PreparedCodexSession {
+    session: CodexSession,
+    config: AppConfig,
+}
+
+#[cfg(test)]
 pub(crate) async fn stream_codex_responses<F>(
     client: &reqwest::Client,
     request: &ChatRequest,
@@ -42,9 +63,11 @@ where
     let config = AppConfig::load()?;
     let session = load_session(&config)?;
     let source = session.source;
-    stream_with_one_refresh(
+    let body = Bytes::from(serialize_request_body(request)?);
+    stream_prepared_with_one_refresh(
         client,
         request,
+        body,
         session,
         || async { refresh_session(&config, source).await },
         on_event,
@@ -52,6 +75,30 @@ where
     .await
 }
 
+pub(crate) async fn stream_prepared_codex_responses<F>(
+    client: &reqwest::Client,
+    request: &ChatRequest,
+    body: Bytes,
+    prepared: PreparedCodexSession,
+    on_event: &mut F,
+) -> color_eyre::Result<ChatStreamOutput>
+where
+    F: FnMut(ChatStreamEvent) + Send,
+{
+    let source = prepared.session.source;
+    let config = prepared.config;
+    stream_prepared_with_one_refresh(
+        client,
+        request,
+        body,
+        prepared.session,
+        || async { refresh_session(&config, source).await },
+        on_event,
+    )
+    .await
+}
+
+#[cfg(test)]
 async fn stream_with_one_refresh<F, Fut, H>(
     client: &reqwest::Client,
     request: &ChatRequest,
@@ -64,10 +111,27 @@ where
     Fut: Future<Output = color_eyre::Result<CodexSession>>,
     H: FnMut(ChatStreamEvent) + Send,
 {
-    let response = send_request(client, request, &session).await?;
+    let body = Bytes::from(serialize_request_body(request)?);
+    stream_prepared_with_one_refresh(client, request, body, session, refresh, on_event).await
+}
+
+async fn stream_prepared_with_one_refresh<F, Fut, H>(
+    client: &reqwest::Client,
+    request: &ChatRequest,
+    body: Bytes,
+    session: CodexSession,
+    refresh: F,
+    on_event: &mut H,
+) -> color_eyre::Result<ChatStreamOutput>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = color_eyre::Result<CodexSession>>,
+    H: FnMut(ChatStreamEvent) + Send,
+{
+    let response = send_serialized_request(client, request, body.clone(), &session).await?;
     let response = if response.status() == reqwest::StatusCode::UNAUTHORIZED {
         let refreshed = refresh().await?;
-        send_request(client, request, &refreshed).await?
+        send_serialized_request(client, request, body, &refreshed).await?
     } else {
         response
     };
@@ -105,9 +169,20 @@ where
     Ok(output)
 }
 
+#[cfg(test)]
 async fn send_request(
     client: &reqwest::Client,
     request: &ChatRequest,
+    session: &CodexSession,
+) -> color_eyre::Result<reqwest::Response> {
+    let body = Bytes::from(serialize_request_body(request)?);
+    send_serialized_request(client, request, body, session).await
+}
+
+async fn send_serialized_request(
+    client: &reqwest::Client,
+    request: &ChatRequest,
+    body: Bytes,
     session: &CodexSession,
 ) -> color_eyre::Result<reqwest::Response> {
     validate_reasoning_effort(request)?;
@@ -120,7 +195,8 @@ async fn send_request(
             &session.account_id,
             request,
         )?)
-        .json(&build_request_body(request))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body)
         .send()
         .await
         .inspect_err(|error| {

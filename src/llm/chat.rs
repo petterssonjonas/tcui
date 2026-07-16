@@ -1,9 +1,12 @@
 use crate::app::message::Message;
+use bytes::Bytes;
 use color_eyre::eyre::eyre;
 use futures::StreamExt;
+use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct ChatRequest {
     pub(crate) provider: String,
     pub(crate) endpoint: String,
@@ -14,6 +17,105 @@ pub(crate) struct ChatRequest {
     pub(crate) api_key: Option<String>,
     pub(crate) system_prompt: String,
     pub(crate) messages: Vec<Message>,
+}
+
+impl fmt::Debug for ChatRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChatRequest")
+            .field("provider", &self.provider)
+            .field("endpoint", &self.endpoint)
+            .field("model", &self.model)
+            .field("reasoning_effort", &self.reasoning_effort)
+            .field("backend_type", &self.backend_type)
+            .field("has_api_key", &self.api_key.is_some())
+            .field("system_prompt_bytes", &self.system_prompt.len())
+            .field("message_count", &self.messages.len())
+            .finish()
+    }
+}
+
+pub(crate) struct PreparedChatRequest {
+    request: ChatRequest,
+    body: Bytes,
+    codex_session: Option<crate::llm::codex_responses::PreparedCodexSession>,
+}
+
+impl fmt::Debug for PreparedChatRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedChatRequest")
+            .field("provider", &self.request.provider)
+            .field("endpoint", &self.request.endpoint)
+            .field("model", &self.request.model)
+            .field("backend_type", &self.request.backend_type)
+            .field("message_count", &self.request.messages.len())
+            .field("body_bytes", &self.body.len())
+            .finish_non_exhaustive()
+    }
+}
+
+pub(crate) fn prepare_chat_request(
+    request: ChatRequest,
+) -> color_eyre::Result<PreparedChatRequest> {
+    if request.model.trim().is_empty() {
+        return Err(eyre!("Choose a model before sending."));
+    }
+    if request.endpoint.trim().is_empty() {
+        return Err(eyre!("Provider endpoint is empty."));
+    }
+
+    let codex_session = match request.backend_type.trim() {
+        "anthropic" => {
+            let has_api_key = request
+                .api_key
+                .as_deref()
+                .is_some_and(|key| !key.trim().is_empty());
+            if !has_api_key {
+                return Err(eyre!("Missing Anthropic API key."));
+            }
+            validate_credential_endpoint(&request)?;
+            None
+        }
+        "codex" => {
+            if !crate::llm::auth::trusted_provider_endpoint("Codex", &request.endpoint) {
+                return Err(eyre!(
+                    "Codex OAuth credentials can only be sent to the ChatGPT subscription endpoint"
+                ));
+            }
+            crate::llm::codex_responses::validate_request(&request)?;
+            Some(crate::llm::codex_responses::prepare_session()?)
+        }
+        _ => {
+            if crate::llm::auth::canonical_provider_name(&request.provider) == "Codex" {
+                return Err(eyre!(
+                    "Codex OAuth credentials must use the dedicated Codex Responses backend."
+                ));
+            }
+            if request
+                .api_key
+                .as_deref()
+                .is_some_and(|key| !key.trim().is_empty())
+            {
+                validate_credential_endpoint(&request)?;
+            }
+            None
+        }
+    };
+    let body = Bytes::from(serialize_request_body(&request)?);
+    Ok(PreparedChatRequest {
+        request,
+        body,
+        codex_session,
+    })
+}
+
+pub(crate) fn serialize_request_body(request: &ChatRequest) -> color_eyre::Result<Vec<u8>> {
+    match request.backend_type.trim() {
+        "anthropic" => Ok(serde_json::to_vec(&anthropic_request(request))?),
+        "codex" => crate::llm::codex_responses::serialize_request_body(request),
+        _ => Ok(serde_json::to_vec(&openai_request(request))?),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -133,60 +235,63 @@ where
         return Ok(output);
     }
 
+    let prepared = prepare_chat_request(request)?;
+    stream_prepared_chat(prepared, on_event).await
+}
+
+pub(crate) async fn stream_prepared_chat<F>(
+    prepared: PreparedChatRequest,
+    mut on_event: F,
+) -> color_eyre::Result<ChatStreamOutput>
+where
+    F: FnMut(ChatStreamEvent) + Send,
+{
+    let PreparedChatRequest {
+        request,
+        body,
+        codex_session,
+    } = prepared;
     crate::diagnostics::provider_request(&request.provider, &request.endpoint, &request.model);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
 
     match request.backend_type.trim() {
-        "anthropic" => stream_anthropic(&client, &request, &mut on_event).await,
+        "anthropic" => stream_anthropic(&client, &request, body, &mut on_event).await,
         "codex" => {
-            crate::llm::codex_responses::stream_codex_responses(&client, &request, &mut on_event)
-                .await
+            let Some(session) = codex_session else {
+                return Err(eyre!("Codex request was not prepared with credentials."));
+            };
+            crate::llm::codex_responses::stream_prepared_codex_responses(
+                &client,
+                &request,
+                body,
+                session,
+                &mut on_event,
+            )
+            .await
         }
-        _ => stream_openai_compatible(&client, &request, &mut on_event).await,
+        _ => stream_openai_compatible(&client, &request, body, &mut on_event).await,
     }
 }
 
 async fn stream_openai_compatible<F>(
     client: &reqwest::Client,
     request: &ChatRequest,
+    body: Bytes,
     on_event: &mut F,
 ) -> color_eyre::Result<ChatStreamOutput>
 where
     F: FnMut(ChatStreamEvent) + Send,
 {
-    if crate::llm::auth::canonical_provider_name(&request.provider) == "Codex" {
-        return Err(eyre!(
-            "Codex OAuth credentials must use the dedicated Codex Responses backend."
-        ));
-    }
     let url = format!(
         "{}/chat/completions",
         request.endpoint.trim_end_matches('/')
     );
-    let mut messages = Vec::with_capacity(request.messages.len() + 1);
-    if !request.system_prompt.trim().is_empty() {
-        messages.push(WireMessage {
-            role: "system",
-            content: request.system_prompt.as_str(),
-        });
-    }
-    for message in &request.messages {
-        if !message.content.trim().is_empty() {
-            messages.push(WireMessage {
-                role: message.role.as_str(),
-                content: message.content.as_str(),
-            });
-        }
-    }
-
-    let mut builder = client.post(url).json(&WireRequest {
-        model: request.model.as_str(),
-        messages,
-        reasoning_effort: request.reasoning_effort.as_deref(),
-        stream: true,
-    });
+    let mut builder = client
+        .post(url)
+        .header(CONTENT_TYPE, "application/json")
+        .body(body);
 
     if let Some(api_key) = request
         .api_key
@@ -238,6 +343,7 @@ where
 async fn stream_anthropic<F>(
     client: &reqwest::Client,
     request: &ChatRequest,
+    body: Bytes,
     on_event: &mut F,
 ) -> color_eyre::Result<ChatStreamOutput>
 where
@@ -250,39 +356,13 @@ where
     else {
         return Err(eyre!("Missing Anthropic API key."));
     };
-    if !crate::llm::auth::trusted_provider_endpoint(&request.provider, &request.endpoint) {
-        return Err(eyre!(
-            "Refusing to send {provider} credentials to an untrusted endpoint.",
-            provider = request.provider
-        ));
-    }
-
-    let messages = request
-        .messages
-        .iter()
-        .filter(|message| !message.content.trim().is_empty() && message.role != "system")
-        .map(|message| WireMessage {
-            role: if message.role == "assistant" {
-                "assistant"
-            } else {
-                "user"
-            },
-            content: message.content.as_str(),
-        })
-        .collect();
     let url = format!("{}/messages", request.endpoint.trim_end_matches('/'));
     let response = client
         .post(url)
         .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
-        .json(&AnthropicRequest {
-            model: request.model.as_str(),
-            max_tokens: 4096,
-            system: (!request.system_prompt.trim().is_empty())
-                .then_some(request.system_prompt.as_str()),
-            messages,
-            stream: true,
-        })
+        .header(CONTENT_TYPE, "application/json")
+        .body(body)
         .send()
         .await
         .inspect_err(|err| {
@@ -307,6 +387,66 @@ where
     flush_title_filter(&mut output, on_event, title_filter);
     ensure_not_empty(&mut output, on_event, &request.provider);
     Ok(output)
+}
+
+fn validate_credential_endpoint(request: &ChatRequest) -> color_eyre::Result<()> {
+    if crate::llm::auth::trusted_provider_endpoint(&request.provider, &request.endpoint) {
+        return Ok(());
+    }
+    Err(eyre!(
+        "Refusing to send {provider} credentials to an untrusted endpoint.",
+        provider = request.provider
+    ))
+}
+
+fn openai_request(request: &ChatRequest) -> WireRequest<'_> {
+    let mut messages = Vec::with_capacity(request.messages.len() + 1);
+    if !request.system_prompt.trim().is_empty() {
+        messages.push(WireMessage {
+            role: "system",
+            content: request.system_prompt.as_str(),
+        });
+    }
+    messages.extend(
+        request
+            .messages
+            .iter()
+            .filter(|message| !message.content.trim().is_empty())
+            .map(|message| WireMessage {
+                role: message.role.as_str(),
+                content: message.content.as_str(),
+            }),
+    );
+    WireRequest {
+        model: request.model.as_str(),
+        messages,
+        reasoning_effort: request.reasoning_effort.as_deref(),
+        stream: true,
+    }
+}
+
+fn anthropic_request(request: &ChatRequest) -> AnthropicRequest<'_> {
+    let messages = request
+        .messages
+        .iter()
+        .filter(|message| !message.content.trim().is_empty() && message.role != "system")
+        .map(|message| WireMessage {
+            role: if message.role == "assistant" {
+                "assistant"
+            } else {
+                "user"
+            },
+            content: message.content.as_str(),
+        })
+        .collect();
+    AnthropicRequest {
+        model: request.model.as_str(),
+        max_tokens: 4096,
+        system: (!request.system_prompt.trim().is_empty())
+            .then_some(request.system_prompt.as_str()),
+        messages,
+        stream: true,
+    }
 }
 
 async fn provider_http_error<T>(
