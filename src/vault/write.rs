@@ -16,6 +16,7 @@ use crate::storage::paths::{ensure_directory, set_unix_mode, TcuiDataPaths};
 
 use super::backup::{BackupError, BackupState, BackupStore, LoadedBackup, StandaloneBackupId};
 use super::editor::{self, EditorTargetError, ValidatedEditorTarget};
+use super::move_journal::{JournalStore, MoveJournalError};
 use super::VaultRelativePath;
 
 const BACKUP_RETENTION_DAYS: i64 = 7;
@@ -89,6 +90,12 @@ pub enum VaultWriteError {
     BackupTargetMismatch,
     #[error("TCUI data root has no valid parent")]
     InvalidDataRoot,
+    #[error("unsupported Vault move journal version {version}")]
+    UnsupportedMoveJournalVersion { version: u64 },
+    #[error("Vault move recovery is required for operation {operation_id}")]
+    MoveRecoveryRequired { operation_id: String },
+    #[error("Vault move journal blocks mutation: {reason}")]
+    MoveJournalBlocked { reason: String },
     #[error(transparent)]
     Backup(#[from] BackupError),
     #[error(transparent)]
@@ -128,6 +135,7 @@ pub struct VaultWriteService<ProfileId> {
     profiles: HashMap<ProfileId, ProfileHandle>,
     mutation_lock: VaultMutationLock,
     backups: BackupStore,
+    journals: JournalStore,
 }
 
 impl<ProfileId> VaultWriteService<ProfileId>
@@ -141,7 +149,7 @@ where
     }
 
     #[cfg(test)]
-    fn at_data_root(
+    pub(crate) fn at_data_root(
         profiles: impl IntoIterator<Item = VaultProfileRegistration<ProfileId>>,
         data_root: &Path,
     ) -> Result<Self, VaultWriteError> {
@@ -170,6 +178,7 @@ where
             profiles,
             mutation_lock: VaultMutationLock::at_data_root(data_root),
             backups: BackupStore::new(data_root.join("vault-backups")),
+            journals: JournalStore::at_data_root(data_root),
         })
     }
 
@@ -200,6 +209,7 @@ where
         replacement: &[u8],
     ) -> Result<VaultWriteOutcome, VaultWriteError> {
         let guard = self.mutation_lock.try_acquire()?;
+        self.ensure_journal_mutation_allowed()?;
         self.backups.prune_terminal(BACKUP_RETENTION_DAYS)?;
         self.write_with_guard(&guard, profile_id, path, replacement)
     }
@@ -211,6 +221,7 @@ where
         backup_id: &StandaloneBackupId,
     ) -> Result<VaultRestoreOutcome, VaultWriteError> {
         let guard = self.mutation_lock.try_acquire()?;
+        self.ensure_journal_mutation_allowed()?;
         self.backups.prune_terminal(BACKUP_RETENTION_DAYS)?;
         let LoadedBackup { envelope, contents } = self.backups.load(backup_id)?;
         if envelope.profile_id != profile_id.to_string() || envelope.path != *path {
@@ -346,6 +357,27 @@ where
             .get(id)
             .ok_or_else(|| VaultWriteError::UnknownProfile {
                 profile_id: id.to_string(),
+            })
+    }
+
+    fn ensure_journal_mutation_allowed(&self) -> Result<(), VaultWriteError> {
+        self.journals
+            .ensure_mutation_allowed()
+            .map_err(|error| match error {
+                MoveJournalError::UnknownVersion { version } => {
+                    VaultWriteError::UnsupportedMoveJournalVersion { version }
+                }
+                MoveJournalError::RecoveryPending { operation_id, .. } => {
+                    VaultWriteError::MoveRecoveryRequired {
+                        operation_id: operation_id.to_string(),
+                    }
+                }
+                other @ (MoveJournalError::InvalidTransition { .. }
+                | MoveJournalError::Corrupt { .. }
+                | MoveJournalError::Serialize(_)
+                | MoveJournalError::Io { .. }) => VaultWriteError::MoveJournalBlocked {
+                    reason: other.to_string(),
+                },
             })
     }
 }

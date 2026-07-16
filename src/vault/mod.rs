@@ -2,9 +2,15 @@ mod backup;
 mod editor;
 mod fs;
 mod limits;
+pub(crate) mod move_execute;
+pub(crate) mod move_journal;
 pub(crate) mod move_plan;
 mod path;
 mod write;
+
+#[cfg(test)]
+#[path = "vault_move_execute_test.rs"]
+mod vault_move_execute;
 
 pub use backup::{BackupError, BackupIdError, StandaloneBackupId};
 pub(crate) use editor::EditorTargetError;
