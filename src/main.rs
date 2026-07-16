@@ -41,6 +41,7 @@ mod theme;
 mod tui;
 mod ui;
 mod updater;
+pub mod vault;
 
 use app::TuiApp;
 use config::AppConfig;
