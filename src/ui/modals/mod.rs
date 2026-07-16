@@ -8,3 +8,4 @@ pub mod mcp_config;
 pub mod new_tab;
 pub mod quit_confirm;
 pub mod save_file;
+pub mod terminal_editor;

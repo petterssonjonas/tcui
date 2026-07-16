@@ -968,8 +968,8 @@ impl TuiApp {
                         .as_ref()
                         .is_some_and(|e| e.close_area().is_some_and(|area| area.contains(pos)))
                     {
-                        if let Some(mut editor) = self.ui.editor_popup.take() {
-                            editor.close();
+                        if let Some(editor) = self.ui.editor_popup.as_mut() {
+                            let _ = editor.request_close();
                         }
                     }
                     return None;

@@ -225,7 +225,11 @@ impl TuiApp {
                 .show_toast("Editor requires a saved file.".to_string());
             return;
         };
-        match crate::ui::modals::editor_popup::EditorPopupState::new(&path) {
+        let area = self
+            .ui
+            .chat_area
+            .unwrap_or(ratatui::layout::Rect::new(0, 0, 80, 24));
+        match crate::ui::modals::editor_popup::EditorPopupState::new(&path, area) {
             Ok(state) => self.ui.editor_popup = Some(state),
             Err(error) => self.ui.show_toast(error),
         }

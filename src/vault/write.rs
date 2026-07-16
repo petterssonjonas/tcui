@@ -1006,7 +1006,8 @@ mod tests {
         let target = service
             .validate_editor_target(&fixture.profile_id, &Fixture::path("note.md"))
             .expect("validate editor target")
-            .into_path();
+            .revalidate_for_spawn()
+            .expect("revalidate editor target");
 
         // Then
         assert_eq!(target, fixture.root.join("note.md"));

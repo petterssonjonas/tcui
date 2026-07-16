@@ -7,6 +7,7 @@ mod path;
 mod write;
 
 pub use backup::{BackupError, BackupIdError, StandaloneBackupId};
+pub(crate) use editor::EditorTargetError;
 pub use editor::ValidatedEditorTarget;
 pub use fs::{
     VaultEntry, VaultEntryKind, VaultFs, VaultFsError, VaultListing, VaultSearchMatch,

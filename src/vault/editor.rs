@@ -7,11 +7,66 @@ use cap_std::fs::{Dir, File, OpenOptions};
 
 use super::VaultRelativePath;
 
-pub struct ValidatedEditorTarget(PathBuf);
+pub struct ValidatedEditorTarget {
+    absolute: PathBuf,
+    identity: FileIdentity,
+}
 
 impl ValidatedEditorTarget {
-    pub fn into_path(self) -> PathBuf {
-        self.0
+    pub(crate) fn from_trusted_path(path: &Path) -> Result<Self, EditorTargetError> {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|source| spawn_io_error("resolve", source))?
+                .join(path)
+        };
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let file = File::open_ambient_with(&absolute, &options, cap_std::ambient_authority())
+            .map_err(|source| classify_spawn_error(&absolute, source))?;
+        let metadata = file
+            .metadata()
+            .map_err(|source| spawn_io_error("read identity for", source))?;
+        if !metadata.is_file() {
+            return Err(EditorTargetError::SpawnNotFile);
+        }
+        Ok(Self {
+            absolute,
+            identity: FileIdentity::from_metadata(&metadata),
+        })
+    }
+
+    pub(crate) fn revalidate_for_spawn(self) -> Result<PathBuf, EditorTargetError> {
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let file = File::open_ambient_with(&self.absolute, &options, cap_std::ambient_authority())
+            .map_err(|source| classify_spawn_error(&self.absolute, source))?;
+        let metadata = file
+            .metadata()
+            .map_err(|source| spawn_io_error("re-read identity for", source))?;
+        if !metadata.is_file() {
+            return Err(EditorTargetError::SpawnNotFile);
+        }
+        if self.identity != FileIdentity::from_metadata(&metadata) {
+            return Err(EditorTargetError::SpawnIdentityChanged);
+        }
+        Ok(self.absolute)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl FileIdentity {
+    fn from_metadata(metadata: &cap_std::fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
     }
 }
 
@@ -27,6 +82,18 @@ pub enum EditorTargetError {
     Io {
         operation: &'static str,
         path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("Editor target became a symbolic link before spawn")]
+    SpawnSymlink,
+    #[error("Editor target is not a regular file before spawn")]
+    SpawnNotFile,
+    #[error("Editor target identity changed before spawn")]
+    SpawnIdentityChanged,
+    #[error("failed to {operation} editor target before spawn: {source}")]
+    SpawnIo {
+        operation: &'static str,
         #[source]
         source: io::Error,
     },
@@ -87,7 +154,10 @@ fn validate_editor_target_with_hook(
             path: path.as_path().to_path_buf(),
         });
     }
-    Ok(ValidatedEditorTarget(absolute))
+    Ok(ValidatedEditorTarget {
+        absolute,
+        identity: FileIdentity::from_metadata(&ambient_identity),
+    })
 }
 
 fn open_parent(root: &Dir, path: &Path) -> Result<(Dir, OsString), EditorTargetError> {
@@ -145,6 +215,17 @@ fn classify_ambient_error(
 
 fn same_identity(left: &cap_std::fs::Metadata, right: &cap_std::fs::Metadata) -> bool {
     left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+fn classify_spawn_error(absolute: &Path, source: io::Error) -> EditorTargetError {
+    match std::fs::symlink_metadata(absolute) {
+        Ok(metadata) if metadata.file_type().is_symlink() => EditorTargetError::SpawnSymlink,
+        Ok(_) | Err(_) => spawn_io_error("open", source),
+    }
+}
+
+fn spawn_io_error(operation: &'static str, source: io::Error) -> EditorTargetError {
+    EditorTargetError::SpawnIo { operation, source }
 }
 
 fn io_error(operation: &'static str, path: &Path, source: io::Error) -> EditorTargetError {

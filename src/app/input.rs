@@ -23,7 +23,11 @@ impl TuiApp {
                 .show_toast(format!("Could not prepare chat draft editor: {error}"));
             return;
         }
-        match crate::ui::modals::editor_popup::EditorPopupState::new_chat_draft(&path) {
+        let area = self
+            .ui
+            .chat_area
+            .unwrap_or(ratatui::layout::Rect::new(0, 0, 80, 24));
+        match crate::ui::modals::editor_popup::EditorPopupState::new_chat_draft(&path, area) {
             Ok(editor) => self.ui.editor_popup = Some(editor),
             Err(error) => {
                 let _ = std::fs::remove_file(&path);
