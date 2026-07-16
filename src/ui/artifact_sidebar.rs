@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 
 use ratatui::{prelude::*, widgets::*, Frame};
 
+use crate::ui::markdown_vault::tree::{build_tree_nodes, TreeSourceEntry, VaultTreeNode};
+use crate::vault::VaultEntryKind;
+
 const ROW_HEIGHT: u16 = 3;
 const ROW_GAP: u16 = 1;
 const ROW_STRIDE: u16 = ROW_HEIGHT + ROW_GAP;
@@ -691,7 +694,13 @@ impl<'a> ArtifactSidebar<'a> {
         });
     }
 
-    fn render_vault_body(&mut self, f: &mut Frame, area: Rect, nodes: &[VaultNode], scroll: usize) {
+    fn render_vault_body(
+        &mut self,
+        f: &mut Frame,
+        area: Rect,
+        nodes: &[VaultTreeNode],
+        scroll: usize,
+    ) {
         let theme = crate::theme::active_theme();
         f.render_widget(Paragraph::new("").style(theme.sidebar_style()), area);
         if nodes.is_empty() {
@@ -713,11 +722,13 @@ impl<'a> ArtifactSidebar<'a> {
                 row,
             );
             self.state.vault_nodes.push(VaultNodeHitArea {
-                action: match node.kind {
-                    VaultNodeKind::Directory => {
+                action: match node.entry_kind {
+                    VaultEntryKind::Directory => {
                         ArtifactSidebarAction::ToggleVaultDir(node.path.clone())
                     }
-                    VaultNodeKind::File => {
+                    VaultEntryKind::File
+                    | VaultEntryKind::UnsupportedSymlink
+                    | VaultEntryKind::Unsupported => {
                         ArtifactSidebarAction::Open(ArtifactHandle::Vault(node.path.clone()))
                     }
                 },
@@ -772,97 +783,34 @@ struct SectionConfig<'a> {
     max_rows: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum VaultNodeKind {
-    Directory,
-    File,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct VaultNode {
-    path: PathBuf,
-    depth: usize,
-    kind: VaultNodeKind,
-    label: String,
-    expanded: bool,
-}
-
 fn build_vault_nodes(
     entries: &[ArtifactEntry],
     collapsed_dirs: &HashSet<PathBuf>,
-) -> Vec<VaultNode> {
-    let mut nodes = Vec::new();
-    let mut seen_dirs = HashSet::new();
-    let mut files: Vec<PathBuf> = entries
+) -> Vec<VaultTreeNode> {
+    let sources = entries
         .iter()
         .filter_map(|entry| match &entry.handle {
-            ArtifactHandle::Vault(path) => Some(path.clone()),
+            ArtifactHandle::Vault(path) => Some(TreeSourceEntry::file(path.clone(), entry.kind)),
             _ => None,
         })
-        .collect();
-    files.sort();
-
-    for file in files {
-        let mut parent = PathBuf::new();
-        let components: Vec<_> = file.components().collect();
-        for (idx, component) in components.iter().enumerate() {
-            let name = component.as_os_str().to_string_lossy().to_string();
-            let is_last = idx + 1 == components.len();
-            parent.push(component.as_os_str());
-
-            if is_last {
-                if !is_hidden_component(&name) {
-                    nodes.push(VaultNode {
-                        path: parent.clone(),
-                        depth: idx,
-                        kind: VaultNodeKind::File,
-                        label: name,
-                        expanded: false,
-                    });
-                }
-                continue;
-            }
-
-            if is_hidden_component(&name) {
-                break;
-            }
-
-            if seen_dirs.insert(parent.clone()) {
-                nodes.push(VaultNode {
-                    path: parent.clone(),
-                    depth: idx,
-                    kind: VaultNodeKind::Directory,
-                    label: name.clone(),
-                    expanded: !collapsed_dirs.contains(&parent),
-                });
-            }
-
-            if collapsed_dirs.contains(&parent) {
-                break;
-            }
-        }
-    }
-
-    nodes
+        .collect::<Vec<_>>();
+    build_tree_nodes(&sources, collapsed_dirs)
 }
 
-fn vault_node_label(node: &VaultNode, width: usize) -> String {
+fn vault_node_label(node: &VaultTreeNode, width: usize) -> String {
     let indent = "  ".repeat(node.depth);
-    let marker = match node.kind {
-        VaultNodeKind::Directory => {
+    let marker = match node.entry_kind {
+        VaultEntryKind::Directory => {
             if node.expanded {
                 "v "
             } else {
                 "> "
             }
         }
-        VaultNodeKind::File => "- ",
+        VaultEntryKind::File => "- ",
+        VaultEntryKind::UnsupportedSymlink | VaultEntryKind::Unsupported => "! ",
     };
     truncate_label(&format!("{indent}{marker}{}", node.label), width)
-}
-
-fn is_hidden_component(name: &str) -> bool {
-    name.starts_with('.')
 }
 
 fn section_body_height(

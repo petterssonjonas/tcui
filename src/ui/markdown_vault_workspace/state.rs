@@ -1,14 +1,17 @@
+use std::path::PathBuf;
+
 use crate::config::vault_profiles::{VaultCatalog, VaultProfileId};
+use crate::ui::artifact_sidebar::ArtifactEntry;
+use crate::ui::markdown_vault::footer::MarkdownVaultProfileOption;
+use crate::ui::markdown_vault::hit_areas::MarkdownVaultHitAreas;
+use crate::ui::markdown_vault::tree::{MarkdownVaultTreeModel, TreeSourceEntry};
 use crate::ui::modals::artifact_viewer::document_viewer::{
     DocumentKind, DocumentSource, DocumentViewerState,
 };
 use crate::ui::modals::terminal_editor::TerminalEditorState;
-use crate::vault::VaultFs;
+use crate::vault::{VaultEntryKind, VaultFs, VaultWalkLimits};
 
 use super::registry::MarkdownVaultWorkspaceError;
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct MarkdownVaultTreeModelPlaceholder;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct MarkdownVaultWatcherPlaceholder;
@@ -17,6 +20,10 @@ pub(crate) struct MarkdownVaultWatcherPlaceholder;
 pub(crate) struct MarkdownVaultProfileControls {
     pub(crate) selected_profile_id: VaultProfileId,
     pub(crate) expanded: bool,
+    pub(crate) selected: usize,
+    pub(crate) add_selected: bool,
+    pub(crate) current_label: String,
+    pub(crate) profiles: Vec<MarkdownVaultProfileOption>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -26,6 +33,13 @@ pub(crate) enum MarkdownVaultFocus {
     Viewer,
     Editor,
     ProfileControls,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum MarkdownVaultContentPane {
+    #[default]
+    Viewer,
+    Editor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,15 +59,19 @@ impl Drop for WorkspaceDropProbe {
 }
 
 pub(crate) struct MarkdownVaultWorkspaceState {
-    profile_id: VaultProfileId,
-    vault_fs: VaultFs,
-    pub(crate) tree: MarkdownVaultTreeModelPlaceholder,
+    pub(super) profile_id: VaultProfileId,
+    pub(crate) root: PathBuf,
+    pub(super) vault_fs: VaultFs,
+    pub(crate) tree: MarkdownVaultTreeModel,
     pub(crate) viewer: DocumentViewerState,
     pub(crate) editor: Option<TerminalEditorState>,
     pub(crate) focus: MarkdownVaultFocus,
+    pub(crate) content_pane: MarkdownVaultContentPane,
     pub(crate) profile_controls: MarkdownVaultProfileControls,
+    pub(crate) hit_areas: MarkdownVaultHitAreas,
     pub(crate) status: MarkdownVaultWorkspaceStatus,
     pub(crate) watcher: MarkdownVaultWatcherPlaceholder,
+    pub(crate) metadata: Option<String>,
     pub(super) pending_rebind_profile_id: Option<VaultProfileId>,
     #[cfg(test)]
     drop_probe: Option<WorkspaceDropProbe>,
@@ -77,23 +95,56 @@ impl MarkdownVaultWorkspaceState {
             });
         }
         let vault_fs = VaultFs::open_profile(&profile.root)?;
+        let listing = vault_fs.list(None, VaultWalkLimits::default())?;
+        let tree_entries = listing
+            .entries
+            .into_iter()
+            .map(|entry| {
+                let artifact_kind = (entry.kind == VaultEntryKind::File).then(|| {
+                    ArtifactEntry::vault_file(&profile.root, &profile.root.join(&entry.path)).kind
+                });
+                TreeSourceEntry::new(entry.path, entry.kind, artifact_kind)
+            })
+            .collect();
+        let mut profiles = catalog
+            .profiles
+            .values()
+            .map(|candidate| MarkdownVaultProfileOption {
+                id: candidate.id.clone(),
+                label: candidate.display_name.clone(),
+                available: candidate.available,
+            })
+            .collect::<Vec<_>>();
+        profiles.sort_by_key(|profile| profile.label.to_lowercase());
+        let selected = profiles
+            .iter()
+            .position(|candidate| candidate.id == *profile_id)
+            .unwrap_or_default();
         Ok(Self {
             profile_id: profile_id.clone(),
+            root: profile.root.clone(),
             vault_fs,
-            tree: MarkdownVaultTreeModelPlaceholder,
+            tree: MarkdownVaultTreeModel::new(tree_entries),
             viewer: DocumentViewerState::new(DocumentSource::new(
-                DocumentKind::Markdown,
-                None,
+                DocumentKind::Text,
+                Some("Select a file to preview".to_string()),
                 None,
             )),
             editor: None,
             focus: MarkdownVaultFocus::Tree,
+            content_pane: MarkdownVaultContentPane::Viewer,
             profile_controls: MarkdownVaultProfileControls {
                 selected_profile_id: profile_id.clone(),
                 expanded: false,
+                selected,
+                add_selected: false,
+                current_label: profile.display_name.clone(),
+                profiles,
             },
+            hit_areas: MarkdownVaultHitAreas::default(),
             status: MarkdownVaultWorkspaceStatus::Ready,
             watcher: MarkdownVaultWatcherPlaceholder,
+            metadata: None,
             pending_rebind_profile_id: None,
             #[cfg(test)]
             drop_probe: None,
@@ -106,6 +157,11 @@ impl MarkdownVaultWorkspaceState {
 
     pub(crate) fn vault_fs(&self) -> &VaultFs {
         &self.vault_fs
+    }
+
+    #[cfg(test)]
+    pub(crate) fn metadata(&self) -> Option<&str> {
+        self.metadata.as_deref()
     }
 
     #[cfg(test)]

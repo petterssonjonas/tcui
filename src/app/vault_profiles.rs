@@ -12,6 +12,8 @@ use crate::tui::vault_profile_ui::{
 use crate::ui::app_tabs::{AppTabId, AppView};
 use crate::ui::modals::terminal_editor::CloseRequest;
 
+mod markdown_vault;
+
 impl TuiApp {
     pub(crate) fn open_vault_profile_manager(&mut self) {
         let catalog = self.vault_catalog();

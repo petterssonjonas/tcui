@@ -6,7 +6,8 @@ use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, File, OpenOptions};
 
 use super::{
-    VaultLimitKind, VaultLimitReached, VaultRelativePath, VaultSearchLimits, VaultWalkLimits,
+    EditorTargetError, ValidatedEditorTarget, VaultLimitKind, VaultLimitReached, VaultRelativePath,
+    VaultSearchLimits, VaultWalkLimits,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -118,6 +119,14 @@ impl VaultFs {
             path: path.to_path_buf(),
             source,
         })
+    }
+
+    pub(crate) fn validate_editor_target(
+        &self,
+        canonical_root: &Path,
+        path: &VaultRelativePath,
+    ) -> Result<ValidatedEditorTarget, EditorTargetError> {
+        super::editor::validate_editor_target(canonical_root, &self.0, path)
     }
 
     pub fn list(

@@ -12,6 +12,7 @@ pub mod artifact_sidebar;
 pub mod chat_tab;
 pub mod components;
 pub mod launcher;
+pub mod markdown_vault;
 pub mod markdown_vault_workspace;
 pub mod modals;
 pub mod session_list;
@@ -27,6 +28,18 @@ mod toast_tests;
 #[cfg(test)]
 #[path = "markdown_vault_workspace_tests.rs"]
 mod markdown_vault_workspace_lifecycle;
+
+#[cfg(test)]
+#[path = "markdown_vault_workspace_ui_tests.rs"]
+mod markdown_vault_workspace_ui;
+
+#[cfg(test)]
+#[path = "markdown_vault_workspace_ui_edges_tests.rs"]
+mod markdown_vault_workspace_ui_edges;
+
+#[cfg(test)]
+#[path = "markdown_vault_workspace_ui_tree_tests.rs"]
+mod markdown_vault_workspace_ui_tree;
 
 use crate::config::app_config::{HeadingDownscale, MarkdownMode, TextAlignment};
 use crate::tui::components::centered_rect;
@@ -357,6 +370,10 @@ impl UI {
         self.chat_area = None;
         self.mouse_hit_areas.clear();
         self.artifact_sidebar_state.clear_hit_areas();
+        let active_app_tab_id = self.app_tabs.active_id();
+        if let Some(state) = self.markdown_vault_workspaces.get_mut(active_app_tab_id) {
+            state.hit_areas.clear();
+        }
 
         if area.width < 64 || area.height < 16 {
             f.render_widget(Clear, area);
@@ -424,17 +441,28 @@ impl UI {
                     area.width,
                     area.height.saturating_sub(1),
                 );
-                f.render_widget(
-                    Block::default()
-                        .style(Style::default().fg(theme.foreground).bg(theme.background)),
-                    workspace,
-                );
-                f.render_widget(
-                    Paragraph::new("Markdown Vault")
-                        .style(Style::default().fg(theme.accent))
-                        .alignment(Alignment::Center),
-                    Rect::new(workspace.x, workspace.y, workspace.width, 1),
-                );
+                let active_id = self.app_tabs.active_id();
+                if let Some(state) = self.markdown_vault_workspaces.get_mut(active_id) {
+                    markdown_vault::render_workspace(
+                        f,
+                        workspace,
+                        state,
+                        markdown_vault::MarkdownVaultRenderProps {
+                            markdown_mode: self.markdown_mode,
+                            kitty_enhanced_text: self.kitty_enhanced_text,
+                            kitty_heading_downscale: self.kitty_heading_downscale,
+                            image_protocol: &self.image_protocol,
+                            terminal_capabilities: self.terminal_capabilities,
+                        },
+                    );
+                } else {
+                    f.render_widget(
+                        Paragraph::new("Markdown Vault workspace unavailable")
+                            .style(Style::default().fg(theme.error).bg(theme.background))
+                            .alignment(Alignment::Center),
+                        workspace,
+                    );
+                }
                 self.render_global_overlays(f, area, 0);
                 return;
             }

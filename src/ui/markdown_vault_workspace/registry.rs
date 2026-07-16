@@ -6,6 +6,7 @@ use crate::ui::app_tabs::{AppTabId, AppTabs, AppView, CloseTabResult};
 use crate::vault::VaultFsError;
 
 use super::state::MarkdownVaultWorkspaceState;
+use super::state::{MarkdownVaultContentPane, MarkdownVaultFocus};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum MarkdownVaultWorkspaceError {
@@ -67,12 +68,16 @@ impl MarkdownVaultWorkspaceRegistry {
         self.states.get(&tab_id)
     }
 
+    pub(crate) fn get_mut(&mut self, tab_id: AppTabId) -> Option<&mut MarkdownVaultWorkspaceState> {
+        self.states.get_mut(&tab_id)
+    }
+
     #[cfg(test)]
     pub(crate) fn get_mut_for_test(
         &mut self,
         tab_id: AppTabId,
     ) -> Option<&mut MarkdownVaultWorkspaceState> {
-        self.states.get_mut(&tab_id)
+        self.get_mut(tab_id)
     }
 
     pub(crate) fn activate(
@@ -153,6 +158,10 @@ impl MarkdownVaultWorkspaceRegistry {
         };
         if editor.poll_output() {
             state.editor = None;
+            if state.focus == MarkdownVaultFocus::Editor {
+                state.focus = MarkdownVaultFocus::Viewer;
+                state.content_pane = MarkdownVaultContentPane::Viewer;
+            }
             MarkdownVaultWorkspacePtyPoll::Finished
         } else {
             MarkdownVaultWorkspacePtyPoll::Running

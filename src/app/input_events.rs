@@ -488,6 +488,33 @@ impl TuiApp {
                 }
             }
         } else {
+            if self.markdown_vault_is_active() {
+                return match key.code {
+                    KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
+                        Some(self.quit_action())
+                    }
+                    KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Some(self.quit_action())
+                    }
+                    KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Some(Action::OpenCommandPalette)
+                    }
+                    KeyCode::Char(',') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Some(Action::ToggleSettings)
+                    }
+                    KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.ui.app_tabs.add_placeholder();
+                        self.ui.focus = crate::tui::focus::Focus::Chat;
+                        None
+                    }
+                    KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        let active = self.ui.app_tabs.active_index();
+                        self.request_app_tab_close(active);
+                        None
+                    }
+                    _ => self.handle_markdown_vault_key(key),
+                };
+            }
             if !self.ui.app_tabs.active_view().is_chat() {
                 return match key.code {
                     KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
@@ -795,6 +822,11 @@ impl TuiApp {
                     return;
                 }
             }
+        }
+
+        if self.markdown_vault_is_active() {
+            let _ = self.handle_markdown_vault_mouse_scroll(pos, down);
+            return;
         }
 
         if !self.ui.app_tabs.active_view().is_chat() {
@@ -1198,6 +1230,10 @@ impl TuiApp {
                     };
                 }
             }
+        }
+
+        if self.markdown_vault_is_active() {
+            return self.handle_markdown_vault_mouse_click(pos);
         }
 
         if !self.ui.app_tabs.active_view().is_chat() {
