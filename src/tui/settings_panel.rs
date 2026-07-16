@@ -159,6 +159,21 @@ impl SettingsPanelState {
         }
     }
 
+    pub fn with_sidebar_visibility(
+        mut self,
+        show_saved_files: bool,
+        show_memories: bool,
+        show_markdown_vault: bool,
+    ) -> Self {
+        self.bool_toggles
+            .insert("show_saved_files".to_string(), show_saved_files);
+        self.bool_toggles
+            .insert("show_memories".to_string(), show_memories);
+        self.bool_toggles
+            .insert("show_markdown_vault".to_string(), show_markdown_vault);
+        self
+    }
+
     pub const fn descriptions_visible(&self) -> bool {
         self.show_descriptions
     }
@@ -808,10 +823,11 @@ pub fn all_settings() -> Vec<Setting> {
         subsection("theme", "Theme", "Choose the color system used across chat, panels, selections, and status indicators.", C::Theme),
         subsection("ui_layout", "UI Layout", "Control where transient interface elements appear in the terminal workspace.", C::UiLayout),
         subsection("chat_behavior", "Chat Behavior", "Set defaults for prompt tools and how model output is presented.", C::ChatBehavior),
+        subsection("obsidian", "Files & Vault", "Choose which optional file collections appear beneath Chat files in the sidebar.", C::Obsidian),
         setting("command_new_chat", "New Chat", "Start a new conversation in the current workspace.", C::Commands, T::Command("new_chat"), &["command", "conversation"], D::Safe),
         setting("command_close_chat", "Close Chat", "Close the active conversation tab.", C::Commands, T::Command("close_chat"), &["command", "conversation", "tab"], D::Safe),
         setting("command_toggle_sidebar", "Toggle Sidebar", "Show or hide the conversation sidebar.", C::Commands, T::Command("toggle_sidebar"), &["command", "panel"], D::Safe),
-        setting("command_toggle_artifact_sidebar", "Toggle Artifact Sidebar", "Show or hide the artifact sidebar.", C::Commands, T::Command("toggle_artifact_sidebar"), &["command", "panel", "artifact"], D::Safe),
+        setting("command_toggle_artifact_sidebar", "Toggle Chat files sidebar", "Show or hide the Chat files sidebar.", C::Commands, T::Command("toggle_artifact_sidebar"), &["command", "panel", "files"], D::Safe),
         setting("command_refresh_models", "Refresh Models", "Refresh the available model catalog for configured providers.", C::Commands, T::Command("refresh_models"), &["command", "provider", "models"], D::Safe),
         setting("command_export_conversation", "Export Conversation", "Export the active conversation to a file.", C::Commands, T::Command("export_conversation"), &["command", "save"], D::Safe),
         setting("command_show_skills", "Show Skills", "Browse the skills available to the active agent.", C::Commands, T::Command("show_skills"), &["command", "agent"], D::Safe),
@@ -842,6 +858,9 @@ pub fn all_settings() -> Vec<Setting> {
         setting("toast_off", "Toast: Off", "Hide transient toast notifications while keeping status information in the interface.", C::UiLayout, T::ToastPosition(crate::config::ToastPosition::Off), &["toast", "notification", "position"], D::Safe),
         setting("web_search", "Web Search", "Allow prompts to retrieve current web results when the configured provider supports it.", C::ChatBehavior, T::Bool { enabled: false }, &["search", "prompt"], D::Safe),
         setting("collapse_thinking", "Collapse Thinking", "Fold assistant reasoning sections by default so answers remain compact and scannable.", C::ChatBehavior, T::Bool { enabled: true }, &["reasoning", "fold"], D::Safe),
+        setting("show_saved_files", "Saved files", "Show saved files in the Chat files sidebar.", C::Obsidian, T::Bool { enabled: true }, &["saved", "files", "sidebar"], D::Safe),
+        setting("show_memories", "Memories", "Show memories in the Chat files sidebar.", C::Obsidian, T::Bool { enabled: true }, &["memory", "files", "sidebar"], D::Safe),
+        setting("show_markdown_vault", "Markdown Vault", "Show the Markdown Vault in the Chat files sidebar.", C::Obsidian, T::Bool { enabled: true }, &["markdown", "vault", "obsidian", "sidebar"], D::Safe),
     ]
 }
 
@@ -922,8 +941,8 @@ mod tests {
             .filter(|setting| setting.setting_type == SettingType::Subsection)
             .count();
 
-        assert_eq!(settings.len(), 37);
-        assert_eq!(subsections, 3);
+        assert_eq!(settings.len(), 41);
+        assert_eq!(subsections, 4);
         assert_eq!(SettingCategory::ALL.len(), 13);
     }
 
@@ -934,7 +953,7 @@ mod tests {
 
         let results = panel.results(&settings);
 
-        assert_eq!(results.len(), 37);
+        assert_eq!(results.len(), 41);
     }
 
     #[test]

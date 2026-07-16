@@ -166,6 +166,11 @@ impl TuiApp {
                             Some("collapse_thinking") => {
                                 return Some(Action::ToggleCollapseThinking);
                             }
+                            Some(
+                                id @ ("show_saved_files" | "show_memories" | "show_markdown_vault"),
+                            ) => {
+                                let _ = self.toggle_sidebar_visibility(id);
+                            }
                             _ => {}
                         },
                         crate::tui::settings_panel::EnterResult::Nothing
@@ -185,6 +190,11 @@ impl TuiApp {
                             Some("web_search") => return Some(Action::ToggleWebSearch),
                             Some("collapse_thinking") => {
                                 return Some(Action::ToggleCollapseThinking);
+                            }
+                            Some(
+                                id @ ("show_saved_files" | "show_memories" | "show_markdown_vault"),
+                            ) => {
+                                let _ = self.toggle_sidebar_visibility(id);
                             }
                             _ => {}
                         }

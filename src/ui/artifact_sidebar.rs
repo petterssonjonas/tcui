@@ -178,7 +178,7 @@ impl ArtifactEntry {
 
     pub fn origin_label(&self) -> &'static str {
         match self.origin {
-            ArtifactOrigin::Temporary => "Temporary",
+            ArtifactOrigin::Temporary => "Chat files",
             ArtifactOrigin::Saved => "Saved",
             ArtifactOrigin::Memory => "Memory",
             ArtifactOrigin::Vault => "Vault",
@@ -207,7 +207,7 @@ pub enum ArtifactSidebarAction {
 #[derive(Debug, Clone)]
 struct ArtifactRowHitAreas {
     handle: ArtifactHandle,
-    open: Rect,
+    open: Option<Rect>,
     edit: Option<Rect>,
     save: Option<Rect>,
     delete: Option<Rect>,
@@ -245,6 +245,21 @@ pub struct ArtifactSidebarState {
 }
 
 impl ArtifactSidebarState {
+    pub(crate) fn clear_hit_areas(&mut self) {
+        self.temp_rows.clear();
+        self.saved_rows.clear();
+        self.memory_rows.clear();
+        self.vault_nodes.clear();
+        self.temp_header = None;
+        self.saved_header = None;
+        self.memory_header = None;
+        self.vault_header = None;
+        self.temp_body = None;
+        self.saved_body = None;
+        self.memory_body = None;
+        self.vault_body = None;
+    }
+
     pub fn action_at(&self, pos: Position) -> Option<ArtifactSidebarAction> {
         if let Some(section) = self.header_at(pos) {
             return Some(ArtifactSidebarAction::ToggleSection(section));
@@ -256,7 +271,7 @@ impl ArtifactSidebarState {
             .chain(self.saved_rows.iter())
             .chain(self.memory_rows.iter())
         {
-            if row.open.contains(pos) {
+            if row.open.is_some_and(|area| area.contains(pos)) {
                 return Some(ArtifactSidebarAction::Open(row.handle.clone()));
             }
             if row.save.is_some_and(|area| area.contains(pos)) {
@@ -334,7 +349,25 @@ pub struct ArtifactSidebar<'a> {
     memories: &'a [ArtifactEntry],
     vault: &'a [ArtifactEntry],
     has_vault: bool,
+    visibility: ArtifactSidebarVisibility,
     state: &'a mut ArtifactSidebarState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactSidebarVisibility {
+    pub saved_files: bool,
+    pub memories: bool,
+    pub markdown_vault: bool,
+}
+
+impl ArtifactSidebarVisibility {
+    pub const fn all() -> Self {
+        Self {
+            saved_files: true,
+            memories: true,
+            markdown_vault: true,
+        }
+    }
 }
 
 impl<'a> ArtifactSidebar<'a> {
@@ -352,8 +385,14 @@ impl<'a> ArtifactSidebar<'a> {
             memories,
             vault,
             has_vault,
+            visibility: ArtifactSidebarVisibility::all(),
             state,
         }
+    }
+
+    pub const fn with_visibility(mut self, visibility: ArtifactSidebarVisibility) -> Self {
+        self.visibility = visibility;
+        self
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
@@ -370,78 +409,93 @@ impl<'a> ArtifactSidebar<'a> {
             FLAT_SECTION_MAX_ROWS,
             inner.height,
         );
-        let saved_body_height = section_body_height(
-            self.state.saved_collapsed,
-            self.saved.len(),
-            FLAT_SECTION_MAX_ROWS,
-            inner.height,
-        );
-        let memory_body_height = section_body_height(
-            self.state.memory_collapsed,
-            self.memories.len(),
-            FLAT_SECTION_MAX_ROWS,
-            inner.height,
-        );
+        let saved_body_height = self.visibility.saved_files.then(|| {
+            section_body_height(
+                self.state.saved_collapsed,
+                self.saved.len(),
+                FLAT_SECTION_MAX_ROWS,
+                inner.height,
+            )
+        });
+        let memory_body_height = self.visibility.memories.then(|| {
+            section_body_height(
+                self.state.memory_collapsed,
+                self.memories.len(),
+                FLAT_SECTION_MAX_ROWS,
+                inner.height,
+            )
+        });
         let vault_body_constraint = if self.state.vault_collapsed {
             Constraint::Length(0)
         } else {
             Constraint::Min(0)
         };
 
+        let mut constraints = vec![Constraint::Length(1), Constraint::Length(temp_body_height)];
+        if let Some(height) = saved_body_height {
+            constraints.extend([Constraint::Length(1), Constraint::Length(height)]);
+        }
+        if let Some(height) = memory_body_height {
+            constraints.extend([Constraint::Length(1), Constraint::Length(height)]);
+        }
+        if self.visibility.markdown_vault {
+            constraints.extend([Constraint::Length(1), vault_body_constraint]);
+        }
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(temp_body_height),
-                Constraint::Length(1),
-                Constraint::Length(saved_body_height),
-                Constraint::Length(1),
-                Constraint::Length(memory_body_height),
-                Constraint::Length(1),
-                vault_body_constraint,
-            ])
+            .constraints(constraints)
             .split(inner);
 
+        let mut chunk = 0;
         self.render_flat_section(
             f,
-            chunks[0],
-            chunks[1],
+            chunks[chunk],
+            chunks[chunk + 1],
             SectionConfig {
                 section: ArtifactSection::Temporary,
-                title: "Artifacts",
+                title: "Chat files",
                 entries: self.temporary,
                 scroll: self.state.temp_scroll,
                 collapsed: self.state.temp_collapsed,
                 max_rows: FLAT_SECTION_MAX_ROWS,
             },
         );
-        self.render_flat_section(
-            f,
-            chunks[2],
-            chunks[3],
-            SectionConfig {
-                section: ArtifactSection::Saved,
-                title: "Saved files",
-                entries: self.saved,
-                scroll: self.state.saved_scroll,
-                collapsed: self.state.saved_collapsed,
-                max_rows: FLAT_SECTION_MAX_ROWS,
-            },
-        );
-        self.render_flat_section(
-            f,
-            chunks[4],
-            chunks[5],
-            SectionConfig {
-                section: ArtifactSection::Memories,
-                title: "Memories",
-                entries: self.memories,
-                scroll: self.state.memory_scroll,
-                collapsed: self.state.memory_collapsed,
-                max_rows: FLAT_SECTION_MAX_ROWS,
-            },
-        );
-        self.render_vault_section(f, chunks[6], chunks[7]);
+        chunk += 2;
+        if self.visibility.saved_files {
+            self.render_flat_section(
+                f,
+                chunks[chunk],
+                chunks[chunk + 1],
+                SectionConfig {
+                    section: ArtifactSection::Saved,
+                    title: "Saved files",
+                    entries: self.saved,
+                    scroll: self.state.saved_scroll,
+                    collapsed: self.state.saved_collapsed,
+                    max_rows: FLAT_SECTION_MAX_ROWS,
+                },
+            );
+            chunk += 2;
+        }
+        if self.visibility.memories {
+            self.render_flat_section(
+                f,
+                chunks[chunk],
+                chunks[chunk + 1],
+                SectionConfig {
+                    section: ArtifactSection::Memories,
+                    title: "Memories",
+                    entries: self.memories,
+                    scroll: self.state.memory_scroll,
+                    collapsed: self.state.memory_collapsed,
+                    max_rows: FLAT_SECTION_MAX_ROWS,
+                },
+            );
+            chunk += 2;
+        }
+        if self.visibility.markdown_vault {
+            self.render_vault_section(f, chunks[chunk], chunks[chunk + 1]);
+        }
     }
 
     pub fn visible_rows(area: Rect) -> usize {
@@ -452,19 +506,8 @@ impl<'a> ArtifactSidebar<'a> {
         usize::from(area.height).max(1)
     }
 
-    fn clear_hit_state(&mut self) {
-        self.state.temp_rows.clear();
-        self.state.saved_rows.clear();
-        self.state.memory_rows.clear();
-        self.state.vault_nodes.clear();
-        self.state.temp_header = None;
-        self.state.saved_header = None;
-        self.state.memory_header = None;
-        self.state.vault_header = None;
-        self.state.temp_body = None;
-        self.state.saved_body = None;
-        self.state.memory_body = None;
-        self.state.vault_body = None;
+    pub(crate) fn clear_hit_state(&mut self) {
+        self.state.clear_hit_areas();
     }
 
     fn render_flat_section(
@@ -500,7 +543,7 @@ impl<'a> ArtifactSidebar<'a> {
                 Some(body_area)
             },
         );
-        self.render_header(f, header_area, "Vault", self.state.vault_collapsed);
+        self.render_header(f, header_area, "Markdown Vault", self.state.vault_collapsed);
         if self.state.vault_collapsed || body_area.height == 0 {
             return;
         }
@@ -603,30 +646,38 @@ impl<'a> ArtifactSidebar<'a> {
 
         let mut x = area.x;
         let y = area.y + 2;
-        let open = button_area(&mut x, y, "View");
-        f.render_widget(button("View", theme.info, theme.card_bg), open);
+        let open = button_area(&mut x, y, "View", area.right());
+        if let Some(rect) = open {
+            f.render_widget(button("View", theme.info, theme.card_bg), rect);
+        }
 
         let edit = if matches!(entry.origin, ArtifactOrigin::Saved) {
-            let rect = button_area(&mut x, y, "Edit");
-            f.render_widget(button("Edit", theme.warning, theme.card_bg), rect);
-            Some(rect)
+            let rect = button_area(&mut x, y, "Edit", area.right());
+            if let Some(rect) = rect {
+                f.render_widget(button("Edit", theme.warning, theme.card_bg), rect);
+            }
+            rect
         } else {
             None
         };
 
         let save = if entry.can_save(self.has_vault) {
             let label = entry.save_label(self.has_vault);
-            let rect = button_area(&mut x, y, label);
-            f.render_widget(button(label, theme.success, theme.card_bg), rect);
-            Some(rect)
+            let rect = button_area(&mut x, y, label, area.right());
+            if let Some(rect) = rect {
+                f.render_widget(button(label, theme.success, theme.card_bg), rect);
+            }
+            rect
         } else {
             None
         };
 
         let delete = if entry.can_delete() {
-            let rect = button_area(&mut x, y, "Del");
-            f.render_widget(button("Del", theme.error, theme.card_bg), rect);
-            Some(rect)
+            let rect = button_area(&mut x, y, "Del", area.right());
+            if let Some(rect) = rect {
+                f.render_widget(button("Del", theme.error, theme.card_bg), rect);
+            }
+            rect
         } else {
             None
         };
@@ -846,11 +897,15 @@ fn button(label: &str, color: Color, background: Color) -> Paragraph<'static> {
     Paragraph::new(format!("[{label}]")).style(Style::default().fg(color).bg(background))
 }
 
-fn button_area(x: &mut u16, y: u16, label: &str) -> Rect {
+fn button_area(x: &mut u16, y: u16, label: &str, right: u16) -> Option<Rect> {
     let width = label.len() as u16 + 2;
+    if width > right.saturating_sub(*x) {
+        *x = right;
+        return None;
+    }
     let rect = Rect::new(*x, y, width, 1);
-    *x = (*x).saturating_add(width + 1);
-    rect
+    *x = (*x).saturating_add(width + 1).min(right);
+    Some(rect)
 }
 
 fn truncate_label(label: &str, width: usize) -> String {

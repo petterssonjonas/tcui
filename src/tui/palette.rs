@@ -472,7 +472,7 @@ pub fn all_commands() -> Vec<Command> {
         ("new_chat", "New Chat", C::Session, Some("Ctrl+N"), Action::NewChat, true),
         ("close_chat", "Close Chat", C::Session, Some("Ctrl+Shift+W"), Action::CloseChat, false),
         ("toggle_sidebar", "Toggle Sidebar", C::System, Some("Ctrl+B"), Action::ToggleSidebar, false),
-        ("toggle_artifact_sidebar", "Toggle Artifact Sidebar", C::System, Some("Ctrl+]"), Action::ToggleArtifactSidebar, false),
+        ("toggle_artifact_sidebar", "Toggle Chat files sidebar", C::System, Some("Ctrl+]"), Action::ToggleArtifactSidebar, false),
         ("toggle_session_list", "Toggle Session List", C::Session, None, Action::ToggleSessionList, false),
         ("refresh_models", "Refresh Models", C::Provider, Some("Ctrl+R"), Action::RefreshModels, false),
         ("toggle_web_search", "Toggle Web Search", C::Prompt, None, Action::ToggleWebSearch, false),

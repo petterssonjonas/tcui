@@ -194,7 +194,7 @@ impl TuiApp {
             }
             Action::ShowSettings => {
                 self.ui.palette = None;
-                self.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
+                self.ui.settings_v2 = Some(self.sidebar_settings_panel());
                 Ok(())
             }
             Action::CloseSettings => {
@@ -206,8 +206,7 @@ impl TuiApp {
                 if self.ui.settings_v2.is_some() {
                     self.ui.settings_v2 = None;
                 } else {
-                    self.ui.settings_v2 =
-                        Some(crate::tui::settings_panel::SettingsPanelState::new());
+                    self.ui.settings_v2 = Some(self.sidebar_settings_panel());
                 }
                 Ok(())
             }
@@ -450,13 +449,13 @@ impl TuiApp {
             }
             Action::OpenCommandPalette => {
                 self.ui.palette = None;
-                self.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
+                self.ui.settings_v2 = Some(self.sidebar_settings_panel());
                 Ok(())
             }
             Action::OpenSettingsPanel => {
                 let _focus = crate::tui::focus::Focus::SettingsPanel;
                 self.ui.palette = None;
-                self.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
+                self.ui.settings_v2 = Some(self.sidebar_settings_panel());
                 Ok(())
             }
             Action::SetPinnedCommands(pinned) => {
@@ -999,6 +998,9 @@ impl TuiApp {
                 }
                 Some("collapse_thinking") => {
                     self.toggle_collapse_thinking()?;
+                }
+                Some(id @ ("show_saved_files" | "show_memories" | "show_markdown_vault")) => {
+                    self.toggle_sidebar_visibility(id)?;
                 }
                 _ => {}
             },

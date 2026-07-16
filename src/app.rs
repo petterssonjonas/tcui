@@ -84,6 +84,9 @@ impl TuiApp {
         ui.kitty_heading_downscale = config_snapshot.kitty_heading_downscale;
         ui.image_protocol = config_snapshot.image_protocol.clone();
         ui.web_search_enabled = config_snapshot.web_search.enabled;
+        ui.show_saved_files = config_snapshot.show_saved_files;
+        ui.show_memories = config_snapshot.show_memories;
+        ui.show_markdown_vault = config_snapshot.show_markdown_vault;
         ui.db_providers = Self::provider_entries_with_local(&config_snapshot, None);
         ui.panel_state = crate::tui::shell::PanelState::from_config(&config_snapshot.tui);
         ui.sidebar_open = ui.panel_state.left != crate::tui::shell::PanelMode::Closed;

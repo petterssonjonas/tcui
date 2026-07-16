@@ -26,7 +26,9 @@ mod toast_tests;
 use crate::config::app_config::{HeadingDownscale, MarkdownMode, TextAlignment};
 use crate::tui::components::centered_rect;
 use crate::ui::components::terminal_capabilities::TerminalCapabilities;
-use artifact_sidebar::{ArtifactEntry, ArtifactSidebar, ArtifactSidebarState};
+use artifact_sidebar::{
+    ArtifactEntry, ArtifactSidebar, ArtifactSidebarState, ArtifactSidebarVisibility,
+};
 use modals::artifact_viewer::ArtifactViewerState;
 use modals::export_dialog::ExportDialog;
 use modals::list_popup::ListPopup;
@@ -107,6 +109,9 @@ pub struct UI {
     pub vault_artifacts: Vec<ArtifactEntry>,
     pub saved_artifacts: Vec<ArtifactEntry>,
     pub memory_artifacts: Vec<ArtifactEntry>,
+    pub show_saved_files: bool,
+    pub show_memories: bool,
+    pub show_markdown_vault: bool,
     pub mcps: Vec<String>,
     pub user_alignment: TextAlignment,
     pub ai_alignment: TextAlignment,
@@ -303,6 +308,9 @@ impl UI {
             vault_artifacts: vec![],
             saved_artifacts: vec![],
             memory_artifacts: vec![],
+            show_saved_files: true,
+            show_memories: true,
+            show_markdown_vault: true,
             mcps: vec![],
             user_alignment: TextAlignment::Right,
             ai_alignment: TextAlignment::Left,
@@ -335,6 +343,7 @@ impl UI {
         self.status_bar_areas = None;
         self.chat_area = None;
         self.mouse_hit_areas.clear();
+        self.artifact_sidebar_state.clear_hit_areas();
 
         if area.width < 64 || area.height < 16 {
             f.render_widget(Clear, area);
@@ -463,6 +472,11 @@ impl UI {
         } else {
             content_layout[2]
         };
+        let artifact_visibility = ArtifactSidebarVisibility {
+            saved_files: self.show_saved_files,
+            memories: self.show_memories,
+            markdown_vault: self.show_markdown_vault,
+        };
 
         // Sidebar
         if self.sidebar_open && !left_overlays_chat {
@@ -500,7 +514,8 @@ impl UI {
                     &self.vault_artifacts,
                     self.vault_available,
                     &mut self.artifact_sidebar_state,
-                );
+                )
+                .with_visibility(artifact_visibility);
                 artifact_sidebar.render(f, right_sidebar_area);
             } else if artifact_actual_width == 0 {
                 self.artifact_sidebar_state = ArtifactSidebarState::default();
@@ -636,7 +651,8 @@ impl UI {
                         &self.vault_artifacts,
                         self.vault_available,
                         &mut self.artifact_sidebar_state,
-                    );
+                    )
+                    .with_visibility(artifact_visibility);
                     artifact_sidebar.render(f, right_sidebar_area);
                 }
             }

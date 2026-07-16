@@ -2,6 +2,8 @@ use super::*;
 use ratatui::layout::Rect;
 use std::sync::Mutex;
 
+mod chat_file_sidebar;
+
 fn env_lock() -> &'static Mutex<()> {
     crate::test_support::env_lock()
 }
