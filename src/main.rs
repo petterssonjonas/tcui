@@ -166,12 +166,14 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    let config = AppConfig::load()?;
+    recover_vault_moves(&config)?;
+
     let mut terminal = setup_terminal()?;
     restore_on_drop(&mut terminal);
     ui::components::terminal_capabilities::initialize_terminal_profile();
 
     let storage = Storage::new()?;
-    let config = AppConfig::load()?;
 
     let vault = config.vault_path.as_ref().and_then(|p| {
         let expanded = crate::app::generated_file::expand_user_path(
@@ -201,6 +203,30 @@ async fn main() -> Result<()> {
 
     drop(app);
     restore_terminal();
+    Ok(())
+}
+
+fn recover_vault_moves(config: &AppConfig) -> Result<()> {
+    let catalog = crate::config::vault_profiles::VaultCatalog {
+        profiles: config.vaults.clone(),
+        default_id: config.default_vault_id.clone(),
+    };
+    let data_root = crate::storage::paths::TcuiDataPaths::discover().root;
+    let report = crate::vault::move_recovery::MoveRecoveryService::at_data_root(
+        &catalog,
+        &data_root,
+        crate::vault::move_recovery::MoveRecoveryConfig {
+            retention_days: config.vault_operation_retention_days,
+        },
+    )
+    .recover_startup()?;
+    let blocked = report.blocked();
+    for line in report.log_lines() {
+        eprintln!("{line}");
+    }
+    if blocked {
+        eprintln!("vault.move_recovery status=blocked");
+    }
     Ok(())
 }
 

@@ -16,6 +16,7 @@ use super::move_journal::{
     JournalStore, MoveJournalError, MoveJournalState, MoveJournalV1, MoveOperationId,
 };
 use super::move_plan::{MoveCollision, MovePlan, MovePlanError, VaultFileRef};
+use super::move_rollback::MoveRollback;
 use super::{VaultMutationGuard, VaultMutationLock, VaultRelativePath, VaultWriteError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,7 +103,26 @@ impl<'a> MoveExecutor<'a> {
             }),
             Err(error) => {
                 self.mark_rolling_back(&guard, &mut journal)?;
-                Err(error)
+                if leave_for_startup_recovery() {
+                    return Err(error);
+                }
+                let operation_id = journal.operation_id.clone();
+                let rollback = MoveRollback::new(self.catalog, &self.journals, &self.backups)
+                    .rollback_guarded(&guard, &mut journal)
+                    .and_then(|()| {
+                        self.journals
+                            .transition(&mut journal, MoveJournalState::RolledBack)
+                            .map_err(|_| super::move_rollback::RollbackFailure::persist_progress())
+                    });
+                match rollback {
+                    Ok(()) => Err(error),
+                    Err(_) => {
+                        let _ = self
+                            .journals
+                            .transition(&mut journal, MoveJournalState::RecoveryRequired);
+                        Err(MoveExecuteError::RecoveryRequired { operation_id })
+                    }
+                }
             }
         }
     }
@@ -597,6 +617,27 @@ pub(crate) fn inject_failure(point: TestFailurePoint) {
         TestFailurePoint::SourceDirectorySync => FailurePoint::SourceDirectorySync,
     };
     FAILURE_POINT.with(|configured| *configured.borrow_mut() = Some(point));
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static LEAVE_FOR_STARTUP_RECOVERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn inject_interruption(point: TestFailurePoint) {
+    inject_failure(point);
+    LEAVE_FOR_STARTUP_RECOVERY.with(|configured| configured.set(true));
+}
+
+#[cfg(test)]
+fn leave_for_startup_recovery() -> bool {
+    LEAVE_FOR_STARTUP_RECOVERY.with(|configured| configured.replace(false))
+}
+
+#[cfg(not(test))]
+const fn leave_for_startup_recovery() -> bool {
+    false
 }
 
 #[cfg(test)]

@@ -219,6 +219,14 @@ pub(crate) struct MoveJournalArtifact {
     pub(crate) staged_path: Option<VaultRelativePath>,
     pub(crate) destination_committed: bool,
     pub(crate) source_removed: bool,
+    #[serde(default)]
+    pub(crate) source_restored: bool,
+    #[serde(default)]
+    pub(crate) overwritten_destination_restored: bool,
+    #[serde(default)]
+    pub(crate) created_destination_removed: bool,
+    #[serde(default)]
+    pub(crate) staged_file_cleaned: bool,
 }
 
 impl MoveJournalArtifact {
@@ -229,6 +237,10 @@ impl MoveJournalArtifact {
             staged_path: None,
             destination_committed: false,
             source_removed: false,
+            source_restored: false,
+            overwritten_destination_restored: false,
+            created_destination_removed: false,
+            staged_file_cleaned: false,
         }
     }
 }
@@ -345,6 +357,59 @@ impl JournalStore {
             });
         }
         Ok(journal)
+    }
+
+    pub(crate) fn operation_roots(&self) -> Result<Vec<PathBuf>, MoveJournalError> {
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => return Err(io_error("list", &self.root, source)),
+        };
+        let mut roots = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| io_error("list", &self.root, source))?;
+            let metadata = entry
+                .file_type()
+                .map_err(|source| io_error("inspect", &entry.path(), source))?;
+            if !metadata.is_dir() || metadata.is_symlink() {
+                return Err(MoveJournalError::Corrupt {
+                    reason: "operation entry is not a directory",
+                });
+            }
+            roots.push(entry.path());
+        }
+        roots.sort();
+        Ok(roots)
+    }
+
+    pub(crate) fn load_operation_root(
+        &self,
+        operation_root: &Path,
+    ) -> Result<MoveJournalV1, MoveJournalError> {
+        self.load_path(operation_root)
+    }
+
+    pub(crate) fn operation_is_older_than(
+        &self,
+        operation_root: &Path,
+        age: std::time::Duration,
+    ) -> Result<bool, MoveJournalError> {
+        let journal_path = operation_root.join(JOURNAL_FILE);
+        let modified = fs::metadata(&journal_path)
+            .and_then(|metadata| metadata.modified())
+            .map_err(|source| io_error("inspect", &journal_path, source))?;
+        Ok(std::time::SystemTime::now()
+            .duration_since(modified)
+            .is_ok_and(|elapsed| elapsed > age))
+    }
+
+    pub(crate) fn remove_operation_root(
+        &self,
+        operation_root: &Path,
+    ) -> Result<(), MoveJournalError> {
+        fs::remove_dir_all(operation_root)
+            .map_err(|source| io_error("remove", operation_root, source))?;
+        sync_directory(&self.root)
     }
 
     pub(crate) fn persist(&self, journal: &MoveJournalV1) -> Result<(), MoveJournalError> {

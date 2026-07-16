@@ -165,7 +165,7 @@ fn move_execution_lock_child_probe() {
 }
 
 #[test]
-fn move_execution_failures_persist_rolling_back_before_source_removal() {
+fn move_execution_failures_rollback_before_returning() {
     for point in [
         TestFailurePoint::JournalTransition,
         TestFailurePoint::Backup,
@@ -187,14 +187,15 @@ fn move_execution_failures_persist_rolling_back_before_source_removal() {
         let result = fixture.executor().execute(plan);
 
         // Then
-        assert!(matches!(
-            result,
-            Err(MoveExecuteError::InjectedFailure { .. })
-        ));
+        assert!(
+            matches!(&result, Err(MoveExecuteError::InjectedFailure { .. })),
+            "failure point {} returned {result:?}",
+            point.label()
+        );
         assert_eq!(
             fixture.journal(&operation_id).state,
-            MoveJournalState::RollingBack,
-            "failure point {} was not durable",
+            MoveJournalState::RolledBack,
+            "failure point {} did not finish rollback",
             point.label()
         );
         assert!(
@@ -206,7 +207,7 @@ fn move_execution_failures_persist_rolling_back_before_source_removal() {
 }
 
 #[test]
-fn move_execution_source_sync_failure_records_recovery_required_state() {
+fn move_execution_source_sync_failure_restores_pre_operation_state() {
     // Given
     let fixture = Fixture::new("source-sync");
     fixture.write_source("note.md", b"source bytes");
@@ -224,13 +225,13 @@ fn move_execution_source_sync_failure_records_recovery_required_state() {
     ));
     assert_eq!(
         fixture.journal(&operation_id).state,
-        MoveJournalState::RollingBack
+        MoveJournalState::RolledBack
     );
-    assert!(!fixture.source_root.join("note.md").exists());
     assert_eq!(
-        fs::read(fixture.destination_root.join("moved.md")).expect("read committed destination"),
+        fs::read(fixture.source_root.join("note.md")).expect("read restored source"),
         b"source bytes"
     );
+    assert!(!fixture.destination_root.join("moved.md").exists());
 }
 
 #[test]
