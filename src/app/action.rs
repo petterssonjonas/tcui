@@ -73,6 +73,8 @@ pub enum MouseClickAction {
     SelectPaletteItem(usize),
     ToggleLeftHandle,
     ToggleRightHandle,
+    CloseRightSidebar,
+    SetRightSidebarThin,
     OpenProviderDropdown,
     OpenModelDropdown,
     SelectSettingsItem(usize),

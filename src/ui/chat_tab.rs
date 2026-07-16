@@ -53,7 +53,7 @@ struct RenderedMessages {
     lines: Vec<Line<'static>>,
     thinking_toggle_lines: Vec<ThinkingToggleLine>,
     link_targets: Vec<LinkTarget>,
-    images: Vec<RenderedImage>,
+    images: Vec<PositionedImage>,
     kitty_headings: Vec<RenderedKittyHeading>,
     answer_anchor_lines: Vec<(usize, usize)>,
 }
@@ -71,6 +71,14 @@ struct RenderedKittyHeading {
     tier: KittyHeadingTier,
     style: Style,
     alignment: Alignment,
+    x_offset: u16,
+    width: u16,
+}
+
+struct PositionedImage {
+    image: RenderedImage,
+    x_offset: u16,
+    width: u16,
 }
 
 pub(crate) struct InputLayout {
@@ -105,9 +113,6 @@ impl<'a> ChatTab<'a> {
 
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
         let is_empty = self.state.messages.is_empty();
-
-        let has_title = self.state.generated_title.is_some();
-        let header_lines = if has_title { 2 } else { 0 };
         let input_height = if is_empty {
             centered_input_height(self.state, area)
         } else {
@@ -115,63 +120,27 @@ impl<'a> ChatTab<'a> {
         };
 
         let chunks = if is_empty {
-            let mut constraints = vec![];
-            if header_lines > 0 {
-                constraints.push(Constraint::Length(header_lines));
-            }
-            constraints.push(Constraint::Min(0));
-            constraints.push(Constraint::Length(input_height));
-            constraints.push(Constraint::Min(0));
-
             Layout::default()
                 .direction(Direction::Vertical)
-                .constraints(constraints)
+                .constraints([
+                    Constraint::Min(0),
+                    Constraint::Length(input_height),
+                    Constraint::Min(0),
+                ])
                 .split(area)
         } else {
-            let mut constraints = vec![];
-            if header_lines > 0 {
-                constraints.push(Constraint::Length(header_lines));
-            }
-            constraints.push(Constraint::Min(0));
-            constraints.push(Constraint::Length(input_height));
-
             Layout::default()
                 .direction(Direction::Vertical)
-                .constraints(constraints)
+                .constraints([Constraint::Min(0), Constraint::Length(input_height)])
                 .split(area)
         };
 
-        let mut chunk_idx = 0;
-
-        if has_title {
-            self.render_title(f, chunks[chunk_idx]);
-            chunk_idx += 1;
-        }
-
         if is_empty {
-            chunk_idx += 1; // skip spacer
-            self.render_centered_input(f, chunks[chunk_idx]);
+            self.render_centered_input(f, chunks[1]);
         } else {
-            self.render_messages(f, chat_messages_area(chunks[chunk_idx]));
-            chunk_idx += 1;
-            self.render_input(f, chunks[chunk_idx]);
+            self.render_messages(f, chat_messages_area(chunks[0]));
+            self.render_input(f, chunks[1]);
         }
-    }
-
-    fn render_title(&self, f: &mut Frame, area: Rect) {
-        let theme = crate::theme::active_theme();
-        let title = self.state.generated_title.as_deref().unwrap_or("New Chat");
-
-        let title_widget = Paragraph::new(title)
-            .style(
-                Style::default()
-                    .fg(theme.foreground)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .alignment(Alignment::Center)
-            .block(Block::default().style(Style::default().bg(theme.panel)));
-
-        f.render_widget(title_widget, area);
     }
 
     pub fn render_dropdowns(&mut self, f: &mut Frame) {
@@ -444,7 +413,7 @@ impl<'a> ChatTab<'a> {
             self.state.chat_scrollbar_thumb = None;
             return;
         }
-        let rendered = self.build_messages(area);
+        let mut rendered = self.build_messages(area);
         let show_scrollbar = self.show_chat_scrollbar
             && rendered.lines.len() > area.height as usize
             && area.width > 1;
@@ -453,6 +422,9 @@ impl<'a> ChatTab<'a> {
         } else {
             area
         };
+        if show_scrollbar {
+            rendered = self.build_messages(viewport);
+        }
         let total_lines = rendered.lines.len();
         let max_scroll = total_lines.saturating_sub(viewport.height as usize);
         let mut scroll_offset = self.state.scroll_offset.min(max_scroll);
@@ -551,9 +523,12 @@ impl<'a> ChatTab<'a> {
         let content_width = area.width.saturating_sub(2) as usize;
         let assistant_box_width = area.width.max(2);
         let assistant_inner_width = assistant_box_width.saturating_sub(2) as usize;
-        let user_inner_width = assistant_box_width.saturating_sub(4) as usize;
-        let thinking_x_offset = area.width / 10;
-        let thinking_box_width = area.width.saturating_mul(8).max(10) / 10;
+        let user_box_width = area.width.saturating_mul(3).max(4) / 4;
+        let user_inner_width = user_box_width.saturating_sub(4) as usize;
+        let user_x_offset = aligned_box_inset(area.width, user_box_width, self.user_alignment);
+        let thinking_box_width = area.width.saturating_mul(4) / 5;
+        let thinking_box_width = thinking_box_width.max(4).min(area.width);
+        let thinking_x_offset = area.width.saturating_sub(thinking_box_width) / 2;
         let thinking_inner_width = thinking_box_width.saturating_sub(4) as usize;
 
         for (idx, m) in self.state.messages.iter().enumerate() {
@@ -609,9 +584,10 @@ impl<'a> ChatTab<'a> {
                         &toggle_label,
                         Style::default()
                             .fg(Color::Yellow)
-                            .bg(theme.code_bg)
+                            .bg(Color::Black)
                             .add_modifier(Modifier::BOLD),
-                        Style::default().bg(theme.code_bg),
+                        Style::default().bg(Color::Black),
+                        Alignment::Left,
                     ));
                     thinking_toggle_lines.push(ThinkingToggleLine {
                         message_idx: idx,
@@ -650,18 +626,18 @@ impl<'a> ChatTab<'a> {
                         }
                         for mut line in rendered.lines {
                             line.alignment = Some(alignment.as_ratatui());
-                            line.style = line.style.fg(theme.muted).bg(theme.code_bg);
+                            line.style = line.style.fg(theme.muted).bg(Color::Black);
                             lines.push(box_content_line(
                                 thinking_x_offset as usize,
                                 thinking_inner_width,
                                 line,
-                                Style::default().bg(theme.code_bg),
+                                Style::default().bg(Color::Black),
                             ));
                         }
                         lines.push(box_bottom_line(
                             thinking_x_offset as usize,
                             thinking_box_width as usize,
-                            Style::default().bg(theme.code_bg),
+                            Style::default().bg(Color::Black),
                         ));
                         answer_anchor = lines
                             .len()
@@ -703,15 +679,29 @@ impl<'a> ChatTab<'a> {
             };
             let assistant_content_start = if is_user {
                 lines.push(box_top_line(
-                    0,
-                    assistant_box_width as usize,
+                    user_x_offset as usize,
+                    user_box_width as usize,
                     &user_name,
                     Style::default()
                         .fg(Color::Cyan)
                         .bg(theme.user_bubble)
                         .add_modifier(Modifier::BOLD),
                     Style::default().bg(theme.user_bubble),
+                    if self.user_alignment == TextAlignment::Right {
+                        Alignment::Right
+                    } else {
+                        Alignment::Left
+                    },
                 ));
+                lines.len()
+            } else if is_assistant {
+                lines.push(Line::from(Span::styled(
+                    "Assistant",
+                    Style::default()
+                        .fg(assistant_label_color(theme))
+                        .bg(theme.assistant_bubble)
+                        .add_modifier(Modifier::BOLD),
+                )));
                 lines.len()
             } else {
                 lines.len()
@@ -733,22 +723,44 @@ impl<'a> ChatTab<'a> {
                     tier: heading.tier,
                     style: heading.style,
                     alignment: alignment.as_ratatui(),
+                    x_offset: if is_user {
+                        user_x_offset.saturating_add(2)
+                    } else {
+                        0
+                    },
+                    width: if is_user {
+                        user_inner_width.min(u16::MAX as usize) as u16
+                    } else {
+                        area.width
+                    },
                 });
             }
             if !rendered.lines.is_empty() {
                 answer_anchor = answer_anchor.min(assistant_content_start);
             }
             for image in rendered.images {
-                images.push(RenderedImage {
-                    start_line: image.start_line + assistant_content_start,
-                    height: image.height,
-                    source: image.source,
+                images.push(PositionedImage {
+                    image: RenderedImage {
+                        start_line: image.start_line + assistant_content_start,
+                        height: image.height,
+                        source: image.source,
+                    },
+                    x_offset: if is_user {
+                        user_x_offset.saturating_add(2)
+                    } else {
+                        0
+                    },
+                    width: if is_user {
+                        user_inner_width.min(u16::MAX as usize) as u16
+                    } else {
+                        area.width
+                    },
                 });
             }
             for mut target in rendered.link_targets {
                 if is_user {
                     let pad = content_pads.get(target.line).copied().unwrap_or_default();
-                    target.column += 2 + pad;
+                    target.column += user_x_offset as usize + 2 + pad;
                 }
                 target.line += assistant_content_start;
                 link_targets.push(target);
@@ -758,7 +770,7 @@ impl<'a> ChatTab<'a> {
                 if is_user {
                     line.style = line.style.bg(theme.user_bubble);
                     lines.push(box_content_line(
-                        0,
+                        user_x_offset as usize,
                         user_inner_width,
                         line,
                         Style::default().bg(theme.user_bubble),
@@ -772,8 +784,8 @@ impl<'a> ChatTab<'a> {
             }
             if is_user {
                 lines.push(box_bottom_line(
-                    0,
-                    assistant_box_width as usize,
+                    user_x_offset as usize,
+                    user_box_width as usize,
                     Style::default().bg(theme.user_bubble),
                 ));
             }
@@ -801,9 +813,10 @@ impl<'a> ChatTab<'a> {
         f: &mut Frame,
         area: Rect,
         scroll_offset: usize,
-        images: &[RenderedImage],
+        images: &[PositionedImage],
     ) {
-        for image in images {
+        for positioned in images {
+            let image = &positioned.image;
             if image.start_line + image.height <= scroll_offset
                 || image.start_line >= scroll_offset + area.height as usize
             {
@@ -827,10 +840,18 @@ impl<'a> ChatTab<'a> {
                 continue;
             };
             let relative_top = image.start_line as i16 - scroll_offset as i16;
+            let image_area = Rect::new(
+                area.x.saturating_add(positioned.x_offset),
+                area.y,
+                positioned
+                    .width
+                    .min(area.width.saturating_sub(positioned.x_offset)),
+                area.height,
+            );
             state.render_sliced(
                 f,
-                area,
-                Size::new(area.width, image.height.min(u16::MAX as usize) as u16),
+                image_area,
+                Size::new(image_area.width, image.height.min(u16::MAX as usize) as u16),
                 SignedPosition::from((0, relative_top)),
             );
         }
@@ -852,17 +873,21 @@ impl<'a> ChatTab<'a> {
                 continue;
             }
             let width = heading.tier.rendered_width(&heading.text);
+            let region_width = heading
+                .width
+                .min(viewport.width.saturating_sub(heading.x_offset));
             let Some(width) = u16::try_from(width)
                 .ok()
-                .filter(|width| *width <= viewport.width)
+                .filter(|width| *width <= region_width)
             else {
                 continue;
             };
             let x = viewport.x
+                + heading.x_offset
                 + match heading.alignment {
                     Alignment::Left => 0,
-                    Alignment::Center => viewport.width.saturating_sub(width) / 2,
-                    Alignment::Right => viewport.width.saturating_sub(width),
+                    Alignment::Center => region_width.saturating_sub(width) / 2,
+                    Alignment::Right => region_width.saturating_sub(width),
                 };
             crate::ui::components::terminal_capabilities::render_kitty_heading(
                 f.buffer_mut(),
@@ -1327,9 +1352,10 @@ fn box_top_line(
     title: &str,
     title_style: Style,
     fill_style: Style,
+    title_alignment: Alignment,
 ) -> Line<'static> {
     if width < 2 {
-        return Line::from(Span::styled(" ".repeat(inset), fill_style));
+        return Line::from(Span::raw(" ".repeat(inset)));
     }
 
     let inner_width = width - 2;
@@ -1339,15 +1365,21 @@ fn box_top_line(
     }
     let title_width = UnicodeWidthStr::width(title_text.as_str());
     let rule_width = inner_width.saturating_sub(title_width);
+    let (rule_before, rule_after) = if title_alignment == Alignment::Right {
+        (rule_width, 0)
+    } else {
+        (0, rule_width)
+    };
 
     let mut line = Line::from(vec![
-        Span::styled(" ".repeat(inset), fill_style),
+        Span::raw(" ".repeat(inset)),
         Span::styled(" ", fill_style),
+        Span::styled(" ".repeat(rule_before), fill_style),
         Span::styled(title_text, title_style),
-        Span::styled(" ".repeat(rule_width), fill_style),
+        Span::styled(" ".repeat(rule_after), fill_style),
         Span::styled(" ", fill_style),
     ]);
-    line.style = fill_style;
+    line.style = Style::default();
     line
 }
 
@@ -1359,7 +1391,7 @@ fn box_content_line(
 ) -> Line<'static> {
     let (left_pad, right_pad) = content_padding(width, &line);
     let mut spans = Vec::with_capacity(line.spans.len() + 5);
-    spans.push(Span::styled(" ".repeat(inset), fill_style));
+    spans.push(Span::raw(" ".repeat(inset)));
     spans.push(Span::styled("  ", fill_style));
     spans.push(Span::styled(" ".repeat(left_pad), fill_style));
     let mut remaining = width.saturating_sub(left_pad + right_pad);
@@ -1387,7 +1419,7 @@ fn box_content_line(
     spans.push(Span::styled(" ".repeat(right_pad), fill_style));
     spans.push(Span::styled("  ", fill_style));
     let mut line = Line::from(spans);
-    line.style = fill_style;
+    line.style = Style::default();
     line
 }
 
@@ -1397,13 +1429,30 @@ fn box_bottom_line(inset: usize, width: usize, fill_style: Style) -> Line<'stati
     }
 
     let mut line = Line::from(vec![
-        Span::styled(" ".repeat(inset), fill_style),
+        Span::raw(" ".repeat(inset)),
         Span::styled(" ", fill_style),
         Span::styled(" ".repeat(width - 2), fill_style),
         Span::styled(" ", fill_style),
     ]);
-    line.style = fill_style;
+    line.style = Style::default();
     line
+}
+
+fn aligned_box_inset(total_width: u16, box_width: u16, alignment: TextAlignment) -> u16 {
+    let remaining = total_width.saturating_sub(box_width);
+    match alignment {
+        TextAlignment::Left => 0,
+        TextAlignment::Middle => remaining / 2,
+        TextAlignment::Right => remaining,
+    }
+}
+
+fn assistant_label_color(theme: crate::theme::ThemeSpec) -> Color {
+    match theme.key {
+        "gruvbox-dark-low-contrast" => theme.ansi[3],
+        "gruvbox-dark-high-contrast" => theme.accent_alt,
+        _ => theme.accent_alt,
+    }
 }
 
 fn content_padding(width: usize, line: &Line<'_>) -> (usize, usize) {
@@ -1724,23 +1773,28 @@ mod tests {
             .join("\n");
 
         assert!(screen.contains("Answer"));
+        assert!(screen.contains("Assistant"));
         let user_line = rendered
             .lines
             .iter()
             .find(|line| line.to_string().contains("Question"))
             .expect("user answer line");
-        assert_eq!(user_line.style.bg, Some(theme.user_bubble));
+        assert_eq!(user_line.style.bg, None);
+        assert!(user_line
+            .spans
+            .iter()
+            .any(|span| span.style.bg == Some(theme.user_bubble)));
         let assistant_line = rendered
             .lines
             .iter()
             .find(|line| line.to_string().contains("Answer"))
             .expect("assistant answer line");
         assert_eq!(assistant_line.style.bg, Some(theme.assistant_bubble));
+        assert_eq!(theme.assistant_bubble, theme.background);
     }
 
     #[test]
-    fn thinking_fold_uses_darker_box_style() {
-        let theme = crate::theme::active_theme();
+    fn thinking_fold_uses_inset_black_box_style() {
         let mut ui = crate::ui::UI::new();
         let mut assistant =
             crate::app::message::Message::new(1, "assistant".to_string(), "Answer".to_string());
@@ -1778,7 +1832,31 @@ mod tests {
             .find(|line| line.to_string().contains("thinking"))
             .expect("thinking fold line");
 
-        assert_eq!(thinking.spans[0].style.bg, Some(theme.code_bg));
+        assert_eq!(thinking.spans[0].style.bg, None);
+        assert!(thinking
+            .spans
+            .iter()
+            .any(|span| span.style.bg == Some(Color::Black)));
+    }
+
+    #[test]
+    fn user_bubble_uses_seventy_five_percent_width_and_requested_alignment() {
+        let total_width = 60;
+        let bubble_width = total_width * 3 / 4;
+
+        assert_eq!(bubble_width, 45);
+        assert_eq!(
+            aligned_box_inset(total_width, bubble_width, TextAlignment::Left),
+            0
+        );
+        assert_eq!(
+            aligned_box_inset(total_width, bubble_width, TextAlignment::Middle),
+            7
+        );
+        assert_eq!(
+            aligned_box_inset(total_width, bubble_width, TextAlignment::Right),
+            15
+        );
     }
 
     #[test]

@@ -84,6 +84,235 @@ fn wide_artifact_sidebar_header_click_toggles_section() {
 }
 
 #[test]
+fn sidebar_focus_routes_up_down_and_enter_to_conversations() {
+    with_test_app("sidebar-keyboard-focus", |app| {
+        app.ui.sidebar_open = true;
+        app.ui.panel_state.left = crate::tui::shell::PanelMode::Thin;
+        app.ui.tabs[0].conversations = vec![crate::ui::ConversationEntry {
+            id: 41,
+            title: "Keyboard target".to_string(),
+            created_at: String::new(),
+            updated_at_ms: 1,
+            pinned: false,
+        }];
+
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Tab,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Down,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        let action = app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+
+        assert_eq!(app.ui.focus, crate::tui::focus::Focus::LeftSidebar);
+        assert!(matches!(action, Some(Action::LoadConversation(41))));
+    });
+}
+
+#[test]
+fn mouse_wheel_over_sidebar_reaches_bottom_conversation() {
+    with_test_app("sidebar-mouse-scroll", |app| {
+        app.ui.sidebar_open = true;
+        app.ui.panel_state.left = crate::tui::shell::PanelMode::Thin;
+        app.ui.tabs[0].conversations = (1..=8)
+            .map(|id| crate::ui::ConversationEntry {
+                id,
+                title: format!("Chat {id}"),
+                created_at: String::new(),
+                updated_at_ms: id,
+                pinned: false,
+            })
+            .collect();
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20))
+            .expect("test terminal");
+        terminal
+            .draw(|frame| app.ui.render(frame))
+            .expect("render sidebar");
+
+        for _ in 0..16 {
+            app.handle_mouse_scroll(2, 6, crossterm::event::KeyModifiers::NONE, true);
+        }
+        terminal
+            .draw(|frame| app.ui.render(frame))
+            .expect("render scrolled sidebar");
+
+        assert!(app.ui.mouse_hit_areas.iter().any(|(_, action)| matches!(
+            action,
+            crate::ui::MouseAction::Sidebar(crate::ui::sidebar::SidebarAction::LoadConversation(8))
+        )));
+    });
+}
+
+#[test]
+fn top_bar_add_control_opens_placeholder_tab() {
+    with_test_app("app-tab-add", |app| {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24))
+            .expect("test terminal");
+        terminal
+            .draw(|frame| app.ui.render(frame))
+            .expect("render top bar");
+        let add_area = app
+            .ui
+            .mouse_hit_areas
+            .iter()
+            .find_map(|(area, action)| {
+                matches!(action, crate::ui::MouseAction::AppTabAdd).then_some(*area)
+            })
+            .expect("app tab add hit area");
+
+        let action = app.handle_mouse_click(add_area.x, add_area.y);
+
+        assert!(action.is_none());
+        assert_eq!(
+            app.ui.app_tabs.active_view(),
+            crate::ui::app_tabs::AppView::Placeholder { number: 1 }
+        );
+    });
+}
+
+#[test]
+fn ctrl_t_creates_visible_placeholder_without_changing_chat_sessions() {
+    with_test_app("app-tab-shortcut", |app| {
+        let chat_session_count = app.ui.tabs.len();
+
+        let action = app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('t'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+
+        assert!(action.is_none());
+        assert_eq!(app.ui.tabs.len(), chat_session_count);
+        assert_eq!(
+            app.ui.app_tabs.active_view(),
+            crate::ui::app_tabs::AppView::Placeholder { number: 1 }
+        );
+    });
+}
+
+#[test]
+fn ctrl_w_closes_placeholder_but_never_chat_app_tab() {
+    with_test_app("app-tab-close-shortcut", |app| {
+        app.ui.app_tabs.add_placeholder();
+
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('w'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('w'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+
+        assert_eq!(
+            app.ui.app_tabs.views(),
+            &[crate::ui::app_tabs::AppView::Chat]
+        );
+    });
+}
+
+#[test]
+fn keyboard_app_tab_roundtrip_restores_chat_focus() {
+    with_test_app("app-tab-focus-roundtrip", |app| {
+        app.ui.focus = crate::tui::focus::Focus::LeftSidebar;
+
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('t'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('w'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+
+        assert_eq!(app.ui.focus, crate::tui::focus::Focus::Chat);
+        assert_eq!(
+            app.ui.app_tabs.views(),
+            &[crate::ui::app_tabs::AppView::Chat]
+        );
+    });
+}
+
+#[test]
+fn focus_input_command_restores_chat_focus_from_sidebar() {
+    with_test_app("focus-input-sidebar", |app| {
+        app.ui.focus = crate::tui::focus::Focus::LeftSidebar;
+        app.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
+        for c in "focus input".chars() {
+            app.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(c),
+                crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+
+        let action = app
+            .handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ))
+            .expect("Focus Input command action");
+        assert!(matches!(&action, Action::FocusInput));
+        tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(app.dispatch(action))
+            .expect("dispatch Focus Input");
+
+        assert_eq!(app.ui.focus, crate::tui::focus::Focus::Chat);
+    });
+}
+
+#[test]
+fn focus_input_command_returns_placeholder_to_chat() {
+    with_test_app("focus-input-placeholder", |app| {
+        app.ui.app_tabs.add_placeholder();
+        app.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
+        for c in "focus input".chars() {
+            app.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(c),
+                crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+
+        let action = app
+            .handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ))
+            .expect("Focus Input command action");
+        tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(app.dispatch(action))
+            .expect("dispatch Focus Input");
+
+        assert_eq!(
+            app.ui.app_tabs.active_view(),
+            crate::ui::app_tabs::AppView::Chat
+        );
+    });
+}
+
+#[test]
+fn clicking_chat_surface_restores_chat_focus() {
+    with_test_app("chat-focus-click", |app| {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24))
+            .expect("test terminal");
+        terminal
+            .draw(|frame| app.ui.render(frame))
+            .expect("render chat");
+        app.ui.focus = crate::tui::focus::Focus::LeftSidebar;
+        let chat_area = app.ui.chat_area.expect("chat area");
+
+        app.handle_mouse_click(chat_area.x, chat_area.y);
+
+        assert_eq!(app.ui.focus, crate::tui::focus::Focus::Chat);
+    });
+}
+
+#[test]
 fn mouse_wheel_moves_open_list_popup_before_settings() {
     with_test_app("popup-wheel", |app| {
         // Given
@@ -189,6 +418,40 @@ fn settings_panel_search_accepts_space_key() {
             app.ui.settings_v2.as_ref().expect("settings panel").query(),
             " "
         );
+    });
+}
+
+#[test]
+fn settings_panel_tab_toggles_descriptions_without_changing_search() {
+    with_test_app("settings-description-toggle", |app| {
+        app.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
+
+        let action = app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Tab,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+
+        assert!(action.is_none());
+        let panel = app.ui.settings_v2.as_ref().expect("settings panel");
+        assert!(panel.descriptions_visible());
+        assert_eq!(panel.query(), "");
+    });
+}
+
+#[test]
+fn settings_panel_click_inside_description_keeps_panel_open() {
+    with_test_app("settings-description-click", |app| {
+        let area = Rect::new(0, 0, 100, 40);
+        let mut panel = crate::tui::settings_panel::SettingsPanelState::new();
+        panel.toggle_descriptions();
+        let popup = panel.popup_area(area);
+        app.ui.last_area = Some(area);
+        app.ui.settings_v2 = Some(panel);
+
+        let action = app.handle_mouse_click(popup.right() - 1, popup.y);
+
+        assert!(action.is_none());
+        assert!(app.ui.settings_v2.is_some());
     });
 }
 

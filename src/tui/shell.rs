@@ -22,9 +22,9 @@ impl PanelState {
         Self {
             left: PanelMode::Thin,
             right: PanelMode::Closed,
-            left_thin_width: 28,
+            left_thin_width: 24,
             left_wide_width: 42,
-            right_thin_width: 32,
+            right_thin_width: 28,
             right_wide_width: 56,
         }
     }
@@ -85,29 +85,64 @@ impl PanelState {
     }
 
     pub fn clamped_for_area(mut self, area: Rect) -> Self {
-        if area.width < 100 {
+        let right_sidebar_minimum = if self.left == PanelMode::Closed {
+            63
+        } else {
+            88
+        };
+        if area.width < right_sidebar_minimum {
+            self.right = PanelMode::Closed;
+        }
+        let left_consumed = if self.left == PanelMode::Thin {
+            self.left_width()
+        } else {
+            0
+        };
+        if self.right == PanelMode::Thin
+            && area.width
+                < left_consumed
+                    .saturating_add(self.right_width())
+                    .saturating_add(35)
+        {
             self.right = PanelMode::Closed;
         }
         self
     }
 
     pub fn handle_left_rect(self, area: Rect) -> Rect {
-        Rect::new(
-            area.x.saturating_add(self.left_width()),
-            midpoint_y(area),
-            1,
-            1,
-        )
+        let right_x = self.right_handle_x(area);
+        let mut x = area
+            .x
+            .saturating_add(self.left_width())
+            .min(area.right().saturating_sub(1));
+        if x == right_x && x > area.x {
+            x = x.saturating_sub(1);
+        }
+        Rect::new(x, midpoint_y(area), 1, 1)
     }
 
     pub fn handle_right_rect(self, area: Rect) -> Rect {
+        Rect::new(self.right_handle_x(area), midpoint_y(area), 1, 1)
+    }
+
+    pub fn handle_left_rects(self, area: Rect) -> [Rect; 3] {
+        vertical_handle_rects(self.handle_left_rect(area), area)
+    }
+
+    pub fn handle_right_rects(self, area: Rect) -> [Rect; 3] {
+        vertical_handle_rects(self.handle_right_rect(area), area)
+    }
+
+    fn right_handle_x(self, area: Rect) -> u16 {
         let width = self.right_width();
-        let x = if width == 0 {
+        if width == 0 {
             area.right().saturating_sub(1)
         } else {
-            area.right().saturating_sub(width).saturating_sub(1)
-        };
-        Rect::new(x, midpoint_y(area), 1, 1)
+            area.right()
+                .saturating_sub(width)
+                .saturating_sub(1)
+                .max(area.x)
+        }
     }
 }
 
@@ -145,6 +180,19 @@ fn midpoint_y(area: Rect) -> u16 {
     area.y.saturating_add(area.height / 2)
 }
 
+fn vertical_handle_rects(middle: Rect, area: Rect) -> [Rect; 3] {
+    let top = middle.y.saturating_sub(1).max(area.y);
+    let bottom = middle
+        .y
+        .saturating_add(1)
+        .min(area.bottom().saturating_sub(1));
+    [
+        Rect::new(middle.x, top, 1, 1),
+        middle,
+        Rect::new(middle.x, bottom, 1, 1),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::{PanelMode, PanelState};
@@ -157,7 +205,7 @@ mod tests {
         assert_eq!(panels.left_width(), 0);
 
         panels.left = PanelMode::Thin;
-        assert_eq!(panels.left_width(), 28);
+        assert_eq!(panels.left_width(), 24);
 
         panels.left = PanelMode::Wide;
         assert_eq!(panels.left_width(), 42);
@@ -224,7 +272,7 @@ mod tests {
         assert_eq!(panels.handle_right_rect(area), Rect::new(79, 12, 1, 1));
 
         panels.right = PanelMode::Thin;
-        assert_eq!(panels.handle_right_rect(area), Rect::new(47, 12, 1, 1));
+        assert_eq!(panels.handle_right_rect(area), Rect::new(51, 12, 1, 1));
     }
 
     #[test]
@@ -237,20 +285,36 @@ mod tests {
     }
 
     #[test]
-    fn narrow_terminal_forces_right_sidebar_closed() {
+    fn right_sidebar_closes_below_eighty_eight_columns_when_left_is_open() {
         let mut panels = PanelState::new();
         panels.right = PanelMode::Wide;
-        let clamped = panels.clamped_for_area(Rect::new(0, 0, 99, 24));
+        let clamped = panels.clamped_for_area(Rect::new(0, 0, 87, 24));
         assert_eq!(clamped.right, PanelMode::Closed);
     }
 
     #[test]
-    fn terminal_at_one_hundred_columns_keeps_right_sidebar_available() {
+    fn right_sidebar_stays_available_at_eighty_eight_columns_when_left_is_open() {
         let mut panels = PanelState::new();
         panels.right = PanelMode::Thin;
 
-        let clamped = panels.clamped_for_area(Rect::new(0, 0, 100, 24));
+        let clamped = panels.clamped_for_area(Rect::new(0, 0, 88, 24));
 
         assert_eq!(clamped.right, PanelMode::Thin);
+    }
+
+    #[test]
+    fn right_sidebar_uses_sixty_three_column_threshold_when_left_is_closed() {
+        let mut panels = PanelState::new();
+        panels.left = PanelMode::Closed;
+        panels.right = PanelMode::Thin;
+
+        assert_eq!(
+            panels.clamped_for_area(Rect::new(0, 0, 62, 16)).right,
+            PanelMode::Closed
+        );
+        assert_eq!(
+            panels.clamped_for_area(Rect::new(0, 0, 63, 16)).right,
+            PanelMode::Thin
+        );
     }
 }
