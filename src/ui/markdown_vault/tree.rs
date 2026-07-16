@@ -100,6 +100,26 @@ impl MarkdownVaultTreeModel {
         self.selected_node().map(|node| node.path.as_path())
     }
 
+    pub(crate) fn node_for_path(&self, path: &Path) -> Option<&VaultTreeNode> {
+        self.nodes.iter().find(|node| node.path == path)
+    }
+
+    pub(crate) fn entry_kind(&self, path: &Path) -> Option<VaultEntryKind> {
+        self.node_for_path(path).map(|node| node.entry_kind)
+    }
+
+    pub(crate) fn replace_sources(&mut self, sources: Vec<TreeSourceEntry>) {
+        let selected_path = self.selected_path().map(Path::to_path_buf);
+        let selected_index = self.selected;
+        self.sources = sources;
+        self.nodes = build_tree_nodes(&self.sources, &self.collapsed);
+        self.selected = selected_path
+            .as_deref()
+            .and_then(|path| self.nodes.iter().position(|node| node.path == path))
+            .unwrap_or_else(|| selected_index.min(self.nodes.len().saturating_sub(1)));
+        self.scroll = self.scroll.min(self.nodes.len().saturating_sub(1));
+    }
+
     pub(crate) fn select(&mut self, index: usize) {
         if !self.nodes.is_empty() {
             self.selected = index.min(self.nodes.len().saturating_sub(1));

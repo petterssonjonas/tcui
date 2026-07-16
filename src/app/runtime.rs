@@ -43,6 +43,9 @@ impl TuiApp {
 
             tokio::select! {
                 _ = tick.tick() => {
+                    for notice in self.ui.markdown_vault_workspaces.reconcile_tick() {
+                        self.ui.show_toast(notice);
+                    }
                     let active_app_tab_id = self.ui.app_tabs.active_id();
                     let _ = self
                         .ui

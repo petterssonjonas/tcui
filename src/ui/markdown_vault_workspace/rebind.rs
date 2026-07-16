@@ -47,7 +47,7 @@ impl MarkdownVaultWorkspaceRegistry {
             };
             return Ok(MarkdownVaultWorkspaceRebindRequest::ConfirmationRequired);
         }
-        let replacement = MarkdownVaultWorkspaceState::construct(catalog, profile_id)?;
+        let replacement = MarkdownVaultWorkspaceState::construct(catalog, profile_id, tab_id)?;
         tabs.rebind_markdown_vault(tab_id, state.profile_id(), profile_id)
             .map_err(|_| MarkdownVaultWorkspaceError::DescriptorMismatch { tab_id })?;
         self.states.insert(tab_id, replacement);
@@ -72,14 +72,14 @@ impl MarkdownVaultWorkspaceRegistry {
                 .ok_or(MarkdownVaultWorkspaceError::RebindNotPending { tab_id })?;
             (state.profile_id().clone(), pending)
         };
-        let replacement = match MarkdownVaultWorkspaceState::construct(catalog, &pending_profile_id)
-        {
-            Ok(replacement) => replacement,
-            Err(error) => {
-                self.cancel_rebind(tab_id);
-                return Err(error);
-            }
-        };
+        let replacement =
+            match MarkdownVaultWorkspaceState::construct(catalog, &pending_profile_id, tab_id) {
+                Ok(replacement) => replacement,
+                Err(error) => {
+                    self.cancel_rebind(tab_id);
+                    return Err(error);
+                }
+            };
         tabs.rebind_markdown_vault(tab_id, &current_profile_id, &pending_profile_id)
             .map_err(|_| MarkdownVaultWorkspaceError::DescriptorMismatch { tab_id })?;
         if let Some(editor) = self

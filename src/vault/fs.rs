@@ -121,6 +121,29 @@ impl VaultFs {
         })
     }
 
+    pub(crate) fn entry_kind(
+        &self,
+        path: &VaultRelativePath,
+    ) -> Result<Option<VaultEntryKind>, VaultFsError> {
+        let path = path.as_path();
+        let (directory, name) = self.open_parent(path)?;
+        let metadata = match directory.symlink_metadata(&name) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(io_error("read metadata for", path, source)),
+        };
+        let kind = if metadata.is_dir() {
+            VaultEntryKind::Directory
+        } else if metadata.is_file() {
+            VaultEntryKind::File
+        } else if metadata.is_symlink() {
+            VaultEntryKind::UnsupportedSymlink
+        } else {
+            VaultEntryKind::Unsupported
+        };
+        Ok(Some(kind))
+    }
+
     pub(crate) fn validate_editor_target(
         &self,
         canonical_root: &Path,

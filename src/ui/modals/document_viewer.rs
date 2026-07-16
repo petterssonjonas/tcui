@@ -121,6 +121,11 @@ impl DocumentViewerState {
             .min(line_count.saturating_sub(viewport_height.max(1)));
     }
 
+    #[cfg(test)]
+    pub(crate) fn content_for_test(&self) -> Option<&str> {
+        self.source.content.as_deref()
+    }
+
     pub fn render(
         &mut self,
         f: &mut Frame,

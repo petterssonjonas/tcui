@@ -51,6 +51,7 @@ impl MarkdownVaultWorkspaceState {
             }
         };
         self.viewer = DocumentViewerState::new(source);
+        self.viewer_path = Some(node.path);
         self.focus = MarkdownVaultFocus::Viewer;
         self.content_pane = MarkdownVaultContentPane::Viewer;
         MarkdownVaultInputAction::None
@@ -81,6 +82,8 @@ impl MarkdownVaultWorkspaceState {
         match TerminalEditorState::new(target, &self.root, area) {
             Ok(editor) => {
                 self.editor = Some(editor);
+                self.editor_path = Some(path);
+                self.editor_changed_on_disk = false;
                 self.focus = MarkdownVaultFocus::Editor;
                 self.content_pane = MarkdownVaultContentPane::Editor;
                 MarkdownVaultInputAction::None
@@ -95,6 +98,8 @@ impl MarkdownVaultWorkspaceState {
         };
         if matches!(editor.request_close(), CloseRequest::Closed) {
             self.editor = None;
+            self.editor_path = None;
+            self.editor_changed_on_disk = false;
             self.focus = MarkdownVaultFocus::Viewer;
             self.content_pane = MarkdownVaultContentPane::Viewer;
         }
@@ -105,6 +110,8 @@ impl MarkdownVaultWorkspaceState {
             editor.confirm_close();
         }
         self.editor = None;
+        self.editor_path = None;
+        self.editor_changed_on_disk = false;
         self.focus = MarkdownVaultFocus::Viewer;
         self.content_pane = MarkdownVaultContentPane::Viewer;
     }

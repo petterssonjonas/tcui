@@ -10,6 +10,7 @@ mod move_recovery_fs;
 pub(crate) mod move_rollback;
 mod move_rollback_support;
 mod path;
+pub(crate) mod watcher;
 mod write;
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::config::vault_profiles::{VaultCatalog, VaultProfileId};
+use crate::ui::app_tabs::AppTabId;
 use crate::ui::artifact_sidebar::ArtifactEntry;
 use crate::ui::markdown_vault::footer::MarkdownVaultProfileOption;
 use crate::ui::markdown_vault::hit_areas::MarkdownVaultHitAreas;
@@ -9,12 +10,11 @@ use crate::ui::modals::artifact_viewer::document_viewer::{
     DocumentKind, DocumentSource, DocumentViewerState,
 };
 use crate::ui::modals::terminal_editor::TerminalEditorState;
+use crate::vault::watcher::VaultWatcher;
 use crate::vault::{VaultEntryKind, VaultFs, VaultWalkLimits};
 
+use super::reconcile::WorkspaceReconciliation;
 use super::registry::MarkdownVaultWorkspaceError;
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct MarkdownVaultWatcherPlaceholder;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MarkdownVaultProfileControls {
@@ -61,16 +61,20 @@ impl Drop for WorkspaceDropProbe {
 pub(crate) struct MarkdownVaultWorkspaceState {
     pub(super) profile_id: VaultProfileId,
     pub(crate) root: PathBuf,
+    pub(super) watcher: VaultWatcher,
     pub(super) vault_fs: VaultFs,
+    pub(super) reconciliation: WorkspaceReconciliation,
     pub(crate) tree: MarkdownVaultTreeModel,
     pub(crate) viewer: DocumentViewerState,
+    pub(super) viewer_path: Option<PathBuf>,
     pub(crate) editor: Option<TerminalEditorState>,
+    pub(super) editor_path: Option<PathBuf>,
+    pub(super) editor_changed_on_disk: bool,
     pub(crate) focus: MarkdownVaultFocus,
     pub(crate) content_pane: MarkdownVaultContentPane,
     pub(crate) profile_controls: MarkdownVaultProfileControls,
     pub(crate) hit_areas: MarkdownVaultHitAreas,
     pub(crate) status: MarkdownVaultWorkspaceStatus,
-    pub(crate) watcher: MarkdownVaultWatcherPlaceholder,
     pub(crate) metadata: Option<String>,
     pub(super) pending_rebind_profile_id: Option<VaultProfileId>,
     #[cfg(test)]
@@ -81,6 +85,7 @@ impl MarkdownVaultWorkspaceState {
     pub(super) fn construct(
         catalog: &VaultCatalog,
         profile_id: &VaultProfileId,
+        tab_id: AppTabId,
     ) -> Result<Self, MarkdownVaultWorkspaceError> {
         catalog.validate()?;
         let profile =
@@ -95,6 +100,7 @@ impl MarkdownVaultWorkspaceState {
             });
         }
         let vault_fs = VaultFs::open_profile(&profile.root)?;
+        let watcher = VaultWatcher::new(&profile.root, tab_id)?;
         let listing = vault_fs.list(None, VaultWalkLimits::default())?;
         let tree_entries = listing
             .entries
@@ -123,14 +129,19 @@ impl MarkdownVaultWorkspaceState {
         Ok(Self {
             profile_id: profile_id.clone(),
             root: profile.root.clone(),
+            watcher,
             vault_fs,
+            reconciliation: WorkspaceReconciliation::default(),
             tree: MarkdownVaultTreeModel::new(tree_entries),
             viewer: DocumentViewerState::new(DocumentSource::new(
                 DocumentKind::Text,
                 Some("Select a file to preview".to_string()),
                 None,
             )),
+            viewer_path: None,
             editor: None,
+            editor_path: None,
+            editor_changed_on_disk: false,
             focus: MarkdownVaultFocus::Tree,
             content_pane: MarkdownVaultContentPane::Viewer,
             profile_controls: MarkdownVaultProfileControls {
@@ -143,7 +154,6 @@ impl MarkdownVaultWorkspaceState {
             },
             hit_areas: MarkdownVaultHitAreas::default(),
             status: MarkdownVaultWorkspaceStatus::Ready,
-            watcher: MarkdownVaultWatcherPlaceholder,
             metadata: None,
             pending_rebind_profile_id: None,
             #[cfg(test)]
@@ -167,6 +177,59 @@ impl MarkdownVaultWorkspaceState {
     #[cfg(test)]
     pub(crate) fn set_editor_for_test(&mut self, editor: TerminalEditorState) {
         self.editor = Some(editor);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_editor_path_for_test(&mut self, path: PathBuf) {
+        self.editor_path = Some(path);
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn editor_changed_on_disk_for_test(&self) -> bool {
+        self.editor_changed_on_disk
+    }
+
+    #[cfg(test)]
+    pub(crate) fn viewer_path_for_test(&self) -> Option<&std::path::Path> {
+        self.viewer_path.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn viewer_content_for_test(&self) -> Option<&str> {
+        self.viewer.content_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_watcher_event_for_test(
+        &mut self,
+        tab_id: AppTabId,
+        change: crate::vault::watcher::VaultWatchChange,
+        path: &str,
+    ) {
+        self.watcher
+            .enqueue_for_test(crate::vault::watcher::VaultWatchEvent::for_test(
+                tab_id,
+                change,
+                PathBuf::from(path),
+            ));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_watcher_drop_counter_for_test(
+        &mut self,
+        counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        self.watcher.set_drop_probe_for_test(counter);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_watcher_overflow_for_test(&self) {
+        self.watcher.force_overflow_for_test();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn watcher_overflowed_for_test(&self) -> bool {
+        self.watcher.overflowed()
     }
 
     #[cfg(test)]

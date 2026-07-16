@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::config::vault_profiles::{VaultCatalog, VaultProfileError, VaultProfileId};
 use crate::tui::vault_profile_ui::{activate_profile, LauncherActivation};
 use crate::ui::app_tabs::{AppTabId, AppTabs, AppView, CloseTabResult};
+use crate::vault::watcher::VaultWatcherError;
 use crate::vault::VaultFsError;
 
 use super::state::MarkdownVaultWorkspaceState;
@@ -14,6 +15,8 @@ pub(crate) enum MarkdownVaultWorkspaceError {
     Profile(#[from] VaultProfileError),
     #[error(transparent)]
     FileSystem(#[from] VaultFsError),
+    #[error(transparent)]
+    Watcher(#[from] VaultWatcherError),
     #[error("unknown vault profile: {profile_id}")]
     UnknownProfile { profile_id: VaultProfileId },
     #[error("vault profile is unavailable: {profile_id}")]
@@ -109,7 +112,7 @@ impl MarkdownVaultWorkspaceRegistry {
                 tab_id: launcher_id,
             });
         }
-        let state = MarkdownVaultWorkspaceState::construct(catalog, profile_id)?;
+        let state = MarkdownVaultWorkspaceState::construct(catalog, profile_id, launcher_id)?;
         let activation =
             activate_profile(tabs, launcher_id, profile_id.clone()).map_err(|error| {
                 MarkdownVaultWorkspaceError::Activation {
@@ -158,6 +161,8 @@ impl MarkdownVaultWorkspaceRegistry {
         };
         if editor.poll_output() {
             state.editor = None;
+            state.editor_path = None;
+            state.editor_changed_on_disk = false;
             if state.focus == MarkdownVaultFocus::Editor {
                 state.focus = MarkdownVaultFocus::Viewer;
                 state.content_pane = MarkdownVaultContentPane::Viewer;

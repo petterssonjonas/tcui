@@ -41,6 +41,10 @@ mod markdown_vault_workspace_ui_edges;
 #[path = "markdown_vault_workspace_ui_tree_tests.rs"]
 mod markdown_vault_workspace_ui_tree;
 
+#[cfg(test)]
+#[path = "markdown_vault_workspace_watcher_tests.rs"]
+mod markdown_vault_workspace_watcher;
+
 use crate::config::app_config::{HeadingDownscale, MarkdownMode, TextAlignment};
 use crate::tui::components::centered_rect;
 use crate::ui::components::terminal_capabilities::TerminalCapabilities;
