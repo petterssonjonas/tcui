@@ -57,10 +57,10 @@ impl ArtifactViewerState {
         let popup_area = popup_area(area);
         let block = Block::default().style(Style::default().bg(theme.code_bg));
         let inner = Rect::new(
-            popup_area.x,
-            popup_area.y + 1,
-            popup_area.width,
-            popup_area.height.saturating_sub(1),
+            popup_area.x + 1,
+            popup_area.y + 2,
+            popup_area.width.saturating_sub(2),
+            popup_area.height.saturating_sub(3),
         );
         f.render_widget(Clear, popup_area);
         f.render_widget(block, popup_area);
@@ -230,6 +230,86 @@ mod tests {
     use crate::config::app_config::{HeadingDownscale, MarkdownMode};
     use crate::ui::components::terminal_capabilities::{TerminalCapabilities, TerminalKind};
     use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn markdown_vault_baseline_viewer_content_stays_inside_inner_gutter() {
+        let artifact = crate::ui::artifact_sidebar::ArtifactEntry::temp_markdown(
+            1,
+            "short.md".to_string(),
+            "gutterproof".to_string(),
+        );
+        let mut viewer = ArtifactViewerState::new(artifact);
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                viewer.render(
+                    frame,
+                    frame.area(),
+                    ArtifactViewerProps {
+                        markdown_mode: MarkdownMode::Full,
+                        kitty_enhanced_text: false,
+                        kitty_heading_downscale: HeadingDownscale::None,
+                        image_protocol: "off",
+                        terminal_capabilities: TerminalCapabilities {
+                            terminal: TerminalKind::Unknown,
+                            multiplexer: None,
+                            kitty_graphics: false,
+                            kitty_text_sizing: false,
+                            tmux_passthrough: false,
+                        },
+                    },
+                )
+            })
+            .expect("render viewer");
+
+        let buffer = terminal.backend().buffer();
+        let popup_area = super::popup_area(buffer.area);
+        let gutter_row = popup_area.y + 1;
+        let inner_row = popup_area.y + 2;
+        let inner_col = popup_area.x + 1;
+        let body_x = (0..buffer.area.width)
+            .find(|&x| buffer[(x, inner_row)].symbol().contains('g'))
+            .expect("viewer body");
+
+        assert!(body_x >= inner_col);
+        assert!(!buffer[(body_x, gutter_row)].symbol().contains('g'));
+        assert!(buffer[(body_x, inner_row)].symbol().contains('g'));
+    }
+
+    #[test]
+    fn markdown_vault_baseline_viewer_handles_tiny_rectangles() {
+        let artifact = crate::ui::artifact_sidebar::ArtifactEntry::temp_markdown(
+            1,
+            "short.md".to_string(),
+            "x".to_string(),
+        );
+        let mut viewer = ArtifactViewerState::new(artifact);
+
+        let mut terminal = Terminal::new(TestBackend::new(12, 6)).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                viewer.render(
+                    frame,
+                    frame.area(),
+                    ArtifactViewerProps {
+                        markdown_mode: MarkdownMode::Full,
+                        kitty_enhanced_text: false,
+                        kitty_heading_downscale: HeadingDownscale::None,
+                        image_protocol: "off",
+                        terminal_capabilities: TerminalCapabilities {
+                            terminal: TerminalKind::Unknown,
+                            multiplexer: None,
+                            kitty_graphics: false,
+                            kitty_text_sizing: false,
+                            tmux_passthrough: false,
+                        },
+                    },
+                )
+            })
+            .expect("render viewer");
+    }
 
     #[test]
     fn preview_scroll_is_clamped_to_rendered_content() {

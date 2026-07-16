@@ -109,10 +109,10 @@ impl EditorPopupState {
 
         let block = Block::default().style(Style::default().bg(theme.panel));
         let inner = Rect::new(
-            popup_area.x,
-            popup_area.y + 1,
-            popup_area.width,
-            popup_area.height.saturating_sub(1),
+            popup_area.x + 1,
+            popup_area.y + 2,
+            popup_area.width.saturating_sub(2),
+            popup_area.height.saturating_sub(3),
         );
         f.render_widget(block, popup_area);
         let rows = inner.height.max(1);
@@ -375,5 +375,101 @@ fn f_key_bytes(n: u8) -> Vec<u8> {
         11 => b"\x1b[23~".to_vec(),
         12 => b"\x1b[24~".to_vec(),
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EditorPopupState;
+    use ratatui::{backend::TestBackend, Terminal};
+    use std::io::Write;
+    use std::time::Duration;
+    use tokio::runtime::Builder;
+
+    #[test]
+    fn markdown_vault_baseline_editor_content_stays_inside_inner_gutter() {
+        let path = std::env::temp_dir().join("markdown-vault-baseline-editor.txt");
+        std::fs::write(&path, "editor body\n").expect("write temp file");
+
+        let script = std::env::temp_dir().join("markdown-vault-baseline-editor.sh");
+        let mut script_file = std::fs::File::create(&script).expect("create script");
+        writeln!(script_file, "#!/bin/sh").expect("write script");
+        writeln!(script_file, "printf 'gutterproof\\n'").expect("write script");
+        drop(script_file);
+        let _ = std::process::Command::new("chmod")
+            .arg("+x")
+            .arg(&script)
+            .status();
+        std::env::set_var("EDITOR", script.as_os_str());
+
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let mut popup = EditorPopupState::new_chat_draft(&path).expect("popup state");
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let _ = popup.poll_output();
+
+            terminal
+                .draw(|frame| popup.render(frame, frame.area()))
+                .expect("render popup");
+
+            let buffer = terminal.backend().buffer();
+            let popup_area = super::popup_area(buffer.area);
+            let gutter_row = popup_area.y + 1;
+            let inner_row = popup_area.y + 2;
+            let inner_col = popup_area.x + 1;
+            let body_x = (0..buffer.area.width)
+                .find(|&x| buffer[(x, inner_row)].symbol().contains('g'))
+                .expect("editor body");
+
+            assert!(body_x >= inner_col);
+            assert!(!buffer[(body_x, gutter_row)].symbol().contains('g'));
+            assert!(buffer[(body_x, inner_row)].symbol().contains('g'));
+        });
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&script);
+        std::env::remove_var("EDITOR");
+    }
+
+    #[test]
+    fn markdown_vault_baseline_editor_handles_tiny_rectangles() {
+        let path = std::env::temp_dir().join("markdown-vault-baseline-editor-small.txt");
+        std::fs::write(&path, "x\n").expect("write temp file");
+
+        let script = std::env::temp_dir().join("markdown-vault-baseline-editor-small.sh");
+        let mut script_file = std::fs::File::create(&script).expect("create script");
+        writeln!(script_file, "#!/bin/sh").expect("write script");
+        writeln!(script_file, "printf 'gutterproof\\n'").expect("write script");
+        drop(script_file);
+        let _ = std::process::Command::new("chmod")
+            .arg("+x")
+            .arg(&script)
+            .status();
+        std::env::set_var("EDITOR", script.as_os_str());
+
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let mut popup = EditorPopupState::new_chat_draft(&path).expect("popup state");
+            let mut terminal = Terminal::new(TestBackend::new(12, 6)).expect("test terminal");
+
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let _ = popup.poll_output();
+
+            terminal
+                .draw(|frame| popup.render(frame, frame.area()))
+                .expect("render popup");
+        });
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&script);
+        std::env::remove_var("EDITOR");
     }
 }

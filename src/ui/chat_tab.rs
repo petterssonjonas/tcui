@@ -1077,9 +1077,9 @@ fn input_box_area(area: Rect) -> Rect {
 
 fn chat_messages_area(area: Rect) -> Rect {
     Rect::new(
-        area.x.saturating_add(1),
+        area.x.saturating_add(4),
         area.y,
-        area.width.saturating_sub(2),
+        area.width.saturating_sub(8),
         area.height.saturating_sub(1),
     )
 }
@@ -2151,6 +2151,93 @@ mod tests {
         let input_area = chat.state.input_area.expect("input area");
         assert!(input_area.height > 3);
         assert!(chat.state.input_scroll > 0);
+    }
+
+    #[test]
+    fn markdown_vault_baseline_chat_input_starts_four_columns_in() {
+        let mut ui = crate::ui::UI::new();
+        ui.tabs[0].input_content = "hello".to_string();
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 16)).expect("test terminal");
+        let mut chat = ChatTab::new(
+            &mut ui.tabs[0],
+            ChatTabProps {
+                user_alignment: TextAlignment::Left,
+                ai_alignment: TextAlignment::Left,
+                markdown_mode: MarkdownMode::Off,
+                collapse_thinking: true,
+                show_chat_scrollbar: true,
+                kitty_enhanced_text: false,
+                kitty_heading_downscale: HeadingDownscale::None,
+                image_protocol: "off",
+                terminal_capabilities: TerminalCapabilities {
+                    terminal: TerminalKind::Unknown,
+                    multiplexer: None,
+                    kitty_graphics: false,
+                    kitty_text_sizing: false,
+                    tmux_passthrough: false,
+                },
+                frame_tick: 0,
+                providers: &[],
+                models: &[],
+                reasoning_options: &[],
+            },
+        );
+
+        terminal
+            .draw(|frame| chat.render(frame, Rect::new(0, 0, 40, 16)))
+            .expect("render chat");
+
+        let input_area = chat.state.input_area.expect("input area");
+        let screen = terminal.backend().to_string();
+        let (painted_y, painted_x) = screen
+            .lines()
+            .enumerate()
+            .find_map(|(y, line)| line.find("hello").map(|x| (y, x)))
+            .expect("input text");
+
+        assert!(
+            painted_x >= usize::from(input_area.x) + 2,
+            "input_area={input_area:?} painted=({painted_y},{painted_x})"
+        );
+        assert!(screen.contains("hello"));
+    }
+
+    #[test]
+    fn markdown_vault_baseline_chat_input_handles_tiny_rectangles() {
+        let mut ui = crate::ui::UI::new();
+
+        let mut terminal = Terminal::new(TestBackend::new(8, 4)).expect("test terminal");
+        let mut chat = ChatTab::new(
+            &mut ui.tabs[0],
+            ChatTabProps {
+                user_alignment: TextAlignment::Left,
+                ai_alignment: TextAlignment::Left,
+                markdown_mode: MarkdownMode::Off,
+                collapse_thinking: true,
+                show_chat_scrollbar: true,
+                kitty_enhanced_text: false,
+                kitty_heading_downscale: HeadingDownscale::None,
+                image_protocol: "off",
+                terminal_capabilities: TerminalCapabilities {
+                    terminal: TerminalKind::Unknown,
+                    multiplexer: None,
+                    kitty_graphics: false,
+                    kitty_text_sizing: false,
+                    tmux_passthrough: false,
+                },
+                frame_tick: 0,
+                providers: &[],
+                models: &[],
+                reasoning_options: &[],
+            },
+        );
+
+        terminal
+            .draw(|frame| chat.render(frame, Rect::new(0, 0, 8, 4)))
+            .expect("render chat");
+
+        assert!(chat.state.input_area.is_some());
     }
 
     #[test]
