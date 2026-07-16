@@ -2,6 +2,7 @@ mod backup;
 mod editor;
 mod fs;
 mod limits;
+pub(crate) mod move_plan;
 mod path;
 mod write;
 
