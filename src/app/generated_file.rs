@@ -11,6 +11,7 @@ pub struct GeneratedFile {
     pub name: String,
     pub content: String,
     pub saved_path: Option<PathBuf>,
+    pub chat_file_id: Option<crate::storage::chat_files::ChatFileId>,
 }
 
 impl GeneratedFile {
@@ -39,6 +40,7 @@ impl GeneratedFile {
             name,
             content,
             saved_path: None,
+            chat_file_id: None,
         })
     }
 
@@ -111,8 +113,8 @@ fn available_path(base_dir: &Path, name: &str) -> std::io::Result<PathBuf> {
     let extension = path.extension().and_then(|value| value.to_str());
     for suffix in 2..=u32::MAX {
         let candidate = match extension {
-            Some(extension) => base_dir.join(format!("{stem}-{suffix}.{extension}")),
-            None => base_dir.join(format!("{stem}-{suffix}")),
+            Some(extension) => base_dir.join(format!("{stem} ({suffix}).{extension}")),
+            None => base_dir.join(format!("{stem} ({suffix})")),
         };
         if !candidate.exists() {
             return Ok(candidate);

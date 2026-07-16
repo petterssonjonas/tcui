@@ -12,6 +12,10 @@ const FLAT_SECTION_MAX_ROWS: usize = 3;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ArtifactHandle {
     Temporary(u64),
+    ChatFile {
+        conversation_id: i64,
+        id: crate::storage::chat_files::ChatFileId,
+    },
     Media(String),
     Saved(PathBuf),
     Memory(PathBuf),
@@ -50,6 +54,25 @@ impl ArtifactEntry {
     pub fn temp_markdown(id: u64, name: String, content: String) -> Self {
         Self {
             handle: ArtifactHandle::Temporary(id),
+            name,
+            kind: ArtifactKind::Markdown,
+            origin: ArtifactOrigin::Temporary,
+            content: Some(content),
+            path: None,
+        }
+    }
+
+    pub(crate) fn chat_file(
+        conversation_id: i64,
+        id: crate::storage::chat_files::ChatFileId,
+        name: String,
+        content: String,
+    ) -> Self {
+        Self {
+            handle: ArtifactHandle::ChatFile {
+                conversation_id,
+                id,
+            },
             name,
             kind: ArtifactKind::Markdown,
             origin: ArtifactOrigin::Temporary,
@@ -129,6 +152,9 @@ impl ArtifactEntry {
     }
 
     pub fn action_label(&self, has_vault: bool) -> Option<&'static str> {
+        if matches!(self.handle, ArtifactHandle::ChatFile { .. }) {
+            return Some("Save");
+        }
         match self.origin {
             ArtifactOrigin::Temporary if self.is_markdown() && has_vault => Some("Vault"),
             ArtifactOrigin::Temporary => Some("Save"),

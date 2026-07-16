@@ -78,6 +78,7 @@ impl TuiApp {
             tab.generated_title = title.filter(|value| value != "New Chat");
             tab.messages = messages;
         }
+        self.hydrate_chat_files(tab_id, conv_id)?;
         self.sync_message_media(tab_id);
         Ok(())
     }
@@ -120,6 +121,12 @@ impl TuiApp {
         conversation_id: i64,
     ) -> color_eyre::Result<()> {
         self.storage.delete_conversation(conversation_id)?;
+        if let Err(error) = self.chat_files.purge_conversation(conversation_id) {
+            self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::Failed;
+            self.ui.connection_message = Some(format!(
+                "Conversation deleted; chat-file cleanup will retry at startup: {error}"
+            ));
+        }
         let tab_id = self.ui.active_tab;
         let deleting_active = self
             .ui

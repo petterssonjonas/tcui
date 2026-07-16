@@ -111,6 +111,9 @@ pub(crate) enum ChatFileError {
     #[cfg(test)]
     #[error("injected atomic write failure")]
     InjectedAtomicWriteFailure,
+    #[cfg(test)]
+    #[error("injected conversation purge failure")]
+    InjectedPurgeFailure,
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]

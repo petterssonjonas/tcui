@@ -213,17 +213,18 @@ impl TuiApp {
             }
             Action::NewChat => self.new_conversation(self.ui.active_tab),
             Action::CloseChat => {
-                let tab_id = self.ui.active_tab;
                 let active_conversation = self
                     .ui
                     .tabs
-                    .get(tab_id)
+                    .get(self.ui.active_tab)
                     .map(|tab| tab.active_conversation)
                     .unwrap_or(0);
                 if active_conversation != 0 {
-                    self.storage.delete_conversation(active_conversation)?;
+                    self.delete_conversation_by_id(active_conversation)?;
+                } else {
+                    self.ensure_tab_has_active_conversation(self.ui.active_tab)?;
                 }
-                self.ensure_tab_has_active_conversation(tab_id)
+                Ok(())
             }
             Action::ToggleConversationPinned(conversation_id) => {
                 self.toggle_conversation_pinned(conversation_id)
@@ -324,7 +325,11 @@ impl TuiApp {
                 Ok(())
             }
             Action::AddGeneratedFile(tab_id, file) => {
-                self.ui.add_generated_file(tab_id, file);
+                if let Err(error) = self.persist_generated_file(tab_id, file) {
+                    self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::Failed;
+                    self.ui.connection_message =
+                        Some(format!("Chat file persistence failed: {error}"));
+                }
                 Ok(())
             }
             Action::LoadConversation(conv_id) => self.load_conversation(conv_id),
@@ -803,38 +808,12 @@ impl TuiApp {
             match result {
                 Ok(response) if !visible_answer.is_empty() || !response.thinking.is_empty() => {
                     let file_id = rand::random();
-                    let mut generated_file = crate::app::GeneratedFile::from_skill_response(
+                    let generated_file = crate::app::GeneratedFile::from_skill_response(
                         file_id,
                         conversation_id,
                         &user_request,
                         &visible_answer,
                     );
-                    if let Some(file) = generated_file.take() {
-                        let configured = config_snapshot
-                            .artifact_save_dir
-                            .as_deref()
-                            .map(std::path::Path::new)
-                            .map(|path| {
-                                crate::app::generated_file::expand_user_path(
-                                    path,
-                                    dirs::home_dir().as_deref(),
-                                )
-                            })
-                            .unwrap_or_else(|| {
-                                dirs::data_dir()
-                                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                                    .join("tcui/artifacts")
-                            });
-                        match file.clone().save_to(&configured) {
-                            Ok(saved) => generated_file = Some(saved),
-                            Err(error) => {
-                                generated_file = Some(file);
-                                let _ = action_tx.send(Action::UpdateStatus(format!(
-                                    "Artifact save failed: {error}"
-                                )));
-                            }
-                        }
-                    }
                     #[cfg(feature = "memory")]
                     if let Some(fact) = remembered {
                         memory_activities.push(crate::memory::MemoryActivity::Saving);

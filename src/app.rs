@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 pub mod action;
 mod artifacts;
+mod chat_files;
 mod connection;
 mod conversations;
 mod export;
@@ -26,6 +27,10 @@ mod update;
 #[path = "app/request_only_document_tests.rs"]
 mod request_only_document_tests;
 
+#[cfg(test)]
+#[path = "app/chat_file_lifecycle.rs"]
+mod chat_file_lifecycle;
+
 pub use action::Action;
 pub use generated_file::GeneratedFile;
 pub use message::Message;
@@ -38,6 +43,7 @@ use crate::{config::AppConfig, llm::LlmClient, obsidian::Vault, storage::Storage
 
 pub struct TuiApp {
     pub storage: Storage,
+    pub(crate) chat_files: crate::storage::chat_files::ChatFileStore,
     pub config: Arc<tokio::sync::RwLock<AppConfig>>,
     pub ui: crate::ui::UI,
     pub vault: Option<Arc<Vault>>,
@@ -61,6 +67,8 @@ impl TuiApp {
         vault: Option<Arc<Vault>>,
     ) -> Self {
         let mut ui = crate::ui::UI::new();
+        let chat_files = crate::storage::chat_files::ChatFileStore::discover();
+        let orphan_cleanup_error = chat_files.cleanup_orphans().err();
         let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
         let system_prompt = Self::load_system_prompt();
         let config_snapshot = config.try_read().map(|cfg| cfg.clone()).unwrap_or_default();
@@ -132,6 +140,7 @@ impl TuiApp {
 
         let app = Self {
             storage,
+            chat_files,
             config,
             ui,
             vault,
@@ -148,6 +157,10 @@ impl TuiApp {
         app.refresh_visible_selectors();
         app.initialize_chat_state();
         app.refresh_artifact_sidebar_catalogs();
+        if orphan_cleanup_error.is_some() {
+            app.ui
+                .show_toast("Some deleted-chat files still need cleanup.".to_string());
+        }
         app.sync_message_media(app.ui.active_tab);
         app.queue_connection_check_for_active_tab();
         app

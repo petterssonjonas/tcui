@@ -45,7 +45,7 @@ impl TuiApp {
         self.config
             .try_read()
             .ok()
-            .and_then(|cfg| cfg.artifact_save_dir.clone())
+            .and_then(|cfg| cfg.saved_files_dir.clone())
             .map(|path| {
                 crate::app::generated_file::expand_user_path(
                     std::path::Path::new(&path),

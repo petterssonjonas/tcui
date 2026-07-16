@@ -5,6 +5,11 @@ mod model;
 
 use std::fs;
 use std::path::Path;
+#[cfg(test)]
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use atomic::AtomicWriter;
 use lock::ConversationLock;
@@ -23,6 +28,8 @@ pub(crate) struct ChatFileStore {
     paths: TcuiCachePaths,
     limits: StoreLimits,
     writer: AtomicWriter,
+    #[cfg(test)]
+    purge_failure: Arc<AtomicBool>,
 }
 
 impl ChatFileStore {
@@ -35,6 +42,8 @@ impl ChatFileStore {
             paths,
             limits: StoreLimits::default(),
             writer: AtomicWriter::default(),
+            #[cfg(test)]
+            purge_failure: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -44,6 +53,7 @@ impl ChatFileStore {
             paths,
             limits,
             writer: AtomicWriter::default(),
+            purge_failure: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -166,6 +176,39 @@ impl ChatFileStore {
 
     pub(crate) fn purge_conversation(&self, conversation_id: i64) -> Result<(), ChatFileError> {
         model::validate_conversation_id(conversation_id)?;
+        let result = self.purge_conversation_inner(conversation_id);
+        match result {
+            Ok(()) => {
+                self.remove_orphan_marker(conversation_id)?;
+                Ok(())
+            }
+            Err(error) => {
+                self.write_orphan_marker(conversation_id)?;
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn cleanup_orphans(&self) -> Result<usize, ChatFileError> {
+        if !self.paths.chat_files_dir.exists() {
+            return Ok(0);
+        }
+        let mut conversation_ids = fs::read_dir(&self.paths.chat_files_dir)?
+            .filter_map(Result::ok)
+            .filter_map(|entry| orphan_conversation_id(&entry.file_name().to_string_lossy()))
+            .collect::<Vec<_>>();
+        conversation_ids.sort_unstable();
+        conversation_ids.dedup();
+
+        let mut cleaned = 0;
+        for conversation_id in conversation_ids {
+            self.purge_conversation(conversation_id)?;
+            cleaned += 1;
+        }
+        Ok(cleaned)
+    }
+
+    fn purge_conversation_inner(&self, conversation_id: i64) -> Result<(), ChatFileError> {
         let directory = self.paths.conversation_dir(conversation_id);
         let conversation_lock = ConversationLock::acquire(&self.paths, conversation_id)?;
         self.manifest(&directory, conversation_id)
@@ -177,9 +220,44 @@ impl ChatFileStore {
         fs::rename(&directory, &purged)?;
         atomic::sync_directory(&self.paths.chat_files_dir)?;
         drop(conversation_lock);
-        fs::remove_dir_all(purged)?;
+
+        #[cfg(test)]
+        if self.purge_failure.swap(false, Ordering::SeqCst) {
+            return Err(ChatFileError::InjectedPurgeFailure);
+        }
+
+        let prefix = format!(".purge-{conversation_id}-");
+        for entry in fs::read_dir(&self.paths.chat_files_dir)? {
+            let entry = entry?;
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                fs::remove_dir_all(entry.path())?;
+            }
+        }
         atomic::sync_directory(&self.paths.chat_files_dir)?;
         Ok(())
+    }
+
+    fn write_orphan_marker(&self, conversation_id: i64) -> Result<(), ChatFileError> {
+        self.paths.ensure_layout()?;
+        let marker = self.orphan_marker(conversation_id);
+        fs::write(&marker, [])?;
+        crate::storage::paths::set_unix_mode(&marker, 0o600)?;
+        atomic::sync_directory(&self.paths.chat_files_dir)
+    }
+
+    fn remove_orphan_marker(&self, conversation_id: i64) -> Result<(), ChatFileError> {
+        let marker = self.orphan_marker(conversation_id);
+        match fs::remove_file(marker) {
+            Ok(()) => atomic::sync_directory(&self.paths.chat_files_dir),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn orphan_marker(&self, conversation_id: i64) -> std::path::PathBuf {
+        self.paths
+            .chat_files_dir
+            .join(format!(".orphan-{conversation_id}"))
     }
 
     pub(crate) fn rebuild_manifest(
@@ -229,6 +307,17 @@ impl ChatFileStore {
     fn fail_next_atomic_write(&self, target: AtomicWriteTarget) {
         self.writer.fail_next(target);
     }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_purge(&self) {
+        self.purge_failure.store(true, Ordering::SeqCst);
+    }
+}
+
+fn orphan_conversation_id(name: &str) -> Option<i64> {
+    name.strip_prefix(".orphan-")
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0)
 }
 
 #[cfg(test)]

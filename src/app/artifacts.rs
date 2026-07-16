@@ -113,24 +113,19 @@ impl TuiApp {
         let Some(artifact) = self.find_artifact(&handle) else {
             return;
         };
+        if let crate::ui::artifact_sidebar::ArtifactHandle::ChatFile {
+            conversation_id,
+            id,
+        } = &handle
+        {
+            self.save_chat_file_copy(&artifact, *conversation_id, *id);
+            return;
+        }
         if matches!(
             artifact.origin,
             crate::ui::artifact_sidebar::ArtifactOrigin::Saved
         ) {
-            let base_dir = self
-                .config
-                .try_read()
-                .ok()
-                .and_then(|cfg| cfg.artifact_save_dir.clone())
-                .map(|path| {
-                    crate::app::generated_file::expand_user_path(
-                        std::path::Path::new(&path),
-                        dirs::home_dir().as_deref(),
-                    )
-                })
-                .or_else(dirs::download_dir)
-                .or_else(|| std::env::current_dir().ok())
-                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let base_dir = self.export_base_dir();
             self.ui.save_file_dialog = Some(crate::ui::modals::save_file::SaveFileDialog::new(
                 &artifact, base_dir, "Export",
             ));
@@ -154,20 +149,7 @@ impl TuiApp {
             return;
         }
 
-        let base_dir = self
-            .config
-            .try_read()
-            .ok()
-            .and_then(|cfg| cfg.artifact_save_dir.clone())
-            .map(|path| {
-                crate::app::generated_file::expand_user_path(
-                    std::path::Path::new(&path),
-                    dirs::home_dir().as_deref(),
-                )
-            })
-            .or_else(dirs::download_dir)
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let base_dir = self.export_base_dir();
         self.ui.save_file_dialog = Some(crate::ui::modals::save_file::SaveFileDialog::new(
             &artifact, base_dir, "Save",
         ));
@@ -237,6 +219,10 @@ impl TuiApp {
 
     pub(crate) fn delete_artifact(&mut self, handle: crate::ui::artifact_sidebar::ArtifactHandle) {
         match &handle {
+            crate::ui::artifact_sidebar::ArtifactHandle::ChatFile {
+                conversation_id,
+                id,
+            } => self.delete_chat_file(&handle, *conversation_id, *id),
             crate::ui::artifact_sidebar::ArtifactHandle::Saved(path) => {
                 let _ = std::fs::remove_file(path);
                 self.refresh_saved_artifacts();
