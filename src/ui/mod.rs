@@ -7,9 +7,11 @@ use ratatui::{
     Frame,
 };
 
+pub mod app_tabs;
 pub mod artifact_sidebar;
 pub mod chat_tab;
 pub mod components;
+pub mod launcher;
 pub mod modals;
 pub mod session_list;
 pub mod sidebar;
@@ -73,12 +75,13 @@ pub enum Action {
 pub struct UI {
     pub tabs: Vec<ChatTabState>,
     pub active_tab: usize,
+    pub app_tabs: app_tabs::AppTabs,
     pub panel_state: crate::tui::shell::PanelState,
     pub sidebar_open: bool,
     pub artifact_sidebar_open: bool,
     pub show_session_list: bool,
     pub active_modal: Option<Modal>,
-    pub focus_input: bool,
+    pub focus: crate::tui::focus::Focus,
     pub save_file_dialog: Option<SaveFileDialog>,
     pub export_dialog: Option<ExportDialog>,
     pub artifact_viewer: Option<ArtifactViewerState>,
@@ -128,9 +131,15 @@ pub struct UI {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseAction {
+    AppTabSelect(usize),
+    AppTabAdd,
+    AppTabClose(usize),
+    Sidebar(sidebar::SidebarAction),
     PaletteItem(usize),
     LeftHandle,
     RightHandle,
+    RightHandleClose,
+    RightHandleThin,
     ProviderDropdown,
     ModelDropdown,
     SettingsItem(usize),
@@ -182,6 +191,7 @@ pub struct ChatTabState {
     pub message_viewport_height: usize,
     pub temporary_artifacts: Vec<ArtifactEntry>,
     pub image_states: HashMap<String, crate::ui::components::image_block::ImageBlockState>,
+    pub sidebar_state: sidebar::SidebarState,
 }
 
 pub struct ConversationEntry {
@@ -258,14 +268,16 @@ impl UI {
                 message_viewport_height: 0,
                 temporary_artifacts: vec![],
                 image_states: HashMap::new(),
+                sidebar_state: sidebar::SidebarState::default(),
             }],
             active_tab: 0,
+            app_tabs: app_tabs::AppTabs::default(),
             panel_state: crate::tui::shell::PanelState::new(),
             sidebar_open: false,
             artifact_sidebar_open: false,
             show_session_list: false,
             active_modal: None,
-            focus_input: true,
+            focus: crate::tui::focus::Focus::Chat,
             save_file_dialog: None,
             export_dialog: None,
             artifact_viewer: None,
@@ -324,7 +336,7 @@ impl UI {
         self.chat_area = None;
         self.mouse_hit_areas.clear();
 
-        if area.width < 80 || area.height < 24 {
+        if area.width < 64 || area.height < 16 {
             f.render_widget(Clear, area);
             f.render_widget(
                 Block::default().style(Style::default().fg(Color::White).bg(Color::Black)),
@@ -346,10 +358,37 @@ impl UI {
                     Constraint::Min(0),
                 ])
                 .split(vertical[1]);
-            let msg = Paragraph::new("TCUI requires at least 80×24")
+            let msg = Paragraph::new("TCUI requires at least 64×16")
                 .alignment(Alignment::Center)
                 .style(Style::default().fg(Color::White).bg(Color::Black));
             f.render_widget(msg, horizontal[1]);
+            return;
+        }
+
+        let top_bar_area = Rect::new(area.x, area.y, area.width, 1);
+        let top_bar = TopBar::new(&self.app_tabs);
+        top_bar.render(f, top_bar_area);
+        self.mouse_hit_areas
+            .extend(top_bar.hit_areas(top_bar_area).into_iter().map(|hit| {
+                let action = match hit.action {
+                    top_bar::TopBarAction::Select(index) => MouseAction::AppTabSelect(index),
+                    top_bar::TopBarAction::Add => MouseAction::AppTabAdd,
+                    top_bar::TopBarAction::Close(index) => MouseAction::AppTabClose(index),
+                };
+                (hit.area, action)
+            }));
+
+        if !self.app_tabs.active_view().is_chat() {
+            launcher::render(
+                f,
+                Rect::new(
+                    area.x,
+                    area.y.saturating_add(1),
+                    area.width,
+                    area.height.saturating_sub(1),
+                ),
+            );
+            self.render_global_overlays(f, area, 0);
             return;
         }
 
@@ -362,10 +401,6 @@ impl UI {
                 Constraint::Length(u16::from(status_bar_rows)),
             ])
             .split(area);
-
-        // Top bar
-        let top_bar = TopBar::new(&self.tabs, self.active_tab, false, false);
-        top_bar.render(f, main_layout[0]);
 
         let panels = self.panel_state.clamped_for_area(main_layout[1]);
 
@@ -435,12 +470,23 @@ impl UI {
                 Block::default().style(Style::default().fg(theme.foreground).bg(theme.sidebar)),
                 left_sidebar_area,
             );
-            let active_tab = &self.tabs[self.active_tab];
-            let sidebar = Sidebar::new(&active_tab.conversations, active_tab.active_conversation);
-            sidebar.render(f, left_sidebar_area);
+            let focused = self.focus == crate::tui::focus::Focus::LeftSidebar;
+            let active_tab = &mut self.tabs[self.active_tab];
+            let mut sidebar = Sidebar::new(
+                &active_tab.conversations,
+                active_tab.active_conversation,
+                &mut active_tab.sidebar_state,
+                focused,
+            );
+            self.mouse_hit_areas.extend(
+                sidebar
+                    .render(f, left_sidebar_area)
+                    .into_iter()
+                    .map(|hit| (hit.area, MouseAction::Sidebar(hit.action))),
+            );
         }
 
-        let left_handle_rect = panels.handle_left_rect(main_layout[1]);
+        let left_handle_rects = panels.handle_left_rects(main_layout[1]);
         if let Some(tab_state) = self.tabs.get_mut(self.active_tab) {
             if artifact_actual_width > 0 && !right_overlays_chat {
                 f.render_widget(
@@ -461,7 +507,7 @@ impl UI {
             }
         }
 
-        let right_handle_rect = panels.handle_right_rect(main_layout[1]);
+        let right_handle_rects = panels.handle_right_rects(main_layout[1]);
 
         self.chat_area = Some(content_layout[1]);
 
@@ -558,9 +604,20 @@ impl UI {
                 Block::default().style(Style::default().fg(theme.foreground).bg(theme.sidebar)),
                 left_sidebar_area,
             );
-            let active_tab = &self.tabs[self.active_tab];
-            let sidebar = Sidebar::new(&active_tab.conversations, active_tab.active_conversation);
-            sidebar.render(f, left_sidebar_area);
+            let focused = self.focus == crate::tui::focus::Focus::LeftSidebar;
+            let active_tab = &mut self.tabs[self.active_tab];
+            let mut sidebar = Sidebar::new(
+                &active_tab.conversations,
+                active_tab.active_conversation,
+                &mut active_tab.sidebar_state,
+                focused,
+            );
+            self.mouse_hit_areas.extend(
+                sidebar
+                    .render(f, left_sidebar_area)
+                    .into_iter()
+                    .map(|hit| (hit.area, MouseAction::Sidebar(hit.action))),
+            );
         }
 
         if right_overlays_chat {
@@ -585,15 +642,58 @@ impl UI {
             }
         }
 
-        let left_handle = Paragraph::new(if left_actual_width == 0 { ">" } else { "<" })
-            .style(Style::default().fg(theme.border).bg(theme.background))
-            .alignment(Alignment::Center);
-        f.render_widget(left_handle, left_handle_rect);
-        let right_handle = Paragraph::new(if artifact_actual_width == 0 { "<" } else { ">" })
-            .style(Style::default().fg(theme.border).bg(theme.background))
-            .alignment(Alignment::Center);
-        f.render_widget(right_handle, right_handle_rect);
+        let left_symbol = if left_actual_width == 0 { ">" } else { "<" };
+        for rect in left_handle_rects {
+            f.render_widget(
+                Paragraph::new(left_symbol)
+                    .style(Style::default().fg(theme.border).bg(theme.background))
+                    .alignment(Alignment::Center),
+                rect,
+            );
+        }
+        let right_symbols = match panels.right {
+            crate::tui::shell::PanelMode::Closed => ["<", "<", "<"],
+            crate::tui::shell::PanelMode::Thin => ["<", "<", ">"],
+            crate::tui::shell::PanelMode::Wide => [">", ">", ">"],
+        };
+        for (index, rect) in right_handle_rects.into_iter().enumerate() {
+            let color = if index == 2 && panels.right != crate::tui::shell::PanelMode::Closed {
+                theme.foreground
+            } else {
+                theme.border
+            };
+            f.render_widget(
+                Paragraph::new(right_symbols[index])
+                    .style(Style::default().fg(color).bg(theme.background))
+                    .alignment(Alignment::Center),
+                rect,
+            );
+        }
 
+        for rect in left_handle_rects {
+            self.mouse_hit_areas.push((rect, MouseAction::LeftHandle));
+        }
+        let right_primary_action = if panels.right == crate::tui::shell::PanelMode::Closed {
+            MouseAction::RightHandleThin
+        } else {
+            MouseAction::RightHandle
+        };
+        self.mouse_hit_areas
+            .push((right_handle_rects[0], right_primary_action));
+        self.mouse_hit_areas
+            .push((right_handle_rects[1], right_primary_action));
+        let bottom_action = match panels.right {
+            crate::tui::shell::PanelMode::Closed => MouseAction::RightHandleThin,
+            crate::tui::shell::PanelMode::Thin => MouseAction::RightHandleClose,
+            crate::tui::shell::PanelMode::Wide => MouseAction::RightHandleThin,
+        };
+        self.mouse_hit_areas
+            .push((right_handle_rects[2], bottom_action));
+
+        self.render_global_overlays(f, area, artifact_width);
+    }
+
+    fn render_global_overlays(&mut self, f: &mut Frame, area: Rect, artifact_width: u16) {
         if let Some(ref mut dialog) = self.save_file_dialog {
             dialog.render(f, area);
         }
@@ -657,10 +757,6 @@ impl UI {
             artifact_width,
         );
 
-        self.mouse_hit_areas
-            .push((left_handle_rect, MouseAction::LeftHandle));
-        self.mouse_hit_areas
-            .push((right_handle_rect, MouseAction::RightHandle));
         if let Some(areas) = self.status_bar_areas {
             if let Some(provider) = areas.provider {
                 self.mouse_hit_areas
@@ -795,6 +891,7 @@ impl UI {
             message_viewport_height: 0,
             temporary_artifacts: vec![],
             image_states: HashMap::new(),
+            sidebar_state: sidebar::SidebarState::default(),
         });
         self.active_tab = self.tabs.len() - 1;
     }
@@ -936,6 +1033,47 @@ mod tests {
     }
 
     #[test]
+    fn generated_conversation_title_is_not_rendered_above_chat() {
+        let mut ui = UI::new();
+        ui.tabs[ui.active_tab].generated_title = Some("Hidden generated title".to_string());
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
+
+        terminal.draw(|frame| ui.render(frame)).expect("render ui");
+
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("Chat"));
+        assert!(!screen.contains("Hidden generated title"));
+    }
+
+    #[test]
+    fn placeholder_tab_uses_full_launcher_without_chat_chrome() {
+        let mut ui = UI::new();
+        ui.sidebar_open = true;
+        ui.artifact_sidebar_open = true;
+        ui.app_tabs.add_placeholder();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
+
+        terminal.draw(|frame| ui.render(frame)).expect("render ui");
+
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("Tab 1"));
+        assert!(screen.contains("Obsidian"));
+        assert!(screen.contains("Memory management"));
+        assert!(screen.contains("Pomodoro"));
+        assert!(!screen.contains("[New Chat]"));
+        assert!(ui.chat_area.is_none());
+        assert!(ui.status_bar_areas.is_none());
+        assert!(!ui.mouse_hit_areas.iter().any(|(_, action)| matches!(
+            action,
+            super::MouseAction::Sidebar(_)
+                | super::MouseAction::LeftHandle
+                | super::MouseAction::RightHandle
+                | super::MouseAction::RightHandleClose
+                | super::MouseAction::RightHandleThin
+        )));
+    }
+
+    #[test]
     fn status_bar_uses_two_configured_rows_and_preserves_hit_areas() {
         let mut ui = UI::new();
         ui.tui_config.status_bar_rows = 2;
@@ -986,12 +1124,12 @@ mod tests {
     #[test]
     fn small_terminal_renders_minimum_size_message() {
         let mut ui = UI::new();
-        let mut terminal = Terminal::new(TestBackend::new(79, 23)).expect("test terminal");
+        let mut terminal = Terminal::new(TestBackend::new(63, 15)).expect("test terminal");
 
         terminal.draw(|frame| ui.render(frame)).expect("render ui");
 
         let screen = terminal.backend().to_string();
-        assert!(screen.contains("TCUI requires at least 80×24"));
+        assert!(screen.contains("TCUI requires at least 64×16"));
         assert!(ui.mouse_hit_areas.is_empty());
     }
 
@@ -1023,6 +1161,6 @@ mod tests {
         assert!(ui
             .mouse_hit_areas
             .iter()
-            .any(|(_, action)| *action == super::MouseAction::RightHandle));
+            .any(|(_, action)| *action == super::MouseAction::RightHandleThin));
     }
 }

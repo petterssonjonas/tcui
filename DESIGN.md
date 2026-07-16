@@ -73,6 +73,7 @@ All spacing is terminal cells.
 ### Grid
 
 - Main layout: top bar, chat surface, status bar.
+- The top bar is exactly one row and contains the `TCUI` brand followed by app-view tabs.
 - Chat controls sit in a single command strip when enabled.
 - Sidebar width is 24 cells.
 
@@ -99,8 +100,23 @@ All spacing is terminal cells.
 - **Variants**: empty chat, active chat, streaming.
 - **Spacing**: `cell-1`.
 - **States**: active border cyan, inactive chrome dark gray.
-- **Accessibility**: title includes current provider and model.
+- **Accessibility**: provider and model remain available in the bottom status bar; the chat viewport has no duplicate title row.
 - **Motion**: streaming spinner in status, not inside message text.
+
+### App Tab Strip
+
+- **Structure**: `TCUI`, a permanent `Chat` tab, zero or more numbered placeholder tabs, then `+` immediately after the rightmost tab.
+- **Surface**: tabs use the lighter `theme-panel` surface with normal foreground text; the active tab uses the selection surface.
+- **States**: `Chat` cannot be closed. Placeholder tabs are closable and preserve the chat workspace while inactive.
+- **Content**: placeholder tabs hide both sidebars and the chat status bar, then center a two-column launcher grid in the remaining viewport.
+- **Accessibility**: the full visible tab label is clickable; close and add controls have distinct hit areas.
+
+### Conversation Sidebar
+
+- **Structure**: a three-row `[New Chat]` card followed directly by the scrollable pinned/recent conversation list. No sidebar title or chat count appears above it.
+- **Surface**: sidebar cards use `theme-sidebar`; `[New Chat]` and keyboard selection use the elevated or selected surface.
+- **States**: mouse wheel scrolls the list viewport. When the sidebar owns focus, Up/Down moves a stable selection and Enter activates it; Esc returns focus to chat input.
+- **Accessibility**: selection remains visible while navigating, and conversation action hit areas move with the scrolled card.
 
 ### Message Input
 
@@ -110,6 +126,25 @@ All spacing is terminal cells.
 - **States**: placeholder muted, entered text primary.
 - **Accessibility**: visible title explains action.
 - **Motion**: none.
+
+### User Message
+
+- **Structure**: a padded bubble capped at 75% of the chat viewport width.
+- **Alignment**: left, centered with equal outer margins, or right according to the user alignment setting.
+- **Label**: the user name follows the bubble; right-aligned only for right bubbles, otherwise left-aligned.
+- **Surface**: `theme-user-bubble`; outer margin remains the chat background.
+
+### Assistant Answer
+
+- **Structure**: an `Assistant` label followed by clean answer text without a visible bubble edge.
+- **Surface**: `theme-assistant-bubble`, which must equal `theme-background`.
+- **Label color**: Gruvbox orange for Gruvbox themes; `theme-accent-alt` for every other theme.
+
+### Thinking Block
+
+- **Structure**: one inset, padded block containing both the disclosure label and reasoning text.
+- **Surface**: terminal black across the complete block; outer inset remains the chat background.
+- **Alignment**: reasoning text follows assistant alignment inside the block.
 
 ## 6. Motion & Interaction
 

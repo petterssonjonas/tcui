@@ -106,7 +106,7 @@ const SYSTEM: ThemeSpec = ThemeSpec {
     selection_bg: Color::DarkGray,
     selection_fg: Color::White,
     user_bubble: Color::Rgb(40, 40, 46),
-    assistant_bubble: Color::Rgb(32, 32, 36),
+    assistant_bubble: Color::Rgb(20, 20, 24),
     ansi: SYSTEM_ANSI,
 };
 
@@ -134,7 +134,7 @@ const THEMES: [ThemeSpec; 15] = [
         selection_bg: Color::Rgb(80, 73, 69),
         selection_fg: Color::Rgb(131, 165, 152),
         user_bubble: Color::Rgb(50, 48, 47),
-        assistant_bubble: Color::Rgb(40, 40, 40),
+        assistant_bubble: Color::Rgb(29, 32, 33),
         ansi: ansi(
             [
                 Color::Rgb(29, 32, 33),
@@ -180,7 +180,7 @@ const THEMES: [ThemeSpec; 15] = [
         selection_bg: Color::Rgb(80, 73, 69),
         selection_fg: Color::Rgb(69, 133, 136),
         user_bubble: Color::Rgb(50, 48, 47),
-        assistant_bubble: Color::Rgb(40, 40, 40),
+        assistant_bubble: Color::Rgb(29, 32, 33),
         ansi: ansi(
             [
                 Color::Rgb(29, 32, 33),
@@ -226,7 +226,7 @@ const THEMES: [ThemeSpec; 15] = [
         selection_bg: Color::Rgb(76, 86, 106),
         selection_fg: Color::Rgb(216, 222, 233),
         user_bubble: Color::Rgb(52, 59, 73),
-        assistant_bubble: Color::Rgb(46, 52, 64),
+        assistant_bubble: Color::Rgb(43, 48, 59),
         ansi: SYSTEM_ANSI,
     },
     ThemeSpec {
@@ -251,7 +251,7 @@ const THEMES: [ThemeSpec; 15] = [
         selection_bg: Color::Rgb(68, 71, 90),
         selection_fg: Color::Rgb(248, 248, 242),
         user_bubble: Color::Rgb(42, 44, 57),
-        assistant_bubble: Color::Rgb(35, 37, 49),
+        assistant_bubble: Color::Rgb(33, 34, 44),
         ansi: SYSTEM_ANSI,
     },
     ThemeSpec {
@@ -276,7 +276,7 @@ const THEMES: [ThemeSpec; 15] = [
         selection_bg: Color::Rgb(48, 54, 61),
         selection_fg: Color::Rgb(230, 237, 243),
         user_bubble: Color::Rgb(20, 24, 31),
-        assistant_bubble: Color::Rgb(18, 22, 29),
+        assistant_bubble: Color::Rgb(22, 27, 34),
         ansi: SYSTEM_ANSI,
     },
     ThemeSpec {
@@ -301,7 +301,7 @@ const THEMES: [ThemeSpec; 15] = [
         selection_bg: Color::Rgb(84, 84, 109),
         selection_fg: Color::Rgb(220, 215, 186),
         user_bubble: Color::Rgb(39, 39, 51),
-        assistant_bubble: Color::Rgb(36, 36, 48),
+        assistant_bubble: Color::Rgb(26, 26, 34),
         ansi: SYSTEM_ANSI,
     },
     ThemeSpec {
@@ -351,7 +351,7 @@ const THEMES: [ThemeSpec; 15] = [
         selection_bg: Color::Rgb(55, 71, 79),
         selection_fg: Color::Rgb(238, 255, 255),
         user_bubble: Color::Rgb(38, 50, 56),
-        assistant_bubble: Color::Rgb(32, 42, 48),
+        assistant_bubble: Color::Rgb(31, 41, 46),
         ansi: SYSTEM_ANSI,
     },
     ThemeSpec {
@@ -376,7 +376,7 @@ const THEMES: [ThemeSpec; 15] = [
         selection_bg: Color::Rgb(24, 64, 32),
         selection_fg: Color::Rgb(144, 238, 144),
         user_bubble: Color::Rgb(9, 18, 11),
-        assistant_bubble: Color::Rgb(8, 16, 10),
+        assistant_bubble: Color::Rgb(0, 12, 0),
         ansi: SYSTEM_ANSI,
     },
     ThemeSpec {
@@ -401,7 +401,7 @@ const THEMES: [ThemeSpec; 15] = [
         selection_bg: Color::Rgb(73, 72, 62),
         selection_fg: Color::Rgb(248, 248, 242),
         user_bubble: Color::Rgb(46, 47, 39),
-        assistant_bubble: Color::Rgb(43, 44, 36),
+        assistant_bubble: Color::Rgb(30, 31, 28),
         ansi: SYSTEM_ANSI,
     },
     ThemeSpec {
@@ -426,7 +426,7 @@ const THEMES: [ThemeSpec; 15] = [
         selection_bg: Color::Rgb(94, 94, 94),
         selection_fg: Color::Rgb(220, 220, 204),
         user_bubble: Color::Rgb(56, 56, 56),
-        assistant_bubble: Color::Rgb(54, 54, 54),
+        assistant_bubble: Color::Rgb(53, 53, 53),
         ansi: SYSTEM_ANSI,
     },
     ThemeSpec {
@@ -451,7 +451,7 @@ const THEMES: [ThemeSpec; 15] = [
         selection_bg: Color::Rgb(7, 54, 66),
         selection_fg: Color::Rgb(131, 148, 150),
         user_bubble: Color::Rgb(0, 48, 60),
-        assistant_bubble: Color::Rgb(0, 46, 57),
+        assistant_bubble: Color::Rgb(7, 54, 66),
         ansi: SYSTEM_ANSI,
     },
     ThemeSpec {
@@ -476,7 +476,7 @@ const THEMES: [ThemeSpec; 15] = [
         selection_bg: Color::Rgb(65, 72, 104),
         selection_fg: Color::Rgb(192, 202, 245),
         user_bubble: Color::Rgb(33, 37, 56),
-        assistant_bubble: Color::Rgb(31, 35, 53),
+        assistant_bubble: Color::Rgb(22, 22, 30),
         ansi: SYSTEM_ANSI,
     },
     ThemeSpec {
@@ -501,7 +501,7 @@ const THEMES: [ThemeSpec; 15] = [
         selection_bg: Color::Rgb(39, 49, 66),
         selection_fg: Color::Rgb(229, 231, 235),
         user_bubble: Color::Rgb(18, 23, 32),
-        assistant_bubble: Color::Rgb(17, 22, 30),
+        assistant_bubble: Color::Rgb(10, 14, 20),
         ansi: SYSTEM_ANSI,
     },
 ];
@@ -572,7 +572,7 @@ mod tests {
         assert_eq!(low.panel, Color::Rgb(40, 40, 40));
         assert_eq!(low.sidebar, Color::Rgb(40, 40, 40));
         assert_eq!(low.user_bubble, Color::Rgb(50, 48, 47));
-        assert_eq!(low.assistant_bubble, Color::Rgb(40, 40, 40));
+        assert_eq!(low.assistant_bubble, low.background);
         assert_eq!(low.accent, Color::Rgb(131, 165, 152));
         assert_eq!(low.ansi[0], Color::Rgb(29, 32, 33));
         assert_eq!(low.ansi[8], Color::Rgb(168, 153, 132));
@@ -582,7 +582,7 @@ mod tests {
         assert_eq!(high.panel, Color::Rgb(40, 40, 40));
         assert_eq!(high.sidebar, Color::Rgb(40, 40, 40));
         assert_eq!(high.user_bubble, Color::Rgb(50, 48, 47));
-        assert_eq!(high.assistant_bubble, Color::Rgb(40, 40, 40));
+        assert_eq!(high.assistant_bubble, high.background);
         assert_eq!(high.accent, Color::Rgb(69, 133, 136));
         assert_eq!(high.ansi[0], Color::Rgb(29, 32, 33));
         assert_eq!(high.ansi[8], Color::Rgb(146, 131, 116));
@@ -590,5 +590,12 @@ mod tests {
         for index in (0..16).filter(|index| *index != 8) {
             assert_eq!(high.ansi[index], low.ansi[index]);
         }
+    }
+
+    #[test]
+    fn assistant_surface_matches_chat_background_in_every_theme() {
+        assert!(THEMES
+            .iter()
+            .all(|theme| theme.assistant_bubble == theme.background));
     }
 }

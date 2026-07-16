@@ -173,6 +173,14 @@ impl TuiApp {
                 self.ui.panel_state.toggle_left();
                 self.ui.sidebar_open =
                     self.ui.panel_state.left != crate::tui::shell::PanelMode::Closed;
+                if !self.ui.sidebar_open {
+                    self.ui.focus = crate::tui::focus::Focus::Chat;
+                }
+                Ok(())
+            }
+            Action::FocusInput => {
+                self.ui.app_tabs.select(0);
+                self.ui.focus = crate::tui::focus::Focus::Chat;
                 Ok(())
             }
             Action::ToggleArtifactSidebar => {
@@ -186,6 +194,7 @@ impl TuiApp {
                 Ok(())
             }
             Action::ShowSettings => {
+                self.ui.palette = None;
                 self.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
                 Ok(())
             }
@@ -194,6 +203,7 @@ impl TuiApp {
                 Ok(())
             }
             Action::ToggleSettings => {
+                self.ui.palette = None;
                 if self.ui.settings_v2.is_some() {
                     self.ui.settings_v2 = None;
                 } else {
@@ -390,12 +400,13 @@ impl TuiApp {
                 Ok(())
             }
             Action::OpenCommandPalette => {
-                let pinned = self.config.read().await.tui.pinned_commands.clone();
-                self.ui.palette = Some(crate::tui::palette::PaletteState::new(pinned));
+                self.ui.palette = None;
+                self.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
                 Ok(())
             }
             Action::OpenSettingsPanel => {
                 let _focus = crate::tui::focus::Focus::SettingsPanel;
+                self.ui.palette = None;
                 self.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
                 Ok(())
             }
@@ -902,12 +913,25 @@ impl TuiApp {
                 self.ui.panel_state.toggle_left();
                 self.ui.sidebar_open =
                     self.ui.panel_state.left != crate::tui::shell::PanelMode::Closed;
+                if !self.ui.sidebar_open {
+                    self.ui.focus = crate::tui::focus::Focus::Chat;
+                }
                 Ok(())
             }
             MouseClickAction::ToggleRightHandle => {
                 self.ui.panel_state.toggle_right();
                 self.ui.artifact_sidebar_open =
                     self.ui.panel_state.right != crate::tui::shell::PanelMode::Closed;
+                Ok(())
+            }
+            MouseClickAction::CloseRightSidebar => {
+                self.ui.panel_state.right = crate::tui::shell::PanelMode::Closed;
+                self.ui.artifact_sidebar_open = false;
+                Ok(())
+            }
+            MouseClickAction::SetRightSidebarThin => {
+                self.ui.panel_state.right = crate::tui::shell::PanelMode::Thin;
+                self.ui.artifact_sidebar_open = true;
                 Ok(())
             }
             MouseClickAction::OpenProviderDropdown => {
@@ -947,6 +971,12 @@ impl TuiApp {
                 self.ui.keybind_capture = Some(
                     crate::tui::keybind_capture::KeybindCaptureState::new(action_id, action_label),
                 );
+            }
+            crate::tui::settings_panel::EnterResult::RunCommand(id) => {
+                if let Some(action) = crate::tui::settings_panel::command_action(id) {
+                    self.ui.settings_v2 = None;
+                    self.action_tx.send(action).ok();
+                }
             }
             crate::tui::settings_panel::EnterResult::SelectTheme(theme) => {
                 self.apply_theme_selection(theme)?;

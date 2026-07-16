@@ -1,6 +1,4 @@
-use ratatui::layout::Rect;
-
-use super::{Action, Tab, TuiApp};
+use super::{Action, TuiApp};
 use crate::app::action::MouseClickAction;
 
 impl TuiApp {
@@ -153,6 +151,10 @@ impl TuiApp {
                                     action_label,
                                 ));
                         }
+                        crate::tui::settings_panel::EnterResult::RunCommand(id) => {
+                            self.ui.settings_v2 = None;
+                            return crate::tui::settings_panel::command_action(id);
+                        }
                         crate::tui::settings_panel::EnterResult::SelectTheme(theme) => {
                             let _ = self.apply_theme_selection(theme);
                         }
@@ -199,6 +201,10 @@ impl TuiApp {
                 }
                 KeyCode::Down => {
                     settings.move_down(&catalog);
+                    None
+                }
+                KeyCode::Tab if settings.confirm.is_none() => {
+                    settings.toggle_descriptions();
                     None
                 }
                 KeyCode::Char(c)
@@ -459,6 +465,78 @@ impl TuiApp {
                 }
             }
         } else {
+            if !self.ui.app_tabs.active_view().is_chat() {
+                return match key.code {
+                    KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
+                        Some(self.quit_action())
+                    }
+                    KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Some(self.quit_action())
+                    }
+                    KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Some(Action::OpenCommandPalette)
+                    }
+                    KeyCode::Char(',') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Some(Action::ToggleSettings)
+                    }
+                    KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.ui.app_tabs.add_placeholder();
+                        self.ui.focus = crate::tui::focus::Focus::Chat;
+                        None
+                    }
+                    KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        let active = self.ui.app_tabs.active_index();
+                        self.ui.app_tabs.close(active);
+                        self.ui.focus = crate::tui::focus::Focus::Chat;
+                        None
+                    }
+                    _ => None,
+                };
+            }
+
+            if self.ui.focus == crate::tui::focus::Focus::LeftSidebar {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Tab => {
+                        self.ui.focus = crate::tui::focus::Focus::Chat;
+                        return None;
+                    }
+                    KeyCode::Up | KeyCode::Down => {
+                        if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
+                            tab.sidebar_state
+                                .move_selection(&tab.conversations, key.code == KeyCode::Down);
+                        }
+                        return None;
+                    }
+                    KeyCode::Enter => {
+                        let action = self
+                            .ui
+                            .tabs
+                            .get(self.ui.active_tab)
+                            .map(|tab| tab.sidebar_state.selected_action());
+                        return action.map(|action| match action {
+                            crate::ui::sidebar::SidebarAction::NewChat => {
+                                self.ui.focus = crate::tui::focus::Focus::Chat;
+                                Action::NewChat
+                            }
+                            crate::ui::sidebar::SidebarAction::LoadConversation(id) => {
+                                Action::LoadConversation(id)
+                            }
+                            crate::ui::sidebar::SidebarAction::TogglePinned(id) => {
+                                Action::ToggleConversationPinned(id)
+                            }
+                            crate::ui::sidebar::SidebarAction::ExportConversation(id) => {
+                                Action::ExportConversationId(id)
+                            }
+                            crate::ui::sidebar::SidebarAction::DeleteConversation(id) => {
+                                Action::DeleteConversation(id)
+                            }
+                        });
+                    }
+                    _ if !key.modifiers.contains(KeyModifiers::CONTROL) => return None,
+                    _ => {}
+                }
+            }
+
             match key.code {
                 KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
                     Some(self.quit_action())
@@ -479,8 +557,9 @@ impl TuiApp {
                     Some(Action::ToggleArtifactSidebar)
                 }
                 KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    let tab = Tab::new("New Chat".to_string(), String::new(), String::new());
-                    Some(Action::AddTab(tab))
+                    self.ui.app_tabs.add_placeholder();
+                    self.ui.focus = crate::tui::focus::Focus::Chat;
+                    None
                 }
                 KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     Some(Action::NewChat)
@@ -489,7 +568,7 @@ impl TuiApp {
                     if key.modifiers.contains(KeyModifiers::SHIFT) {
                         Some(Action::CloseChat)
                     } else {
-                        Some(Action::RemoveTab(self.ui.active_tab))
+                        None
                     }
                 }
                 KeyCode::Char(',') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -503,6 +582,10 @@ impl TuiApp {
                 }
                 KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     Some(Action::OpenCommandPalette)
+                }
+                KeyCode::Tab if self.ui.sidebar_open => {
+                    self.ui.focus = crate::tui::focus::Focus::LeftSidebar;
+                    None
                 }
                 KeyCode::Up if key.modifiers == KeyModifiers::ALT => {
                     self.scroll_active_chat_lines(-3);
@@ -679,6 +762,20 @@ impl TuiApp {
             } else {
                 popup.move_up();
             }
+            return;
+        }
+
+        if self.ui.app_tabs.active_view().is_chat() && self.ui.sidebar_open {
+            if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
+                if tab.sidebar_state.viewport_contains(pos) {
+                    tab.sidebar_state.scroll(&tab.conversations, down);
+                    self.ui.focus = crate::tui::focus::Focus::LeftSidebar;
+                    return;
+                }
+            }
+        }
+
+        if !self.ui.app_tabs.active_view().is_chat() {
             return;
         }
 
@@ -957,11 +1054,26 @@ impl TuiApp {
             return None;
         }
 
-        if self.ui.settings_v2.is_some()
-            && !crate::tui::components::centered_rect(70, 60, area).contains(pos)
-        {
-            self.ui.settings_v2 = None;
-            return None;
+        if let Some(settings) = self.ui.settings_v2.as_ref() {
+            if !settings.popup_area(area).contains(pos) {
+                self.ui.settings_v2 = None;
+                return None;
+            }
+        }
+
+        if self.ui.active_modal.is_some() {
+            if let Some(modal_areas) = self.ui.modal_areas {
+                if modal_areas.yes.contains(pos) {
+                    self.ui.active_modal = None;
+                    return Some(Action::ConfirmQuit);
+                }
+                if modal_areas.no.contains(pos) {
+                    self.ui.active_modal = None;
+                    return Some(Action::CancelModal);
+                }
+            }
+            self.ui.active_modal = None;
+            return Some(Action::CancelModal);
         }
 
         if let Some((_, mouse_action)) = self
@@ -973,6 +1085,45 @@ impl TuiApp {
             .copied()
         {
             match mouse_action {
+                crate::ui::MouseAction::AppTabSelect(index) => {
+                    self.ui.app_tabs.select(index);
+                    self.ui.focus = crate::tui::focus::Focus::Chat;
+                    return None;
+                }
+                crate::ui::MouseAction::AppTabAdd => {
+                    self.ui.app_tabs.add_placeholder();
+                    self.ui.focus = crate::tui::focus::Focus::Chat;
+                    return None;
+                }
+                crate::ui::MouseAction::AppTabClose(index) => {
+                    self.ui.app_tabs.close(index);
+                    self.ui.focus = crate::tui::focus::Focus::Chat;
+                    return None;
+                }
+                crate::ui::MouseAction::Sidebar(action) => {
+                    if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
+                        tab.sidebar_state.select_action(action);
+                    }
+                    self.ui.focus = crate::tui::focus::Focus::LeftSidebar;
+                    return Some(match action {
+                        crate::ui::sidebar::SidebarAction::NewChat => {
+                            self.ui.focus = crate::tui::focus::Focus::Chat;
+                            Action::NewChat
+                        }
+                        crate::ui::sidebar::SidebarAction::LoadConversation(id) => {
+                            Action::LoadConversation(id)
+                        }
+                        crate::ui::sidebar::SidebarAction::TogglePinned(id) => {
+                            Action::ToggleConversationPinned(id)
+                        }
+                        crate::ui::sidebar::SidebarAction::ExportConversation(id) => {
+                            Action::ExportConversationId(id)
+                        }
+                        crate::ui::sidebar::SidebarAction::DeleteConversation(id) => {
+                            Action::DeleteConversation(id)
+                        }
+                    });
+                }
                 crate::ui::MouseAction::PaletteItem(index) => {
                     if let Some(palette) = self.ui.palette.as_mut() {
                         palette.select(index);
@@ -986,6 +1137,12 @@ impl TuiApp {
                 }
                 crate::ui::MouseAction::RightHandle => {
                     return Some(Action::MouseClick(MouseClickAction::ToggleRightHandle));
+                }
+                crate::ui::MouseAction::RightHandleClose => {
+                    return Some(Action::MouseClick(MouseClickAction::CloseRightSidebar));
+                }
+                crate::ui::MouseAction::RightHandleThin => {
+                    return Some(Action::MouseClick(MouseClickAction::SetRightSidebarThin));
                 }
                 crate::ui::MouseAction::ProviderDropdown => {
                     return Some(Action::MouseClick(MouseClickAction::OpenProviderDropdown));
@@ -1001,20 +1158,12 @@ impl TuiApp {
             }
         }
 
-        // Check modal first (takes priority)
-        if self.ui.active_modal.is_some() {
-            if let Some(modal_areas) = self.ui.modal_areas {
-                if modal_areas.yes.contains(pos) {
-                    self.ui.active_modal = None;
-                    return Some(Action::ConfirmQuit);
-                }
-                if modal_areas.no.contains(pos) {
-                    self.ui.active_modal = None;
-                    return Some(Action::CancelModal);
-                }
-            }
-            self.ui.active_modal = None;
-            return Some(Action::CancelModal);
+        if !self.ui.app_tabs.active_view().is_chat() {
+            return None;
+        }
+
+        if self.ui.chat_area.is_some_and(|area| area.contains(pos)) {
+            self.ui.focus = crate::tui::focus::Focus::Chat;
         }
 
         let mut clicked_link = None;
@@ -1062,6 +1211,7 @@ impl TuiApp {
                     }
                 }
                 if tab.input_area.is_some_and(|area| area.contains(pos)) {
+                    self.ui.focus = crate::tui::focus::Focus::Chat;
                     self.set_input_cursor_from_click(pos);
                     return None;
                 }
@@ -1176,75 +1326,6 @@ impl TuiApp {
 
             if handled_selector {
                 return None;
-            }
-        }
-
-        // Top bar layout
-        let top_bar_area = Rect::new(area.x, area.y, area.width, 1);
-        let top_bar = crate::ui::top_bar::TopBar::new(
-            &self.ui.tabs,
-            self.ui.active_tab,
-            self.ui.sidebar_open,
-            self.ui.artifact_sidebar_open,
-        );
-
-        // Check hamburger button
-        let hamburger = top_bar.hamburger_area(top_bar_area);
-        if hamburger.contains(pos) {
-            return Some(Action::ToggleSidebar);
-        }
-
-        let settings = top_bar.settings_area(top_bar_area);
-        if settings.contains(pos) {
-            return Some(Action::ShowSettings);
-        }
-
-        let artifact_toggle = top_bar.artifact_toggle_area(top_bar_area);
-        if artifact_toggle.contains(pos) {
-            return Some(Action::ToggleArtifactSidebar);
-        }
-
-        // Check close button
-        let close = top_bar.close_area(top_bar_area);
-        if close.contains(pos) {
-            return Some(self.quit_action());
-        }
-
-        // Check tabs using accurate hit areas
-        for hit in top_bar.tab_hit_areas(top_bar_area) {
-            if hit.area.contains(pos) {
-                return Some(Action::SwitchTab(hit.index));
-            }
-        }
-
-        // Sidebar layout (only if open)
-        if self.ui.sidebar_open {
-            let sidebar_width = crate::ui::sidebar::SIDEBAR_WIDTH;
-            let sidebar_area = Rect::new(area.x, area.y + 1, sidebar_width, area.height - 2);
-            let active_tab = self.ui.tabs.get(self.ui.active_tab)?;
-            let sidebar = crate::ui::sidebar::Sidebar::new(
-                &active_tab.conversations,
-                active_tab.active_conversation,
-            );
-
-            for target in sidebar.hit_targets(sidebar_area) {
-                if target.area.contains(pos) {
-                    return Some(match target.action {
-                        crate::ui::sidebar::SidebarAction::NewChat => Action::NewChat,
-                        crate::ui::sidebar::SidebarAction::LoadConversation(conversation_id) => {
-                            Action::LoadConversation(conversation_id)
-                        }
-                        crate::ui::sidebar::SidebarAction::TogglePinned(conversation_id) => {
-                            Action::ToggleConversationPinned(conversation_id)
-                        }
-                        crate::ui::sidebar::SidebarAction::ExportConversation(conversation_id) => {
-                            Action::ExportConversationId(conversation_id)
-                        }
-                        crate::ui::sidebar::SidebarAction::DeleteConversation(conversation_id) => {
-                            Action::DeleteConversation(conversation_id)
-                        }
-                    });
-                }
             }
         }
 

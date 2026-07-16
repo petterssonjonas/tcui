@@ -72,9 +72,9 @@ impl Default for TuiConfig {
         Self {
             left_sidebar_mode: PanelMode::Thin,
             right_sidebar_mode: PanelMode::Closed,
-            left_thin_width: 28,
+            left_thin_width: 24,
             left_wide_width: 42,
-            right_thin_width: 32,
+            right_thin_width: 28,
             right_wide_width: 56,
             status_bar_rows: 1,
             status_widgets: Vec::new(),
@@ -126,9 +126,9 @@ mod tests {
         let config = TuiConfig::default();
         assert_eq!(config.left_sidebar_mode, PanelMode::Thin);
         assert_eq!(config.right_sidebar_mode, PanelMode::Closed);
-        assert_eq!(config.left_thin_width, 28);
+        assert_eq!(config.left_thin_width, 24);
         assert_eq!(config.left_wide_width, 42);
-        assert_eq!(config.right_thin_width, 32);
+        assert_eq!(config.right_thin_width, 28);
         assert_eq!(config.right_wide_width, 56);
         assert_eq!(config.status_bar_rows, 1);
         assert!(config.status_widgets.is_empty());
@@ -368,7 +368,7 @@ helper_enabled = false
         assert!(!config.tui.helper_enabled);
         // All other fields should be defaults
         assert_eq!(config.tui.left_sidebar_mode, PanelMode::Thin);
-        assert_eq!(config.tui.left_thin_width, 28);
+        assert_eq!(config.tui.left_thin_width, 24);
         assert_eq!(config.tui.toast_position, ToastPosition::TopRight);
         assert!(config.tui.status_widgets.is_empty());
     }

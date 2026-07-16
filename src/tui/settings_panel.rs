@@ -11,6 +11,7 @@ use ratatui::{prelude::*, widgets::*, Frame};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SettingCategory {
+    Commands,
     Provider,
     Model,
     Local,
@@ -27,10 +28,11 @@ pub enum SettingCategory {
 
 impl SettingCategory {
     #[rustfmt::skip]
-    pub const ALL: [Self; 12] = [Self::Provider, Self::Model, Self::Local, Self::Theme, Self::Keybind, Self::Mcp, Self::Obsidian, Self::UiLayout, Self::ChatBehavior, Self::Privacy, Self::Experimental, Self::Reset];
+    pub const ALL: [Self; 13] = [Self::Commands, Self::Provider, Self::Model, Self::Local, Self::Theme, Self::Keybind, Self::Mcp, Self::Obsidian, Self::UiLayout, Self::ChatBehavior, Self::Privacy, Self::Experimental, Self::Reset];
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Commands => "Commands",
             Self::Provider => "Provider",
             Self::Model => "Model",
             Self::Local => "Local",
@@ -48,6 +50,7 @@ impl SettingCategory {
 
     fn color(self) -> Color {
         match self {
+            Self::Commands => Color::Cyan,
             Self::Provider => Color::Cyan,
             Self::Model => Color::Blue,
             Self::Local => Color::Green,
@@ -74,6 +77,7 @@ pub enum DangerLevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingType {
     Subsection,
+    Command(&'static str),
     Bool {
         enabled: bool,
     },
@@ -104,6 +108,7 @@ pub struct Setting {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnterResult {
     Nothing,
+    RunCommand(&'static str),
     EnteredSubsection,
     ToggledBool,
     OpenKeybind {
@@ -115,6 +120,19 @@ pub enum EnterResult {
     RequestConfirm,
 }
 
+const SETTINGS_WIDTH_PERCENT: u16 = 42;
+const DESCRIPTION_WIDTH_PERCENT: u16 = 28;
+const PANEL_HEIGHT_PERCENT: u16 = 60;
+const STANDARD_PADDING_AMOUNT: u16 = 1;
+const MIN_SETTINGS_WIDTH: u16 = 33;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SettingsPanelLayout {
+    outer: Rect,
+    settings: Rect,
+    description: Option<Rect>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SettingsPanelState {
     pub search: SearchField,
@@ -124,6 +142,7 @@ pub struct SettingsPanelState {
     pub bool_toggles: HashMap<String, bool>,
     pub confirm_selected: bool,
     pub scroll_offset: usize,
+    show_descriptions: bool,
 }
 
 impl SettingsPanelState {
@@ -136,6 +155,70 @@ impl SettingsPanelState {
             bool_toggles: HashMap::new(),
             confirm_selected: true,
             scroll_offset: 0,
+            show_descriptions: false,
+        }
+    }
+
+    pub const fn descriptions_visible(&self) -> bool {
+        self.show_descriptions
+    }
+
+    pub fn toggle_descriptions(&mut self) {
+        self.show_descriptions = !self.show_descriptions;
+    }
+
+    pub fn popup_area(&self, area: Rect) -> Rect {
+        self.panel_layout(area).outer
+    }
+
+    fn panel_layout(&self, area: Rect) -> SettingsPanelLayout {
+        let compact = centered_rect(SETTINGS_WIDTH_PERCENT, PANEL_HEIGHT_PERCENT, area);
+        let settings_width = compact.width.max(MIN_SETTINGS_WIDTH).min(area.width);
+        let settings = Rect::new(
+            area.x + area.width.saturating_sub(settings_width) / 2,
+            compact.y,
+            settings_width,
+            compact.height,
+        );
+        if !self.show_descriptions {
+            return SettingsPanelLayout {
+                outer: settings,
+                settings,
+                description: None,
+            };
+        }
+
+        let description_width =
+            centered_rect(DESCRIPTION_WIDTH_PERCENT, PANEL_HEIGHT_PERCENT, area).width;
+        let outer_width = settings
+            .width
+            .saturating_add(STANDARD_PADDING_AMOUNT)
+            .saturating_add(description_width)
+            .min(area.width);
+        let outer = Rect::new(
+            area.x + area.width.saturating_sub(outer_width) / 2,
+            settings.y,
+            outer_width,
+            settings.height,
+        );
+        let settings = Rect::new(
+            outer.x,
+            outer.y,
+            settings.width.min(outer.width),
+            outer.height,
+        );
+        let description_x = settings.right().saturating_add(STANDARD_PADDING_AMOUNT);
+        let description = Rect::new(
+            description_x,
+            outer.y,
+            outer.right().saturating_sub(description_x),
+            outer.height,
+        );
+
+        SettingsPanelLayout {
+            outer,
+            settings,
+            description: Some(description),
         }
     }
 
@@ -180,6 +263,7 @@ impl SettingsPanelState {
                 self.search.clear();
                 EnterResult::EnteredSubsection
             }
+            SettingType::Command(id) => EnterResult::RunCommand(id),
             SettingType::Bool { enabled: _ } => {
                 self.toggle_bool_setting(setting);
                 EnterResult::ToggledBool
@@ -230,8 +314,8 @@ impl SettingsPanelState {
     }
 
     pub fn visible_item_areas(&self, area: Rect) -> Vec<(Rect, usize)> {
-        let popup = centered_rect(70, 60, area);
-        let inner = popup.inner(Margin {
+        let settings = self.panel_layout(area).settings;
+        let inner = settings.inner(Margin {
             vertical: 1,
             horizontal: 1,
         });
@@ -351,22 +435,32 @@ impl SettingsPanelState {
     ) {
         let _focus = Focus::SettingsPanel;
         let theme = crate::theme::active_theme();
-        let popup = centered_rect(70, 60, area);
-        f.render_widget(Clear, popup);
+        let layout = self.panel_layout(area);
+        f.render_widget(Clear, layout.outer);
         f.render_widget(
             Block::default().style(Style::default().bg(theme.panel)),
-            popup,
+            layout.settings,
         );
+        let description_hint = if self.show_descriptions {
+            "[Tab] Hide"
+        } else {
+            "[Tab] Details"
+        };
         f.render_widget(
-            Paragraph::new(" Settings ").style(
+            Paragraph::new(format!(" Command Palette {description_hint} ")).style(
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
-            Rect::new(popup.x + 1, popup.y, popup.width.saturating_sub(2), 1),
+            Rect::new(
+                layout.settings.x + 1,
+                layout.settings.y,
+                layout.settings.width.saturating_sub(2),
+                1,
+            ),
         );
 
-        let inner = popup.inner(Margin {
+        let inner = layout.settings.inner(Margin {
             vertical: 1,
             horizontal: 1,
         });
@@ -386,9 +480,54 @@ impl SettingsPanelState {
             keybinding_overrides,
         );
 
+        if let Some(description) = layout.description {
+            self.render_description(f, description);
+        }
+
         if let Some(confirm) = &self.confirm {
             self.render_confirm(f, area, confirm);
         }
+    }
+
+    fn render_description(&self, f: &mut Frame, area: Rect) {
+        let theme = crate::theme::active_theme();
+        f.render_widget(
+            Block::default().style(Style::default().bg(theme.panel)),
+            area,
+        );
+        f.render_widget(
+            Paragraph::new(" Description ").style(
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Rect::new(area.x + 1, area.y, area.width.saturating_sub(2), 1),
+        );
+
+        let inner = area.inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        });
+        let settings = all_settings();
+        let Some(setting) = self.selected_setting(&settings) else {
+            return;
+        };
+        let text = vec![
+            Line::styled(
+                setting.title,
+                Style::default()
+                    .fg(theme.foreground)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::from(""),
+            Line::styled(setting.description, Style::default().fg(theme.foreground)),
+            Line::from(""),
+            Line::styled(
+                setting.category.label(),
+                Style::default().fg(setting.category.color()),
+            ),
+        ];
+        f.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), inner);
     }
 
     fn render_confirm(&self, f: &mut Frame, area: Rect, confirm: &ConfirmModal) {
@@ -554,6 +693,7 @@ impl SettingsPanelState {
         }
         let prefix = match setting.setting_type {
             SettingType::Subsection => "▸",
+            SettingType::Command(_) => "›",
             SettingType::Bool { enabled } => {
                 if self
                     .bool_toggles
@@ -589,6 +729,7 @@ impl SettingsPanelState {
                 }
             }
             SettingType::Subsection
+            | SettingType::Command(_)
             | SettingType::Bool { .. }
             | SettingType::Text
             | SettingType::Number
@@ -613,11 +754,8 @@ impl SettingsPanelState {
             area.width
         };
         f.render_widget(
-            Paragraph::new(format!(
-                " {prefix} {}{binding}{danger} — {}",
-                setting.title, setting.description
-            ))
-            .style(row_style),
+            Paragraph::new(format!(" {prefix} {}{binding}{danger}", setting.title))
+                .style(row_style),
             Rect::new(x, y, width, 1),
         );
     }
@@ -641,6 +779,25 @@ fn setting_matches(setting: &Setting, query: &str) -> bool {
             .any(|keyword| keyword.contains(query))
 }
 
+pub fn command_action(id: &str) -> Option<crate::app::Action> {
+    use crate::app::Action;
+    match id {
+        "new_chat" => Some(Action::NewChat),
+        "close_chat" => Some(Action::CloseChat),
+        "toggle_sidebar" => Some(Action::ToggleSidebar),
+        "toggle_artifact_sidebar" => Some(Action::ToggleArtifactSidebar),
+        "refresh_models" => Some(Action::RefreshModels),
+        "export_conversation" => Some(Action::ExportConversation),
+        "show_skills" => Some(Action::ShowSkillsPopup),
+        "show_mcp" => Some(Action::ShowMcpPopup),
+        "show_help" => Some(Action::ShowHelp),
+        "show_keybinds" => Some(Action::ShowKeybinds),
+        "focus_input" => Some(Action::FocusInput),
+        "quit" => Some(Action::ShowQuitConfirm),
+        _ => None,
+    }
+}
+
 #[rustfmt::skip]
 pub fn all_settings() -> Vec<Setting> {
     use DangerLevel as D;
@@ -648,31 +805,43 @@ pub fn all_settings() -> Vec<Setting> {
     use SettingType as T;
 
     vec![
-        subsection("theme", "Theme", "Colors and visual style", C::Theme),
-        subsection("ui_layout", "UI Layout", "Panels and status widgets", C::UiLayout),
-        subsection("chat_behavior", "Chat Behavior", "Chat input and output defaults", C::ChatBehavior),
-        setting("theme_system", "System", "Use terminal default colors", C::Theme, T::Theme("system"), &["theme", "default"], D::Safe),
-        setting("theme_gruvbox_dark_low_contrast", "Gruvbox Dark Low Contrast", "Warm muted dark palette", C::Theme, T::Theme("gruvbox-dark-low-contrast"), &["theme", "color", "gruvbox", "low", "contrast"], D::Safe),
-        setting("theme_gruvbox_dark_high_contrast", "Gruvbox Dark High Contrast", "Warm vivid dark palette", C::Theme, T::Theme("gruvbox-dark-high-contrast"), &["theme", "color", "gruvbox", "high", "contrast"], D::Safe),
-        setting("theme_nord", "Nord", "Arctic blue palette", C::Theme, T::Theme("nord"), &["theme", "color"], D::Safe),
-        setting("theme_dracula", "Dracula", "Purple dark palette", C::Theme, T::Theme("dracula"), &["theme", "color"], D::Safe),
-        setting("theme_github", "GitHub", "GitHub dark palette", C::Theme, T::Theme("github"), &["theme", "color"], D::Safe),
-        setting("theme_kanagawa", "Kanagawa", "Japanese ink palette", C::Theme, T::Theme("kanagawa"), &["theme", "color"], D::Safe),
-        setting("theme_catppuccin", "Catppuccin", "Pastel dark palette", C::Theme, T::Theme("catppuccin"), &["theme", "color"], D::Safe),
-        setting("theme_material", "Material", "Material dark palette", C::Theme, T::Theme("material"), &["theme", "color"], D::Safe),
-        setting("theme_matrix", "Matrix", "Green terminal palette", C::Theme, T::Theme("matrix"), &["theme", "color"], D::Safe),
-        setting("theme_monokai", "Monokai", "Monokai dark palette", C::Theme, T::Theme("monokai"), &["theme", "color"], D::Safe),
-        setting("theme_zenburn", "Zenburn", "Low-contrast green palette", C::Theme, T::Theme("zenburn"), &["theme", "color"], D::Safe),
-        setting("theme_solarized", "Solarized", "Solarized dark palette", C::Theme, T::Theme("solarized"), &["theme", "color"], D::Safe),
-        setting("theme_tokyo_night", "Tokyo Night", "Tokyo Night palette", C::Theme, T::Theme("tokyo-night"), &["theme", "color"], D::Safe),
-        setting("theme_opencode", "OpenCode", "OpenCode-inspired palette", C::Theme, T::Theme("opencode"), &["theme", "color"], D::Safe),
-        setting("toast_top_right", "Toast: Top Right", "Show toast notifications at the top right", C::UiLayout, T::ToastPosition(crate::config::ToastPosition::TopRight), &["toast", "notification", "position"], D::Safe),
-        setting("toast_top_center", "Toast: Top Center", "Show toast notifications at the top center", C::UiLayout, T::ToastPosition(crate::config::ToastPosition::TopCenter), &["toast", "notification", "position"], D::Safe),
-        setting("toast_top_left", "Toast: Top Left", "Show toast notifications at the top left", C::UiLayout, T::ToastPosition(crate::config::ToastPosition::TopLeft), &["toast", "notification", "position"], D::Safe),
-        setting("toast_center", "Toast: Center", "Show toast notifications in the center", C::UiLayout, T::ToastPosition(crate::config::ToastPosition::Center), &["toast", "notification", "position"], D::Safe),
-        setting("toast_off", "Toast: Off", "Disable toast notifications", C::UiLayout, T::ToastPosition(crate::config::ToastPosition::Off), &["toast", "notification", "position"], D::Safe),
-        setting("web_search", "Web Search", "Enable web search for prompts", C::ChatBehavior, T::Bool { enabled: false }, &["search", "prompt"], D::Safe),
-        setting("collapse_thinking", "Collapse Thinking", "Fold assistant thinking by default", C::ChatBehavior, T::Bool { enabled: true }, &["reasoning", "fold"], D::Safe),
+        subsection("theme", "Theme", "Choose the color system used across chat, panels, selections, and status indicators.", C::Theme),
+        subsection("ui_layout", "UI Layout", "Control where transient interface elements appear in the terminal workspace.", C::UiLayout),
+        subsection("chat_behavior", "Chat Behavior", "Set defaults for prompt tools and how model output is presented.", C::ChatBehavior),
+        setting("command_new_chat", "New Chat", "Start a new conversation in the current workspace.", C::Commands, T::Command("new_chat"), &["command", "conversation"], D::Safe),
+        setting("command_close_chat", "Close Chat", "Close the active conversation tab.", C::Commands, T::Command("close_chat"), &["command", "conversation", "tab"], D::Safe),
+        setting("command_toggle_sidebar", "Toggle Sidebar", "Show or hide the conversation sidebar.", C::Commands, T::Command("toggle_sidebar"), &["command", "panel"], D::Safe),
+        setting("command_toggle_artifact_sidebar", "Toggle Artifact Sidebar", "Show or hide the artifact sidebar.", C::Commands, T::Command("toggle_artifact_sidebar"), &["command", "panel", "artifact"], D::Safe),
+        setting("command_refresh_models", "Refresh Models", "Refresh the available model catalog for configured providers.", C::Commands, T::Command("refresh_models"), &["command", "provider", "models"], D::Safe),
+        setting("command_export_conversation", "Export Conversation", "Export the active conversation to a file.", C::Commands, T::Command("export_conversation"), &["command", "save"], D::Safe),
+        setting("command_show_skills", "Show Skills", "Browse the skills available to the active agent.", C::Commands, T::Command("show_skills"), &["command", "agent"], D::Safe),
+        setting("command_show_mcp", "Show MCP", "Browse configured MCP servers and tools.", C::Commands, T::Command("show_mcp"), &["command", "tools"], D::Safe),
+        setting("command_show_help", "Help", "Open TCUI keyboard and workflow help.", C::Commands, T::Command("show_help"), &["command", "help"], D::Safe),
+        setting("command_show_keybinds", "Keybindings", "Show the current keyboard shortcuts.", C::Commands, T::Command("show_keybinds"), &["command", "keys", "shortcuts"], D::Safe),
+        setting("command_focus_input", "Focus Input", "Return focus to the chat composer.", C::Commands, T::Command("focus_input"), &["command", "prompt"], D::Safe),
+        setting("command_quit", "Quit", "Close TCUI, requesting confirmation when configured.", C::Commands, T::Command("quit"), &["command", "exit"], D::Warning),
+        setting("theme_system", "System", "Follow the terminal's default foreground, background, and ANSI colors.", C::Theme, T::Theme("system"), &["theme", "default"], D::Safe),
+        setting("theme_gruvbox_dark_low_contrast", "Gruvbox Dark Low Contrast", "Use a warm, muted Gruvbox palette designed for softer contrast during long sessions.", C::Theme, T::Theme("gruvbox-dark-low-contrast"), &["theme", "color", "gruvbox", "low", "contrast"], D::Safe),
+        setting("theme_gruvbox_dark_high_contrast", "Gruvbox Dark High Contrast", "Use a warm Gruvbox palette with stronger separation between text and surfaces.", C::Theme, T::Theme("gruvbox-dark-high-contrast"), &["theme", "color", "gruvbox", "high", "contrast"], D::Safe),
+        setting("theme_nord", "Nord", "Use cool arctic blues with restrained contrast and calm neutral surfaces.", C::Theme, T::Theme("nord"), &["theme", "color"], D::Safe),
+        setting("theme_dracula", "Dracula", "Use deep purple surfaces with bright, high-saturation syntax-inspired accents.", C::Theme, T::Theme("dracula"), &["theme", "color"], D::Safe),
+        setting("theme_github", "GitHub", "Use the familiar GitHub dark palette with crisp neutral surfaces and blue accents.", C::Theme, T::Theme("github"), &["theme", "color"], D::Safe),
+        setting("theme_kanagawa", "Kanagawa", "Use a Japanese ink-inspired palette with muted earth tones and cool accents.", C::Theme, T::Theme("kanagawa"), &["theme", "color"], D::Safe),
+        setting("theme_catppuccin", "Catppuccin", "Use a soft pastel palette balanced against dark, low-glare surfaces.", C::Theme, T::Theme("catppuccin"), &["theme", "color"], D::Safe),
+        setting("theme_material", "Material", "Use Material-inspired dark surfaces with clear, familiar accent colors.", C::Theme, T::Theme("material"), &["theme", "color"], D::Safe),
+        setting("theme_matrix", "Matrix", "Use a monochromatic green terminal palette with strong retro contrast.", C::Theme, T::Theme("matrix"), &["theme", "color"], D::Safe),
+        setting("theme_monokai", "Monokai", "Use a classic dark editor palette with vivid green, pink, and yellow accents.", C::Theme, T::Theme("monokai"), &["theme", "color"], D::Safe),
+        setting("theme_zenburn", "Zenburn", "Use subdued green and earth tones tuned for low-glare reading.", C::Theme, T::Theme("zenburn"), &["theme", "color"], D::Safe),
+        setting("theme_solarized", "Solarized", "Use the precision-balanced Solarized dark palette with blue and cyan accents.", C::Theme, T::Theme("solarized"), &["theme", "color"], D::Safe),
+        setting("theme_tokyo_night", "Tokyo Night", "Use cool night-sky surfaces with luminous blue and violet accents.", C::Theme, T::Theme("tokyo-night"), &["theme", "color"], D::Safe),
+        setting("theme_opencode", "OpenCode", "Use an OpenCode-inspired dark palette with restrained cyan and violet accents.", C::Theme, T::Theme("opencode"), &["theme", "color"], D::Safe),
+        setting("toast_top_right", "Toast: Top Right", "Place transient notifications in the upper-right corner of the workspace.", C::UiLayout, T::ToastPosition(crate::config::ToastPosition::TopRight), &["toast", "notification", "position"], D::Safe),
+        setting("toast_top_center", "Toast: Top Center", "Center transient notifications along the top edge of the workspace.", C::UiLayout, T::ToastPosition(crate::config::ToastPosition::TopCenter), &["toast", "notification", "position"], D::Safe),
+        setting("toast_top_left", "Toast: Top Left", "Place transient notifications in the upper-left corner of the workspace.", C::UiLayout, T::ToastPosition(crate::config::ToastPosition::TopLeft), &["toast", "notification", "position"], D::Safe),
+        setting("toast_center", "Toast: Center", "Display transient notifications in the center of the workspace for maximum visibility.", C::UiLayout, T::ToastPosition(crate::config::ToastPosition::Center), &["toast", "notification", "position"], D::Safe),
+        setting("toast_off", "Toast: Off", "Hide transient toast notifications while keeping status information in the interface.", C::UiLayout, T::ToastPosition(crate::config::ToastPosition::Off), &["toast", "notification", "position"], D::Safe),
+        setting("web_search", "Web Search", "Allow prompts to retrieve current web results when the configured provider supports it.", C::ChatBehavior, T::Bool { enabled: false }, &["search", "prompt"], D::Safe),
+        setting("collapse_thinking", "Collapse Thinking", "Fold assistant reasoning sections by default so answers remain compact and scannable.", C::ChatBehavior, T::Bool { enabled: true }, &["reasoning", "fold"], D::Safe),
     ]
 }
 
@@ -743,6 +912,7 @@ fn keybind(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
     fn all_settings_has_expected_stub_and_setting_counts() {
@@ -752,9 +922,9 @@ mod tests {
             .filter(|setting| setting.setting_type == SettingType::Subsection)
             .count();
 
-        assert_eq!(settings.len(), 25);
+        assert_eq!(settings.len(), 37);
         assert_eq!(subsections, 3);
-        assert_eq!(SettingCategory::ALL.len(), 12);
+        assert_eq!(SettingCategory::ALL.len(), 13);
     }
 
     #[test]
@@ -764,7 +934,39 @@ mod tests {
 
         let results = panel.results(&settings);
 
-        assert_eq!(results.len(), 25);
+        assert_eq!(results.len(), 37);
+    }
+
+    #[test]
+    fn root_results_mix_commands_settings_and_submenus() {
+        let settings = all_settings();
+        let panel = SettingsPanelState::new();
+        let results = panel.results(&settings);
+
+        assert!(results
+            .iter()
+            .any(|(_, setting)| matches!(setting.setting_type, SettingType::Command(_))));
+        assert!(results
+            .iter()
+            .any(|(_, setting)| setting.setting_type == SettingType::Subsection));
+        assert!(results
+            .iter()
+            .any(|(_, setting)| matches!(setting.setting_type, SettingType::Bool { .. })));
+    }
+
+    #[test]
+    fn entering_command_returns_action_without_opening_another_panel() {
+        let settings = all_settings();
+        let mut panel = SettingsPanelState::new();
+        let command_index = panel
+            .results(&settings)
+            .iter()
+            .position(|(_, setting)| setting.id == "command_new_chat")
+            .expect("new chat command");
+        panel.select(command_index, &settings);
+
+        assert_eq!(panel.enter(&settings), EnterResult::RunCommand("new_chat"));
+        assert_eq!(panel.current_category(), None);
     }
 
     #[test]
@@ -829,5 +1031,83 @@ mod tests {
         assert!(!panel.esc());
         assert_eq!(panel.current_category(), None);
         assert!(panel.esc());
+    }
+
+    #[test]
+    fn descriptions_start_hidden_and_toggle_visible() {
+        let mut panel = SettingsPanelState::new();
+
+        assert!(!panel.descriptions_visible());
+
+        panel.toggle_descriptions();
+
+        assert!(panel.descriptions_visible());
+    }
+
+    #[test]
+    fn description_layout_keeps_settings_narrow_and_centers_combined_panes() {
+        let area = Rect::new(0, 0, 100, 40);
+        let mut panel = SettingsPanelState::new();
+        let compact = panel.panel_layout(area);
+
+        panel.toggle_descriptions();
+        let expanded = panel.panel_layout(area);
+        let description = expanded.description.expect("description pane");
+
+        assert_eq!(compact.settings.width, 42);
+        assert_eq!(expanded.settings.width, compact.settings.width);
+        assert_eq!(expanded.settings.width * 2, description.width * 3);
+        assert_eq!(description.x - expanded.settings.right(), 1);
+        assert!(
+            expanded
+                .outer
+                .x
+                .abs_diff(area.width - expanded.outer.right())
+                <= 1
+        );
+    }
+
+    #[test]
+    fn compact_layout_preserves_palette_title_at_minimum_width() {
+        let area = Rect::new(0, 0, 64, 16);
+        let panel = SettingsPanelState::new();
+        let mut terminal =
+            Terminal::new(TestBackend::new(area.width, area.height)).expect("test terminal");
+
+        terminal
+            .draw(|frame| panel.render(frame, area))
+            .expect("render settings panel");
+
+        assert_eq!(panel.panel_layout(area).settings.width, 33);
+        assert!(terminal
+            .backend()
+            .to_string()
+            .contains("Command Palette [Tab] Details"));
+    }
+
+    #[test]
+    fn rendered_description_pane_shows_selected_setting_copy() {
+        let area = Rect::new(0, 0, 100, 40);
+        let mut panel = SettingsPanelState::new();
+        panel.toggle_descriptions();
+        let description = panel
+            .panel_layout(area)
+            .description
+            .expect("description pane");
+        let mut terminal =
+            Terminal::new(TestBackend::new(area.width, area.height)).expect("test terminal");
+
+        terminal
+            .draw(|frame| panel.render(frame, area))
+            .expect("render settings panel");
+
+        let buffer = terminal.backend().buffer();
+        let rendered = (description.y..description.bottom())
+            .flat_map(|y| {
+                (description.x..description.right()).map(move |x| buffer[(x, y)].symbol())
+            })
+            .collect::<String>();
+        assert!(rendered.contains("Description"));
+        assert!(rendered.contains("Choose the color system"));
     }
 }
