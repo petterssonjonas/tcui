@@ -131,9 +131,9 @@ pub struct UI {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseAction {
-    AppTabSelect(usize),
+    AppTabSelect(app_tabs::AppTabId),
     AppTabAdd,
-    AppTabClose(usize),
+    AppTabClose(app_tabs::AppTabId),
     Sidebar(sidebar::SidebarAction),
     PaletteItem(usize),
     LeftHandle,
@@ -371,15 +371,15 @@ impl UI {
         self.mouse_hit_areas
             .extend(top_bar.hit_areas(top_bar_area).into_iter().map(|hit| {
                 let action = match hit.action {
-                    top_bar::TopBarAction::Select(index) => MouseAction::AppTabSelect(index),
+                    top_bar::TopBarAction::Select(id) => MouseAction::AppTabSelect(id),
                     top_bar::TopBarAction::Add => MouseAction::AppTabAdd,
-                    top_bar::TopBarAction::Close(index) => MouseAction::AppTabClose(index),
+                    top_bar::TopBarAction::Close(id) => MouseAction::AppTabClose(id),
                 };
                 (hit.area, action)
             }));
 
         if !self.app_tabs.active_view().is_chat() {
-            launcher::render(
+            let _ = launcher::render(
                 f,
                 Rect::new(
                     area.x,
@@ -1046,21 +1046,25 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_tab_uses_full_launcher_without_chat_chrome() {
+    fn app_tab_id_launcher_uses_full_screen_without_chat_chrome() {
         let mut ui = UI::new();
         ui.sidebar_open = true;
         ui.artifact_sidebar_open = true;
-        ui.app_tabs.add_placeholder();
+        ui.app_tabs.add_launcher();
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
 
         terminal.draw(|frame| ui.render(frame)).expect("render ui");
 
         let screen = terminal.backend().to_string();
-        assert!(screen.contains("Tab 1"));
+        assert!(screen.contains("Launcher"));
         assert!(screen.contains("Obsidian"));
         assert!(screen.contains("Memory management"));
         assert!(screen.contains("Pomodoro"));
         assert!(!screen.contains("[New Chat]"));
+        assert_eq!(
+            terminal.backend().buffer()[(0, 1)].bg,
+            crate::theme::active_theme().background
+        );
         assert!(ui.chat_area.is_none());
         assert!(ui.status_bar_areas.is_none());
         assert!(!ui.mouse_hit_areas.iter().any(|(_, action)| matches!(
