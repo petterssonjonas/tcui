@@ -1,9 +1,13 @@
 #![allow(dead_code)]
 use color_eyre::Result;
 use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::config::vault_profiles::{VaultProfile, VaultProfileId};
 use crate::config::{McpServerConfig, WebSearchConfig};
+
+mod persistence;
 
 pub const LOCAL_PROVIDER_NAME: &str = "Local Inference";
 
@@ -266,7 +270,15 @@ pub struct AppConfig {
     pub disabled_models: Vec<String>,
     pub key_file: Option<String>,
     pub image_protocol: String,
+    pub vaults: HashMap<VaultProfileId, VaultProfile>,
+    pub default_vault_id: Option<VaultProfileId>,
+    pub saved_files_dir: Option<String>,
+    pub show_saved_files: bool,
+    pub show_memories: bool,
+    pub show_markdown_vault: bool,
+    #[serde(skip)]
     pub vault_path: Option<String>,
+    #[serde(skip)]
     pub artifact_save_dir: Option<String>,
     pub notifications: NotificationConfig,
     pub local_inference: LocalInferenceConfig,
@@ -304,35 +316,11 @@ pub struct ProviderConfig {
 
 impl AppConfig {
     pub fn load() -> Result<Self> {
-        if let Some(path) = Self::xdg_config_path()?.filter(|path| path.exists()) {
-            let content = std::fs::read_to_string(&path)?;
-            let config = Self::load_toml(&path)?;
-            Self::rewrite_if_migrated(&path, &content, &config)?;
-            Self::bootstrap_xdg_layout(&config)?;
-            return Ok(config);
-        }
-        if let Some(path) = Self::legacy_json_path()?.filter(|path| path.exists()) {
-            let content = std::fs::read_to_string(&path)?;
-            let config: AppConfig = serde_json::from_str(&content)?;
-            config.save()?;
-            Self::bootstrap_xdg_layout(&config)?;
-            return Ok(config);
-        }
-        let config = Self::default();
-        Self::bootstrap_xdg_layout(&config)?;
-        Ok(config)
+        persistence::load()
     }
 
     pub fn save(&self) -> Result<()> {
-        let config_path = Self::write_path()?;
-        if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        } else {
-            return Ok(());
-        }
-        let content = toml::to_string_pretty(self)?;
-        std::fs::write(config_path, content)?;
-        Ok(())
+        persistence::save(self)
     }
 
     pub fn provider_entries(&self) -> Vec<(String, String, String, String, String)> {
@@ -354,64 +342,6 @@ impl AppConfig {
         self.providers.iter().find(|provider| {
             provider.name == provider_name || provider.name.eq_ignore_ascii_case(provider_name)
         })
-    }
-
-    fn load_toml(path: &PathBuf) -> Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        Ok(toml::from_str(&content)?)
-    }
-
-    fn write_path() -> Result<PathBuf> {
-        Ok(Self::xdg_config_path()?.unwrap_or_else(|| PathBuf::from(".").join("config.toml")))
-    }
-
-    fn xdg_config_path() -> Result<Option<PathBuf>> {
-        let dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-        Ok(Some(dir.join("tcui").join("config.toml")))
-    }
-
-    fn legacy_json_path() -> Result<Option<PathBuf>> {
-        let dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-        Ok(Some(dir.join("tcui").join("config.json")))
-    }
-
-    fn xdg_config_root() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("tcui")
-    }
-
-    fn xdg_data_root() -> PathBuf {
-        dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("tcui")
-    }
-
-    fn bootstrap_xdg_layout(config: &Self) -> Result<()> {
-        let config_root = Self::xdg_config_root();
-        std::fs::create_dir_all(&config_root)?;
-        for dir in ["skills", "souls", "themes", "mcp"] {
-            std::fs::create_dir_all(config_root.join(dir))?;
-        }
-
-        if let Some(config_path) = Self::xdg_config_path()? {
-            if !config_path.exists() {
-                std::fs::write(&config_path, toml::to_string_pretty(config)?)?;
-            }
-        }
-
-        std::fs::create_dir_all(Self::xdg_data_root())?;
-        crate::config::key_store::KeyStore::save_keys(config, &[])?;
-        Ok(())
-    }
-
-    fn rewrite_if_migrated(path: &PathBuf, original: &str, config: &Self) -> Result<()> {
-        let original_value: toml::Value = toml::from_str(original)?;
-        let rewritten_value: toml::Value = toml::from_str(&toml::to_string_pretty(config)?)?;
-        if original_value != rewritten_value {
-            std::fs::write(path, toml::to_string_pretty(config)?)?;
-        }
-        Ok(())
     }
 }
 
@@ -436,6 +366,12 @@ impl Default for AppConfig {
             disabled_models: Vec::new(),
             key_file: None,
             image_protocol: "auto".to_string(),
+            vaults: HashMap::new(),
+            default_vault_id: None,
+            saved_files_dir: Some(default_artifact_save_dir()),
+            show_saved_files: true,
+            show_memories: true,
+            show_markdown_vault: true,
             vault_path: None,
             artifact_save_dir: Some(default_artifact_save_dir()),
             notifications: NotificationConfig::default(),
@@ -757,3 +693,6 @@ kitty_text_max_scale = 1
         assert!(config.provider_config("nonexistent").is_none());
     }
 }
+
+#[cfg(test)]
+mod vault_config_migration;
