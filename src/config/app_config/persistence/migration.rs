@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use color_eyre::eyre::Result;
@@ -73,7 +74,7 @@ fn migrate_legacy_vault(
 
     let hash = blake3::hash(path.as_bytes()).to_hex().to_string();
     let id = VaultProfileId::from_str(&hash[..32])?;
-    let profile = VaultProfile::from_persisted(id.clone(), "Default", path)?;
+    let profile = VaultProfile::from_persisted(id.clone(), "Default", expand_tilde(path))?;
     let mut vaults = Map::new();
     vaults.insert(id.to_string(), serde_json::to_value(profile)?);
     object.insert("vaults".to_string(), Value::Object(vaults));
@@ -82,6 +83,18 @@ fn migrate_legacy_vault(
         Value::String(id.to_string()),
     );
     Ok(())
+}
+
+fn expand_tilde(path: &str) -> PathBuf {
+    if path == "~" {
+        dirs::home_dir().unwrap_or_else(|| PathBuf::from(path))
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        dirs::home_dir()
+            .map(|home| home.join(rest))
+            .unwrap_or_else(|| PathBuf::from(path))
+    } else {
+        PathBuf::from(path)
+    }
 }
 
 fn add_default_vault_fallback(object: &mut Map<String, Value>) {
