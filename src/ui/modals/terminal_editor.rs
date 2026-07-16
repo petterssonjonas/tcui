@@ -273,3 +273,7 @@ fn initial_pty_size(area: Rect) -> PtySize {
 #[cfg(test)]
 #[path = "terminal_editor_tests.rs"]
 mod terminal_editor_core;
+
+#[cfg(test)]
+#[path = "terminal_editor/terminal_editor_test_support.rs"]
+pub(crate) mod terminal_editor_test_support;

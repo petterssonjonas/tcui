@@ -12,6 +12,7 @@ pub mod artifact_sidebar;
 pub mod chat_tab;
 pub mod components;
 pub mod launcher;
+pub mod markdown_vault_workspace;
 pub mod modals;
 pub mod session_list;
 pub mod sidebar;
@@ -22,6 +23,10 @@ pub mod top_bar;
 
 #[cfg(test)]
 mod toast_tests;
+
+#[cfg(test)]
+#[path = "markdown_vault_workspace_tests.rs"]
+mod markdown_vault_workspace_lifecycle;
 
 use crate::config::app_config::{HeadingDownscale, MarkdownMode, TextAlignment};
 use crate::tui::components::centered_rect;
@@ -78,6 +83,7 @@ pub struct UI {
     pub tabs: Vec<ChatTabState>,
     pub active_tab: usize,
     pub app_tabs: app_tabs::AppTabs,
+    pub markdown_vault_workspaces: markdown_vault_workspace::MarkdownVaultWorkspaceRegistry,
     pub panel_state: crate::tui::shell::PanelState,
     pub sidebar_open: bool,
     pub artifact_sidebar_open: bool,
@@ -280,6 +286,8 @@ impl UI {
             }],
             active_tab: 0,
             app_tabs: app_tabs::AppTabs::default(),
+            markdown_vault_workspaces:
+                markdown_vault_workspace::MarkdownVaultWorkspaceRegistry::default(),
             panel_state: crate::tui::shell::PanelState::new(),
             sidebar_open: false,
             artifact_sidebar_open: false,

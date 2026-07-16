@@ -43,6 +43,11 @@ impl TuiApp {
 
             tokio::select! {
                 _ = tick.tick() => {
+                    let active_app_tab_id = self.ui.app_tabs.active_id();
+                    let _ = self
+                        .ui
+                        .markdown_vault_workspaces
+                        .poll_editor(active_app_tab_id);
                     if let Some(editor) = self.ui.editor_popup.as_mut() {
                         let done = editor.poll_output();
                         if done {

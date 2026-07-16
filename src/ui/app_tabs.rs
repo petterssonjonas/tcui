@@ -83,6 +83,17 @@ pub enum CloseTabResult {
     Unknown { id: AppTabId },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RebindMarkdownVaultError {
+    Unknown(AppTabId),
+    NotMarkdownVault(AppTabId),
+    ProfileMismatch {
+        id: AppTabId,
+        expected: VaultProfileId,
+        actual: VaultProfileId,
+    },
+}
+
 #[doc(hidden)]
 pub enum AppTabSelection {
     Id(AppTabId),
@@ -227,6 +238,29 @@ impl AppTabs {
             id,
             active: self.active,
         }
+    }
+
+    pub fn rebind_markdown_vault(
+        &mut self,
+        id: AppTabId,
+        expected: &VaultProfileId,
+        replacement: &VaultProfileId,
+    ) -> Result<(), RebindMarkdownVaultError> {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else {
+            return Err(RebindMarkdownVaultError::Unknown(id));
+        };
+        let AppView::MarkdownVault { profile_id } = &mut tab.view else {
+            return Err(RebindMarkdownVaultError::NotMarkdownVault(id));
+        };
+        if profile_id != expected {
+            return Err(RebindMarkdownVaultError::ProfileMismatch {
+                id,
+                expected: expected.clone(),
+                actual: profile_id.clone(),
+            });
+        }
+        profile_id.clone_from(replacement);
+        Ok(())
     }
 
     #[doc(hidden)]

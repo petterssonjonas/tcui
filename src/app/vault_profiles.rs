@@ -6,7 +6,7 @@ use crossterm::event::KeyEvent;
 use super::TuiApp;
 use crate::config::vault_profiles::{VaultCatalog, VaultProfileId};
 use crate::tui::vault_profile_ui::{
-    activate_profile, launcher_entry, LauncherEntry, PendingVaultAction, VaultProfileManagerState,
+    launcher_entry, LauncherEntry, PendingVaultAction, VaultProfileManagerState,
     VaultProfileUiCommand, VaultProfileUiError,
 };
 use crate::ui::app_tabs::{AppTabId, AppView};
@@ -141,14 +141,26 @@ impl TuiApp {
                 launcher_id,
                 profile_id,
             } => {
-                if let Err(error) = activate_profile(&mut self.ui.app_tabs, launcher_id, profile_id)
-                {
+                let catalog = self.vault_catalog();
+                if let Err(error) = self.ui.markdown_vault_workspaces.activate(
+                    &mut self.ui.app_tabs,
+                    &catalog,
+                    launcher_id,
+                    &profile_id,
+                ) {
                     self.ui.show_toast(error.to_string());
                 }
                 self.ui.focus = crate::tui::focus::Focus::Chat;
             }
             PendingVaultAction::CloseTab { tab_id } => {
-                let _ = self.ui.app_tabs.close(tab_id);
+                if self.ui.markdown_vault_workspaces.get(tab_id).is_some() {
+                    let _ = self
+                        .ui
+                        .markdown_vault_workspaces
+                        .close(&mut self.ui.app_tabs, tab_id);
+                } else {
+                    let _ = self.ui.app_tabs.close(tab_id);
+                }
                 self.ui.focus = crate::tui::focus::Focus::Chat;
             }
         }
