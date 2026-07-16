@@ -67,7 +67,7 @@ fn load_fills_missing_xdg_fields_without_clobbering_existing_values() {
     );
     let xdg_content = std::fs::read_to_string(&xdg_path).expect("read xdg config");
     assert!(xdg_content.contains("theme = \"solarized-dark\""));
-    assert!(xdg_content.contains("artifact_save_dir ="));
+    assert!(xdg_content.contains("saved_files_dir ="));
     assert!(!root.join("config.toml").exists());
 
     std::env::set_current_dir(original_dir).expect("restore current dir");
