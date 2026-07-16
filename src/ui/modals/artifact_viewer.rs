@@ -2,10 +2,16 @@ use ratatui::{prelude::*, widgets::*, Frame};
 
 use crate::config::app_config::{HeadingDownscale, MarkdownMode};
 use crate::ui::artifact_sidebar::{ArtifactEntry, ArtifactHandle, ArtifactKind};
-use crate::ui::components::{
-    image_block::ImageBlockState, markdown::MarkdownRenderer,
-    terminal_capabilities::TerminalCapabilities,
+use crate::ui::components::terminal_capabilities::TerminalCapabilities;
+
+use self::document_viewer::{
+    DocumentKind, DocumentSource, DocumentViewerCapabilities, DocumentViewerProps,
+    DocumentViewerState,
 };
+
+pub mod document_viewer {
+    include!("document_viewer.rs");
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactViewerHitAreas {
@@ -20,7 +26,7 @@ pub struct ArtifactViewerState {
     pub scroll: usize,
     pub view_only: bool,
     pub hit_areas: ArtifactViewerHitAreas,
-    image_state: Option<ImageBlockState>,
+    document: DocumentViewerState,
 }
 
 pub struct ArtifactViewerProps<'a> {
@@ -33,12 +39,25 @@ pub struct ArtifactViewerProps<'a> {
 
 impl ArtifactViewerState {
     pub fn new(artifact: ArtifactEntry) -> Self {
+        let document_kind = match artifact.kind {
+            ArtifactKind::Markdown => DocumentKind::Markdown,
+            ArtifactKind::Text => {
+                DocumentKind::infer(artifact.path.as_deref(), artifact.content.as_deref())
+            }
+            ArtifactKind::Image => DocumentKind::Image,
+            ArtifactKind::Video | ArtifactKind::Audio | ArtifactKind::Binary => DocumentKind::Text,
+        };
+        let document = DocumentViewerState::new(DocumentSource::new(
+            document_kind,
+            artifact.content.clone(),
+            artifact.path.clone(),
+        ));
         Self {
             artifact,
             scroll: 0,
             view_only: false,
             hit_areas: ArtifactViewerHitAreas::default(),
-            image_state: None,
+            document,
         }
     }
 
@@ -47,9 +66,9 @@ impl ArtifactViewerState {
     }
 
     pub fn clamp_scroll(&mut self, line_count: usize, viewport_height: usize) {
-        self.scroll = self
-            .scroll
-            .min(line_count.saturating_sub(viewport_height.max(1)));
+        self.document.scroll = self.scroll;
+        self.document.clamp_scroll(line_count, viewport_height);
+        self.scroll = self.document.scroll;
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect, props: ArtifactViewerProps<'_>) {
@@ -93,103 +112,42 @@ impl ArtifactViewerState {
             close,
         );
 
-        let content_layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(1)])
-            .split(inner);
-        let content_area = content_layout[0];
-        let button_area = content_layout[1];
-
-        let mut edit = None;
-        let mut delete = None;
-
-        match self.artifact.kind {
-            ArtifactKind::Image => {
-                self.scroll = 0;
-                if self.image_state.is_none() {
-                    if let Some(path) = self.artifact.path.as_ref().and_then(|path| path.to_str()) {
-                        self.image_state = ImageBlockState::from_source(
-                            path,
-                            props.image_protocol,
-                            props.terminal_capabilities,
-                        );
-                    }
-                }
-                if let Some(state) = &mut self.image_state {
-                    state.render(f, content_area);
-                } else {
-                    f.render_widget(
-                        Paragraph::new("Image preview unavailable")
-                            .alignment(Alignment::Center)
-                            .style(Style::default().fg(Color::DarkGray)),
-                        content_area,
-                    );
-                }
-            }
-            _ => {
-                let file_content = self
-                    .artifact
-                    .path
-                    .as_ref()
-                    .and_then(|path| std::fs::read_to_string(path).ok());
-                let content = self
-                    .artifact
-                    .content
-                    .as_deref()
-                    .or(file_content.as_deref())
-                    .unwrap_or("Preview unavailable");
-                let rendered = MarkdownRenderer::new(props.terminal_capabilities).render(
-                    content,
-                    props.markdown_mode,
-                    content_area.width.saturating_sub(2) as usize,
-                    false,
-                    props.kitty_heading_downscale,
-                    !props.image_protocol.eq_ignore_ascii_case("off"),
-                );
-                self.clamp_scroll(rendered.lines.len(), usize::from(content_area.height));
-                f.render_widget(
-                    Paragraph::new(rendered.lines)
-                        .wrap(Wrap { trim: false })
-                        .scroll((self.scroll as u16, 0)),
-                    content_area,
-                );
-            }
-        }
-
-        if button_area.height > 0 && !self.view_only {
-            let theme = crate::theme::active_theme();
-            let mut x = button_area.right().saturating_sub(1);
-            let y = button_area.y;
-
-            if self.artifact.path.is_some() {
-                let label = "[Edit]";
-                let width = label.len() as u16;
-                x = x.saturating_sub(width);
-                let rect = Rect::new(x, y, width, 1);
-                f.render_widget(
-                    Paragraph::new(label).style(Style::default().fg(theme.warning)),
-                    rect,
-                );
-                edit = Some(rect);
-                x = x.saturating_sub(1);
-            }
-
-            let label = "[Del]";
-            let width = label.len() as u16;
-            x = x.saturating_sub(width);
-            let del_rect = Rect::new(x, y, width, 1);
-            f.render_widget(
-                Paragraph::new(label).style(Style::default().fg(theme.error)),
-                del_rect,
-            );
-            delete = Some(del_rect);
-        }
+        let document_area = if self.view_only {
+            Rect::new(
+                inner.x,
+                inner.y,
+                inner.width,
+                inner.height.saturating_sub(1),
+            )
+        } else {
+            inner
+        };
+        self.document.scroll = self.scroll;
+        self.document.render(
+            f,
+            document_area,
+            DocumentViewerProps {
+                markdown_mode: props.markdown_mode,
+                kitty_enhanced_text: false,
+                kitty_heading_downscale: props.kitty_heading_downscale,
+                image_protocol: props.image_protocol,
+                terminal_capabilities: props.terminal_capabilities,
+            },
+            DocumentViewerCapabilities {
+                close: false,
+                edit: !self.view_only && self.artifact.path.is_some(),
+                save: false,
+                delete: !self.view_only,
+                insert_to_chat: false,
+            },
+        );
+        self.scroll = self.document.scroll;
 
         self.hit_areas = ArtifactViewerHitAreas {
             close: Some(close),
-            edit,
-            save: None,
-            delete,
+            edit: self.document.hit_areas.edit,
+            save: self.document.hit_areas.save,
+            delete: self.document.hit_areas.delete,
         };
     }
 }
@@ -211,17 +169,6 @@ pub fn popup_area(area: Rect) -> Rect {
             Constraint::Percentage(10),
         ])
         .split(popup_layout[1])[1]
-}
-
-fn kind_label(kind: ArtifactKind) -> &'static str {
-    match kind {
-        ArtifactKind::Markdown => "md",
-        ArtifactKind::Text => "text",
-        ArtifactKind::Image => "image",
-        ArtifactKind::Video => "video",
-        ArtifactKind::Audio => "audio",
-        ArtifactKind::Binary => "binary",
-    }
 }
 
 #[cfg(test)]
