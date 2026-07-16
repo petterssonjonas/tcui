@@ -627,23 +627,25 @@ fn maybe_fail(_point: FailurePoint) -> Result<(), VaultWriteError> {
 }
 
 #[cfg(test)]
-static FAILURE_POINT: std::sync::Mutex<Option<FailurePoint>> = std::sync::Mutex::new(None);
+std::thread_local! {
+    static FAILURE_POINT: std::cell::RefCell<Option<FailurePoint>> = const { std::cell::RefCell::new(None) };
+}
 
 #[cfg(test)]
 fn maybe_fail(point: FailurePoint) -> Result<(), VaultWriteError> {
-    let mut configured = FAILURE_POINT
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    let fails = configured.as_ref().is_some_and(|configured| {
-        std::mem::discriminant(configured) == std::mem::discriminant(&point)
-    });
-    if fails {
-        *configured = None;
-        return Err(VaultWriteError::InjectedFailure {
-            operation: point.label(),
-        });
-    }
-    Ok(())
+    FAILURE_POINT.with(|configured| {
+        let mut configured = configured.borrow_mut();
+        let fails = configured
+            .as_ref()
+            .is_some_and(|configured| std::mem::discriminant(configured) == std::mem::discriminant(&point));
+        if fails {
+            *configured = None;
+            return Err(VaultWriteError::InjectedFailure {
+                operation: point.label(),
+            });
+        }
+        Ok(())
+    })
 }
 
 impl FailurePoint {
@@ -691,9 +693,7 @@ fn inject_failure(point: TestFailurePoint) {
         TestFailurePoint::Rename => FailurePoint::Rename,
         TestFailurePoint::ParentSync => FailurePoint::ParentSync,
     };
-    *FAILURE_POINT
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner()) = Some(point);
+    FAILURE_POINT.with(|configured| *configured.borrow_mut() = Some(point));
 }
 
 #[cfg(test)]
