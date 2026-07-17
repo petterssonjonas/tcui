@@ -854,6 +854,12 @@ impl TuiApp {
         down: bool,
     ) {
         let pos = ratatui::layout::Position::new(col, row);
+        if let (Some(manager), Some(area)) =
+            (self.ui.vault_profile_manager.as_mut(), self.ui.last_area)
+        {
+            manager.handle_mouse_scroll(pos, area, down);
+            return;
+        }
         if let Some(popup) = &mut self.ui.list_popup {
             let visible_rows = self
                 .ui
@@ -1021,7 +1027,12 @@ impl TuiApp {
             return None;
         }
 
-        if self.ui.vault_profile_manager.is_some() || self.ui.pending_vault_action.is_some() {
+        if self.ui.vault_profile_manager.is_some() {
+            self.handle_vault_profile_mouse_click(pos, area);
+            return None;
+        }
+
+        if self.ui.pending_vault_action.is_some() {
             return None;
         }
 

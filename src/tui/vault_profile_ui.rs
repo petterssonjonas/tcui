@@ -3,6 +3,7 @@ mod form_interaction;
 mod interaction;
 mod launcher_flow;
 mod manager;
+mod mouse_interaction;
 mod mutations;
 mod render;
 

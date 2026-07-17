@@ -158,7 +158,7 @@ impl VaultProfileManagerState {
     }
 }
 
-fn popup_area(area: Rect) -> Rect {
+pub(super) fn popup_area(area: Rect) -> Rect {
     let width = area.width.min(72);
     let height = area.height.min(24);
     Rect::new(

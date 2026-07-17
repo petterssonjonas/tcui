@@ -5,6 +5,7 @@ use std::sync::Mutex;
 mod chat_file_sidebar;
 mod insert_to_chat;
 mod markdown_vault_workspace_ui;
+mod vault_profile_picker_mouse;
 
 fn env_lock() -> &'static Mutex<()> {
     crate::test_support::env_lock()

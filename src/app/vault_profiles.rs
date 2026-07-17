@@ -63,6 +63,22 @@ impl TuiApp {
         }
     }
 
+    pub(crate) fn handle_vault_profile_mouse_click(
+        &mut self,
+        position: ratatui::layout::Position,
+        area: ratatui::layout::Rect,
+    ) {
+        let Some(mut manager) = self.ui.vault_profile_manager.take() else {
+            return;
+        };
+        let bound = self.bound_vault_profiles();
+        let command = manager.handle_mouse_click(position, area, &bound);
+        let keep_open = self.apply_vault_profile_command(&mut manager, command);
+        if keep_open {
+            self.ui.vault_profile_manager = Some(manager);
+        }
+    }
+
     pub(crate) fn request_app_tab_close(&mut self, tab_id: AppTabId) {
         let _ = self.request_vault_action(PendingVaultAction::CloseTab { tab_id });
     }

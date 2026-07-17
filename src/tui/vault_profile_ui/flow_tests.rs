@@ -1,5 +1,8 @@
 #![cfg(test)]
 
+use std::collections::HashSet;
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, layout::Rect, Terminal};
 
 use super::{add_profile, TestDir};
@@ -90,4 +93,58 @@ fn directory_picker_render_is_safe_for_tiny_terminal() {
     terminal
         .draw(|frame| manager.render(frame, Rect::new(0, 0, 1, 1)))
         .expect("tiny picker render must not panic");
+}
+
+#[test]
+fn directory_picker_keyboard_add_confirms_current_directory() {
+    // Given
+    let root = TestDir::new("keyboard-add");
+    let mut manager = VaultProfileManagerState::for_settings(VaultCatalog::default(), root.path())
+        .expect("settings manager");
+    manager.begin_add(root.path()).expect("open picker");
+
+    // When
+    manager.handle_key(
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        &HashSet::new(),
+    );
+    manager.handle_key(
+        KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        &HashSet::new(),
+    );
+    manager.handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &HashSet::new(),
+    );
+
+    // Then
+    assert_eq!(
+        manager.phase(),
+        crate::tui::vault_profile_ui::VaultProfilePhase::Name
+    );
+}
+
+#[test]
+fn directory_picker_escape_returns_to_profiles() {
+    // Given
+    let root = TestDir::new("keyboard-escape");
+    let mut manager = VaultProfileManagerState::for_settings(VaultCatalog::default(), root.path())
+        .expect("settings manager");
+    manager.begin_add(root.path()).expect("open picker");
+
+    // When
+    let command = manager.handle_key(
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        &HashSet::new(),
+    );
+
+    // Then
+    assert_eq!(
+        command,
+        crate::tui::vault_profile_ui::VaultProfileUiCommand::None
+    );
+    assert_eq!(
+        manager.phase(),
+        crate::tui::vault_profile_ui::VaultProfilePhase::Profiles
+    );
 }
