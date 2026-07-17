@@ -43,6 +43,10 @@ mod vault_mutation_execute_tests;
 mod chat_file_lifecycle;
 
 #[cfg(test)]
+#[path = "app/chat_saved_legacy_reset_tests.rs"]
+mod chat_saved_legacy_reset_tests;
+
+#[cfg(test)]
 #[path = "app/markdown_vault_restart_tests.rs"]
 mod markdown_vault_restart_tests;
 
@@ -84,11 +88,30 @@ impl TuiApp {
         vault: Option<Arc<Vault>>,
     ) -> Self {
         let mut ui = crate::ui::UI::new();
-        let chat_files = crate::storage::chat_files::ChatSavedFileStore::discover();
+        let loaded_config_snapshot = config.try_read().ok().map(|cfg| cfg.clone());
+        let config_snapshot = loaded_config_snapshot.as_ref().cloned().unwrap_or_default();
+        let reset_startup = crate::storage::chat_saved_legacy_reset::ChatSavedLegacyReset::startup(
+            loaded_config_snapshot.as_ref(),
+            vault.as_ref().map(|active| active.root.as_path()),
+        );
+        let reset_warning = reset_startup.warning;
+        #[cfg(test)]
+        let chat_files = if std::env::var_os("TCUI_TEST_CHAT_SAVED_LEGACY_RESET").is_some() {
+            crate::storage::chat_files::ChatSavedFileStore::new(
+                reset_startup.saved_root,
+                reset_startup.data_paths,
+            )
+        } else {
+            crate::storage::chat_files::ChatSavedFileStore::discover()
+        };
+        #[cfg(not(test))]
+        let chat_files = crate::storage::chat_files::ChatSavedFileStore::new(
+            reset_startup.saved_root,
+            reset_startup.data_paths,
+        );
         let orphan_cleanup_error = chat_files.cleanup_orphans().err();
         let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
         let system_prompt = Self::load_system_prompt();
-        let config_snapshot = config.try_read().map(|cfg| cfg.clone()).unwrap_or_default();
         crate::theme::set_active_theme(&config_snapshot.theme);
 
         ui.user_alignment = config_snapshot.user_alignment;
@@ -181,6 +204,10 @@ impl TuiApp {
         if orphan_cleanup_error.is_some() {
             app.ui
                 .show_toast("Some deleted-chat files still need cleanup.".to_string());
+        }
+        if let Some(error) = reset_warning {
+            app.ui
+                .show_toast(format!("Legacy Chat/Saved reset skipped: {error}"));
         }
         app.sync_message_media(app.ui.active_tab);
         app.queue_connection_check_for_active_tab();
