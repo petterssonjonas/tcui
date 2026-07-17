@@ -392,7 +392,7 @@ fn skills_popup_labels_description_and_origin_but_inserts_only_name() {
             .iter()
             .find(|item| item.label.starts_with("@save "))
             .expect("save skill");
-        assert!(save.label.contains("Markdown artifact"));
+        assert!(save.label.contains("persistent Markdown"));
         assert!(save.label.contains("[built-in]"));
         assert_eq!(
             save.action,
