@@ -3,7 +3,7 @@ use std::path::Path;
 use super::{SkillCatalog, SkillOrigin};
 
 #[test]
-fn vault_target_resolution_builtin_aliases_share_canonical_source() {
+fn vault_skill_docs_builtin_aliases_share_canonical_source() {
     let catalog = SkillCatalog::discover_from(Path::new("skills"), None).expect("skill catalog");
 
     let vault = catalog.load("vault").expect("load vault").expect("vault");

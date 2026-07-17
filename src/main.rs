@@ -372,7 +372,7 @@ fn run_offline_action(action: OfflineAction) -> Result<()> {
                 .vault_path
                 .as_deref()
                 .map(Path::new)
-                .ok_or_else(|| color_eyre::eyre::eyre!("Obsidian vault is not configured"))?;
+                .ok_or_else(|| color_eyre::eyre::eyre!("Markdown Vault is not configured"))?;
             let store = open_memory_store(vault, key_path.as_deref())?;
             let outcome = store.add_from_plaintext(&source)?;
             match outcome {
@@ -412,7 +412,7 @@ fn run_offline_action(action: OfflineAction) -> Result<()> {
                 let config = AppConfig::load()?;
                 let vault =
                     config.vault_path.as_deref().map(Path::new).ok_or_else(|| {
-                        color_eyre::eyre::eyre!("Obsidian vault is not configured")
+                        color_eyre::eyre::eyre!("Markdown Vault is not configured")
                     })?;
                 export_all_memories(
                     vault,

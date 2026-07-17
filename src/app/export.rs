@@ -144,7 +144,7 @@ impl TuiApp {
                     .vault_path
                     .as_deref()
                     .map(std::path::Path::new)
-                    .ok_or_else(|| color_eyre::eyre::eyre!("Obsidian vault is not configured"))?;
+                    .ok_or_else(|| color_eyre::eyre::eyre!("Markdown Vault is not configured"))?;
                 let store = crate::memory::MemoryStore::open(
                     vault,
                     &crate::memory::MemoryStore::default_cache_path(),

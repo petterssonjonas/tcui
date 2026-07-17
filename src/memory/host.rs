@@ -162,7 +162,7 @@ fn configured_store(config: &crate::config::AppConfig) -> Result<MemoryStore, Me
         .vault_path
         .as_deref()
         .map(Path::new)
-        .ok_or_else(|| MemoryError::Invalid("Obsidian vault is not configured".to_string()))?;
+        .ok_or_else(|| MemoryError::Invalid("Markdown Vault is not configured".to_string()))?;
     let vault =
         crate::app::generated_file::expand_user_path(raw_vault, dirs::home_dir().as_deref());
     MemoryStore::open(&vault, &MemoryStore::default_cache_path())

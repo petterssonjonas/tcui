@@ -24,6 +24,34 @@ experimental and non-endorsed. See [Authentication](docs/auth.md) for login,
 headless fallback, source-aware logout, storage, migration, and provider support
 details.
 
+## Markdown Vault
+
+Markdown Vault connects TCUI to ordinary folders of Markdown files. Add one or
+more folders in **Settings → Markdown Vault → Manage vault profiles**, give each
+profile a display name, and choose a default. Open a workspace from the `+` tab
+launcher, then use its Tree, Viewer, and terminal Editor, or address a profile
+from Chat with `@vault`:
+
+```text
+@vault list my notes
+@vault "Work Notes" read projects/status.md
+@vault vault:Personal search for "renewal date"
+```
+
+Workspace tabs are ephemeral and are not restored after TCUI restarts; profile
+configuration persists. Vault mutations require an exact preview and explicit
+confirmation. Chat files persist with their conversation, while **Save** creates
+an independent Saved file. **Insert to chat** sends an eligible document once in
+the next request without storing its contents or chip in conversation history.
+
+See the [canonical Markdown Vault guide](skills/vault/SKILL.md) for profile and
+workspace navigation, exact selector grammar, move rollback and recovery,
+request-only insertion, lock behavior, and every enforced limit.
+
+Markdown Vault works with ordinary Markdown folders, including folders used by
+Obsidian. TCUI is not affiliated with or endorsed by Obsidian, and Markdown
+Vault does not implement Obsidian Sync, APIs, or plugins.
+
 ## Install
 
 Release assets for every published release:

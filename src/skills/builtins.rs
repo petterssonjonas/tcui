@@ -54,7 +54,7 @@ pub(crate) const BUILTINS: &[Builtin] = &[
     },
     Builtin {
         name: "save",
-        description: "Create a Markdown artifact for the TermChatUI sidebar.",
+        description: "Create a persistent Markdown Chat file for the TCUI sidebar.",
         source: include_str!("../../skills/save/SKILL.md"),
     },
     Builtin {
