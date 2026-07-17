@@ -4,6 +4,8 @@ pub(crate) struct Builtin {
     pub(crate) source: &'static str,
 }
 
+const VAULT_SKILL_SOURCE: &str = include_str!("../../skills/vault/SKILL.md");
+
 pub(crate) const BUILTINS: &[Builtin] = &[
     Builtin {
         name: "websearch",
@@ -36,9 +38,14 @@ pub(crate) const BUILTINS: &[Builtin] = &[
         source: include_str!("../../skills/gnome/SKILL.md"),
     },
     Builtin {
+        name: "vault",
+        description: "List, read, or search configured Markdown Vault profiles.",
+        source: VAULT_SKILL_SOURCE,
+    },
+    Builtin {
         name: "obsidian",
-        description: "Search, read, or explicitly update Obsidian notes in the configured vault.",
-        source: include_str!("../../skills/obsidian/SKILL.md"),
+        description: "Alias for the built-in Markdown Vault skill.",
+        source: VAULT_SKILL_SOURCE,
     },
     Builtin {
         name: "caveman",

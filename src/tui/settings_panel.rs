@@ -39,7 +39,7 @@ impl SettingCategory {
             Self::Theme => "Theme",
             Self::Keybind => "Keybind",
             Self::Mcp => "MCP",
-            Self::Obsidian => "Obsidian",
+            Self::Obsidian => "Markdown Vault",
             Self::UiLayout => "UI Layout",
             Self::ChatBehavior => "Chat Behavior",
             Self::Privacy => "Privacy",
@@ -934,6 +934,11 @@ fn keybind(
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn markdown_vault_settings_category_uses_product_name() {
+        assert_eq!(SettingCategory::Obsidian.label(), "Markdown Vault");
+    }
 
     #[test]
     fn all_settings_has_expected_stub_and_setting_counts() {

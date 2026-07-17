@@ -30,6 +30,12 @@ pub struct VaultListing {
     pub limits: Vec<VaultLimitReached>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultTextRead {
+    pub text: String,
+    pub limits: Vec<VaultLimitReached>,
+}
+
 impl VaultListing {
     pub fn is_complete(&self) -> bool {
         self.limits.is_empty()
@@ -119,6 +125,56 @@ impl VaultFs {
             path: path.to_path_buf(),
             source,
         })
+    }
+
+    pub fn read_text_limited(
+        &self,
+        path: &VaultRelativePath,
+        max_bytes: u64,
+    ) -> Result<VaultTextRead, VaultFsError> {
+        let path = path.as_path();
+        let mut file = self.open_file_nofollow(path)?;
+        let initial_size = file
+            .metadata()
+            .map_err(|source| io_error("read metadata for", path, source))?
+            .len();
+        let mut bytes = Vec::new();
+        file.by_ref()
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|source| io_error("read", path, source))?;
+        let max_length = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+        let partial = initial_size > max_bytes || bytes.len() > max_length;
+        if bytes.len() > max_length {
+            bytes.truncate(max_length);
+        }
+        let text = match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(error) if partial && error.utf8_error().error_len().is_none() => {
+                let valid = error.utf8_error().valid_up_to();
+                let mut bytes = error.into_bytes();
+                bytes.truncate(valid);
+                String::from_utf8(bytes).map_err(|source| VaultFsError::InvalidUtf8 {
+                    path: path.to_path_buf(),
+                    source,
+                })?
+            }
+            Err(source) => {
+                return Err(VaultFsError::InvalidUtf8 {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        let limits = if partial {
+            vec![VaultLimitReached::new(
+                VaultLimitKind::FileBytes,
+                Some(path.to_path_buf()),
+            )]
+        } else {
+            Vec::new()
+        };
+        Ok(VaultTextRead { text, limits })
     }
 
     pub(crate) fn entry_kind(

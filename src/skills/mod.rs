@@ -29,3 +29,6 @@ pub struct Skill {
     pub source: Cow<'static, str>,
     pub origin: SkillOrigin,
 }
+
+#[cfg(test)]
+mod vault_alias_tests;

@@ -1,13 +1,14 @@
 use color_eyre::{eyre::eyre, Result};
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use std::path::{Path, PathBuf};
 
 use crate::app::Message;
 use crate::config::AppConfig;
 use crate::llm::chat::{stream_chat, ChatRequest};
 use crate::mcp::{merged_configs, profile_by_name, profile_by_skill, McpClient, McpToolSummary};
 use crate::skills::{Skill, SkillCatalog};
+use crate::vault::read_tools::{execute_read_only, parse_read_only_operation, VaultReadOnlyLimits};
+use crate::vault::target::{VaultMention, VaultTargetResolver};
 
 const MAX_SKILL_CHARS: usize = 20_000;
 const MAX_TOOL_RESULT_CHARS: usize = 48_000;
@@ -55,7 +56,14 @@ pub(crate) async fn prepare(
     };
 
     let mut prepared = SkillPreparation::default();
+    let mut vault_prepared = false;
     for skill in skills {
+        if matches!(skill.name.as_str(), "vault" | "obsidian") {
+            if vault_prepared {
+                continue;
+            }
+            vault_prepared = true;
+        }
         let result = match skill.name.as_str() {
             "websearch" => prepare_local_search(config, user_request, base_request).await,
             "research" => {
@@ -68,11 +76,13 @@ pub(crate) async fn prepare(
             "exa" | "tavily" | "firecrawl" | "gnome" => {
                 prepare_mcp(config, user_request, base_request, &skill).await
             }
-            "obsidian" => {
+            "vault" | "obsidian" => {
                 if obsidian_mcp_enabled(config) {
-                    prepare_mcp(config, user_request, base_request, &skill).await
+                    let mut external_skill = skill.clone();
+                    external_skill.name = "obsidian".to_owned();
+                    prepare_mcp(config, user_request, base_request, &external_skill).await
                 } else {
-                    prepare_obsidian_native(config, user_request, base_request).await
+                    prepare_vault_native(config, user_request, base_request).await
                 }
             }
             _ => {
@@ -375,6 +385,17 @@ fn truncate_chars(text: &str, limit: usize) -> String {
     text.chars().take(limit).collect()
 }
 
+fn bound_vault_tool_data(data: &str, limit: usize) -> String {
+    if data.chars().count() <= limit {
+        return data.to_owned();
+    }
+    const PARTIAL_HEADER: &str =
+        "{\"status\":\"partial\",\"limits\":[{\"kind\":\"ToolOutputChars\"}]}\n";
+    let header = truncate_chars(PARTIAL_HEADER, limit);
+    let remaining = limit.saturating_sub(header.chars().count());
+    format!("{header}{}", truncate_chars(data, remaining))
+}
+
 fn obsidian_mcp_enabled(config: &AppConfig) -> bool {
     merged_configs(&config.mcp_servers).iter().any(|server| {
         profile_by_name(&server.name).is_some_and(|profile| profile.skill == "obsidian")
@@ -382,42 +403,15 @@ fn obsidian_mcp_enabled(config: &AppConfig) -> bool {
     })
 }
 
-fn resolve_vault_root(config: &AppConfig) -> Result<PathBuf> {
-    let raw_path = config
-        .vault_path
-        .as_deref()
-        .map(str::trim)
-        .map(|path| path.trim_matches(['"', '\'']))
-        .filter(|path| !path.is_empty())
-        .ok_or_else(|| eyre!("Obsidian vault path is not configured"))?;
-    let path = crate::app::generated_file::expand_user_path(
-        Path::new(raw_path),
-        dirs::home_dir().as_deref(),
-    );
-    if !path.is_dir() {
-        return Err(eyre!(
-            "Obsidian vault path is not a directory: {}",
-            path.display()
-        ));
-    }
-    Ok(path)
-}
-
-fn validate_vault_path(path: &str) -> Result<()> {
-    if path.starts_with('/') || path.starts_with('\\') {
-        return Err(eyre!("vault path must be relative"));
-    }
-    if Path::new(path)
-        .components()
-        .any(|component| component.as_os_str() == "..")
-    {
-        return Err(eyre!("vault path must not escape the vault"));
-    }
-    Ok(())
-}
-
-fn obsidian_native_tools() -> Vec<Value> {
+fn vault_native_tools() -> Vec<Value> {
     vec![
+        serde_json::json!({
+            "name": "list_notes",
+            "input_schema": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}}
+            }
+        }),
         serde_json::json!({
             "name": "read_note",
             "input_schema": {
@@ -434,145 +428,42 @@ fn obsidian_native_tools() -> Vec<Value> {
                 "required": ["query"]
             }
         }),
-        serde_json::json!({
-            "name": "write_note",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "content": {"type": "string"}
-                },
-                "required": ["path", "content"]
-            }
-        }),
-        serde_json::json!({
-            "name": "restore_note",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "backup": {"type": "string"}
-                },
-                "required": ["path", "backup"]
-            }
-        }),
     ]
 }
 
-async fn prepare_obsidian_native(
+async fn prepare_vault_native(
     config: &AppConfig,
     user_request: &str,
     base_request: &ChatRequest,
 ) -> Result<Message> {
-    let vault_root = resolve_vault_root(config)?;
-    let vault = crate::obsidian::Vault::new(vault_root.clone());
-    if !vault.exists() {
-        return Err(eyre!(
-            "Obsidian vault not found at {}",
-            vault_root.display()
-        ));
-    }
-
-    let tools = obsidian_native_tools();
+    let mention = VaultMention::first_in(user_request)
+        .ok_or_else(|| eyre!("Markdown Vault mention is missing"))?;
+    let resolver = VaultTargetResolver::new(&config.vaults, config.default_vault_id.as_ref());
+    let target = resolver.resolve(user_request, mention)?;
+    let allowed_names = resolver.allowed_names();
+    let tools = vault_native_tools();
     let tools_json = truncate_chars(&serde_json::to_string(&tools)?, MAX_TOOL_CATALOG_CHARS);
     let system = format!(
         "Choose exactly one tool for the request. Return JSON only as \
-         {{\"tool\":\"name\",\"arguments\":{{...}}}}. Available tools:\n{tools_json}"
+         {{\"tool\":\"name\",\"arguments\":{{...}}}}. Available read-only tools:\n{tools_json}"
     );
     let planner_input = format!(
-        "{user_request}\n\n[OBSIDIAN VAULT]\nRoot: {}",
-        vault_root.display()
+        "{user_request}\n\n[MARKDOWN VAULT TARGET]\nSelected: {}\nAllowed names: {}",
+        target.display_name,
+        serde_json::to_string(&allowed_names)?
     );
     let output = planner_completion(base_request, &system, &planner_input).await?;
     let json =
         extract_json_object(&output).ok_or_else(|| eyre!("planner returned invalid JSON"))?;
     let plan: ToolPlan = serde_json::from_str(json)?;
-
-    authorize_tool(&plan.tool, user_request)?;
-
-    let backup_dir = crate::storage::paths::TcuiDataPaths::discover()
-        .root
-        .join("vault-backups");
-    let safety = crate::obsidian::SafetyLayer::new(backup_dir.clone());
-
-    let result = match plan.tool.as_str() {
-        "read_note" => {
-            let path = plan
-                .arguments
-                .get("path")
-                .and_then(Value::as_str)
-                .ok_or_else(|| eyre!("missing path argument"))?;
-            validate_vault_path(path)?;
-            let content = vault.read_file(Path::new(path))?;
-            format!("Content of {path}:\n\n{content}")
-        }
-        "search_notes" => {
-            let query = plan
-                .arguments
-                .get("query")
-                .and_then(Value::as_str)
-                .ok_or_else(|| eyre!("missing query argument"))?;
-            let results = vault.search(query)?;
-            if results.is_empty() {
-                format!("No notes found matching '{query}'")
-            } else {
-                let lines: Vec<String> = results
-                    .iter()
-                    .map(|path| {
-                        path.strip_prefix(&vault_root)
-                            .map(|relative| relative.display().to_string())
-                            .unwrap_or_else(|_| path.display().to_string())
-                    })
-                    .collect();
-                format!("Found {} notes:\n{}", results.len(), lines.join("\n"))
-            }
-        }
-        "write_note" => {
-            let path = plan
-                .arguments
-                .get("path")
-                .and_then(Value::as_str)
-                .ok_or_else(|| eyre!("missing path argument"))?;
-            let content = plan
-                .arguments
-                .get("content")
-                .and_then(Value::as_str)
-                .ok_or_else(|| eyre!("missing content argument"))?;
-            validate_vault_path(path)?;
-            let full_path = vault_root.join(path);
-            let old_content = if full_path.exists() {
-                std::fs::read_to_string(&full_path).unwrap_or_default()
-            } else {
-                String::new()
-            };
-            let backup_path = safety.create_backup(Path::new(path), &old_content)?;
-            let _diff = safety.generate_diff(&old_content, content);
-            vault.write_file(Path::new(path), content)?;
-            format!("Wrote {path}. Backup saved to {}", backup_path.display())
-        }
-        "restore_note" => {
-            let path = plan
-                .arguments
-                .get("path")
-                .and_then(Value::as_str)
-                .ok_or_else(|| eyre!("missing path argument"))?;
-            let backup = plan
-                .arguments
-                .get("backup")
-                .and_then(Value::as_str)
-                .ok_or_else(|| eyre!("missing backup argument"))?;
-            validate_vault_path(path)?;
-            let backup_path = backup_dir.join(backup);
-            let backup_content = std::fs::read_to_string(&backup_path)?;
-            vault.write_file(Path::new(path), &backup_content)?;
-            format!("Restored {path} from {}", backup_path.display())
-        }
-        _ => return Err(eyre!("unknown obsidian tool '{}'", plan.tool)),
-    };
+    let operation = parse_read_only_operation(target.profile_id, &plan.tool, &plan.arguments)?;
+    let result = execute_read_only(&config.vaults, &operation, VaultReadOnlyLimits::default())?;
+    let rendered =
+        bound_vault_tool_data(&result.render(), MAX_TOOL_RESULT_CHARS.saturating_sub(512));
 
     Ok(external_data_message(
-        "Obsidian Vault",
-        &result,
+        &format!("Markdown Vault / {}", result.display_name),
+        &rendered,
         MAX_TOOL_RESULT_CHARS,
     ))
 }
@@ -628,11 +519,29 @@ mod tests {
     }
 
     #[test]
-    fn vault_path_validation_rejects_absolute_and_parent_escapes() {
-        assert!(validate_vault_path("notes/idea.md").is_ok());
-        assert!(validate_vault_path("/etc/passwd").is_err());
-        assert!(validate_vault_path("../outside.md").is_err());
-        assert!(validate_vault_path("notes/../../outside.md").is_err());
+    fn vault_target_resolution_native_tool_catalog_is_read_only_and_rootless() {
+        let tools = vault_native_tools();
+
+        let names = tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        let encoded = serde_json::to_string(&tools).expect("serialize native tools");
+
+        assert_eq!(names, ["list_notes", "read_note", "search_notes"]);
+        assert!(!encoded.contains("write"));
+        assert!(!encoded.contains("restore"));
+        assert!(!encoded.contains("profile_id"));
+        assert!(!encoded.contains("root"));
+    }
+
+    #[test]
+    fn vault_target_resolution_output_cap_reports_partial_before_truncation() {
+        let rendered = bound_vault_tool_data(&"x".repeat(256), 96);
+
+        assert!(rendered
+            .starts_with("{\"status\":\"partial\",\"limits\":[{\"kind\":\"ToolOutputChars\"}]}"));
+        assert!(rendered.chars().count() <= 96);
     }
 
     #[test]
