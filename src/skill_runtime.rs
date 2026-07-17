@@ -131,7 +131,7 @@ async fn prepare_vault_skill(
     skill: &Skill,
 ) -> Result<SkillOutput> {
     let authorization = vault_mutation::VaultMutationAuthorization::capture(user_request)?;
-    if authorization.is_some() || !obsidian_mcp_enabled(config) {
+    if authorization.is_some() || !obsidian_mcp_enabled(config) || !config.vaults.is_empty() {
         prepare_vault_native(config, user_request, base_request, authorization).await
     } else {
         let mut external_skill = skill.clone();
