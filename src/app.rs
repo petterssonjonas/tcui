@@ -23,6 +23,7 @@ mod submission_runtime;
 pub mod tab;
 mod terminal;
 mod update;
+pub(crate) mod vault_mutation_execute;
 mod vault_profiles;
 
 #[cfg(test)]
@@ -32,6 +33,10 @@ mod request_only_document_tests;
 #[cfg(test)]
 #[path = "app/vault_mutation_preview_tests.rs"]
 mod vault_mutation_preview_tests;
+
+#[cfg(test)]
+#[path = "app/vault_mutation_execute_tests.rs"]
+mod vault_mutation_execute_tests;
 
 #[cfg(test)]
 #[path = "app/chat_file_lifecycle.rs"]

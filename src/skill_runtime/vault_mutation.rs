@@ -59,12 +59,18 @@ impl VaultMutationAuthorization {
         }
     }
 
-    #[expect(dead_code, reason = "T12C will wire mutation execution")]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "authorization inspection is test-visible")
+    )]
     pub(crate) const fn action(self) -> VaultMutationAction {
         self.action
     }
 
-    #[expect(dead_code, reason = "T12C will wire mutation execution")]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "authorization inspection is test-visible")
+    )]
     pub(crate) const fn overwrite_allowed(self) -> bool {
         self.overwrite_allowed
     }

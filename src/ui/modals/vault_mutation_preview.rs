@@ -62,10 +62,24 @@ impl<'a> VaultMutationPreviewModal<'a> {
             .cloned()
             .map(Line::from)
             .collect::<Vec<_>>();
-        if let VaultMutationConfirmationState::Reviewing { error: Some(error) } =
-            &self.pending.state
-        {
-            lines.push(Line::styled(error.clone(), Style::default().fg(Color::Red)));
+        let (status, confirm_label) = match &self.pending.state {
+            VaultMutationConfirmationState::Reviewing { error } => (error.as_deref(), "[Confirm]"),
+            VaultMutationConfirmationState::ReadyForExecution => {
+                (Some("Executing confirmed Vault mutation..."), "[Confirm]")
+            }
+            VaultMutationConfirmationState::ExecutionFailed { error } => {
+                (Some(error.as_str()), "[Retry]")
+            }
+            VaultMutationConfirmationState::CompletedAwaitingChat { .. } => (
+                Some("Disk update complete; Chat commit is pending."),
+                "[Retry Chat]",
+            ),
+            VaultMutationConfirmationState::RecoveryRequired {
+                recovery_status, ..
+            } => (Some(recovery_status.as_str()), "[Confirm]"),
+        };
+        if let Some(status) = status {
+            lines.push(Line::styled(status, Style::default().fg(Color::Red)));
         }
         frame.render_widget(Paragraph::new(lines), content);
 
@@ -86,7 +100,7 @@ impl<'a> VaultMutationPreviewModal<'a> {
             Paragraph::new(Line::from(vec![
                 Span::styled("[Cancel]", Style::default().fg(Color::Red)),
                 Span::raw("  "),
-                Span::styled("[Confirm]", confirm_style),
+                Span::styled(confirm_label, confirm_style),
             ])),
             footer,
         );

@@ -17,6 +17,7 @@ pub(crate) struct RequestPreparation {
     pub(crate) config: AppConfig,
     pub(crate) instruction: String,
     pub(crate) is_local_provider: bool,
+    pub(crate) vault_result: Option<crate::app::vault_mutation_execute::VaultMutationToolResult>,
 }
 
 pub(crate) struct PreparedLaunch {
@@ -49,6 +50,7 @@ pub(crate) async fn prepare_launch(
         config,
         instruction,
         is_local_provider,
+        vault_result,
     } = preparation;
 
     let api_key = if is_local_provider {
@@ -89,6 +91,16 @@ pub(crate) async fn prepare_launch(
         system_prompt: runtime_system_prompt.clone(),
         messages,
     };
+    if let Some(result) = vault_result {
+        request.messages.push(result.message(conversation_id));
+        let request = prepare_chat_request(request)?;
+        return Ok(PreparationOutcome::Ready(Box::new(PreparedLaunch {
+            request,
+            notices: Vec::new(),
+            #[cfg(feature = "memory")]
+            memory_activities: Vec::new(),
+        })));
+    }
     let skills = crate::skill_runtime::prepare(&config, &instruction, &request).await;
     if let Some(kind) = skills.vault_mutation {
         return Ok(PreparationOutcome::VaultMutation(kind));

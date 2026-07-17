@@ -19,7 +19,6 @@ pub(crate) enum VaultMutationKind {
 pub(crate) struct VaultWritePlan {
     pub(crate) profile_id: VaultProfileId,
     pub(crate) path: VaultRelativePath,
-    #[expect(dead_code, reason = "T12C will wire mutation execution")]
     pub(crate) replacement: String,
     pub(super) original: FileIdentity,
     pub(crate) diff: String,

@@ -1,4 +1,5 @@
 mod interaction;
+mod mutation;
 mod rebind;
 mod reconcile;
 mod registry;

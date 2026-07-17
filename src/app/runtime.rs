@@ -273,7 +273,7 @@ impl TuiApp {
                 crate::app::submission::SubmissionState::confirm,
             ),
             Action::CancelVaultMutation => self.cancel_pending_vault_mutation(),
-            Action::ConfirmVaultMutation => self.confirm_pending_vault_mutation(),
+            Action::ConfirmVaultMutation => self.confirm_pending_vault_mutation().await,
             Action::SubmissionFailedAfterLaunch(app_tab_id, submission_id) => {
                 if let Some(state) = self.submission_states.remove(&app_tab_id) {
                     let next = if state.submission_id() == submission_id
@@ -526,17 +526,32 @@ impl TuiApp {
                 "Cannot send a message without a Tokio runtime"
             ));
         }
-        if self.ui.pending_vault_mutation.is_some() {
+        let completed_vault_result = self
+            .ui
+            .pending_vault_mutation
+            .as_ref()
+            .and_then(crate::app::submission::PendingVaultMutation::completed_submission)
+            .cloned();
+        if self.ui.pending_vault_mutation.is_some() && completed_vault_result.is_none() {
             return Err(color_eyre::eyre::eyre!(
                 "Confirm or cancel the pending Vault mutation first"
             ));
         }
+        let completed_vault_mutation = completed_vault_result.is_some();
         let app_tab_id = self.ui.app_tabs.active_id();
-        let documents = self
-            .pending_documents
-            .get(&app_tab_id)
-            .cloned()
-            .unwrap_or_default();
+        let (content, documents) = match self.ui.pending_vault_mutation.as_ref() {
+            Some(pending) if completed_vault_mutation => (
+                pending.submission.instruction().to_owned(),
+                pending.submission.documents().clone(),
+            ),
+            Some(_) | None => (
+                content,
+                self.pending_documents
+                    .get(&app_tab_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            ),
+        };
         let submission = crate::app::submission::InputSubmission::new(&content, documents)?;
         let instruction = submission.instruction().to_string();
         let preparing =
@@ -702,6 +717,7 @@ impl TuiApp {
             config: config_snapshot.clone(),
             instruction: instruction.clone(),
             is_local_provider,
+            vault_result: completed_vault_result,
         };
         let preparation_outcome =
             match crate::app::submission_runtime::prepare_launch(preparation).await {
@@ -765,7 +781,11 @@ impl TuiApp {
         };
         let mut user_message =
             Message::new(conversation_id, "user".to_string(), instruction.clone());
-        match self.storage.save_message(&user_message) {
+        match crate::app::vault_mutation_execute::persist_user_message(
+            &self.storage,
+            &user_message,
+            completed_vault_mutation,
+        ) {
             Ok(message_id) => user_message.id = Some(message_id),
             Err(error) => {
                 if created_conversation {
@@ -984,6 +1004,9 @@ impl TuiApp {
 
         self.transition_submission(app_tab_id, crate::app::submission::SubmissionState::launch)?;
         self.discard_pending_documents();
+        if completed_vault_mutation {
+            self.ui.pending_vault_mutation = None;
+        }
 
         Ok(())
     }
@@ -1009,7 +1032,32 @@ impl TuiApp {
         Ok(())
     }
 
-    fn confirm_pending_vault_mutation(&mut self) -> color_eyre::Result<()> {
+    pub(crate) async fn confirm_pending_vault_mutation(&mut self) -> color_eyre::Result<()> {
+        use crate::app::submission::VaultMutationConfirmationState;
+        use crate::app::vault_mutation_execute::VaultMutationExecutionError;
+
+        let mut pending = self
+            .ui
+            .pending_vault_mutation
+            .take()
+            .ok_or_else(|| color_eyre::eyre::eyre!("Vault mutation preview is unavailable"))?;
+        match &pending.state {
+            VaultMutationConfirmationState::CompletedAwaitingChat { .. } => {
+                let instruction = pending.submission.instruction().to_owned();
+                self.ui.pending_vault_mutation = Some(pending);
+                return self.send_message(instruction).await;
+            }
+            VaultMutationConfirmationState::RecoveryRequired {
+                recovery_status, ..
+            } => {
+                let error = color_eyre::eyre::eyre!(recovery_status.clone());
+                self.ui.pending_vault_mutation = Some(pending);
+                return Err(error);
+            }
+            VaultMutationConfirmationState::Reviewing { .. }
+            | VaultMutationConfirmationState::ReadyForExecution
+            | VaultMutationConfirmationState::ExecutionFailed { .. } => {}
+        }
         let catalog = self
             .config
             .try_read()
@@ -1018,19 +1066,67 @@ impl TuiApp {
                 default_id: config.default_vault_id.clone(),
             })
             .map_err(|_| color_eyre::eyre::eyre!("Vault configuration is busy"))?;
-        let pending = self
-            .ui
-            .pending_vault_mutation
-            .as_mut()
-            .ok_or_else(|| color_eyre::eyre::eyre!("Vault mutation preview is unavailable"))?;
-        if let Err(error) = pending.confirm(
-            &catalog,
-            &crate::storage::paths::TcuiDataPaths::discover().root,
+        let data_root = crate::storage::paths::TcuiDataPaths::discover().root;
+        if matches!(
+            pending.state,
+            VaultMutationConfirmationState::Reviewing { .. }
         ) {
-            return Err(error.into());
+            if let Err(error) = pending.confirm(&catalog, &data_root) {
+                self.ui.pending_vault_mutation = Some(pending);
+                return Err(error.into());
+            }
+            let app_tab_id = self.ui.app_tabs.active_id();
+            self.transition_submission(
+                app_tab_id,
+                crate::app::submission::SubmissionState::confirm,
+            )?;
         }
-        let app_tab_id = self.ui.app_tabs.active_id();
-        self.transition_submission(app_tab_id, crate::app::submission::SubmissionState::confirm)
+        let changes = crate::app::vault_mutation_execute::affected_paths(&pending.kind);
+        let targets = match self.ui.markdown_vault_workspaces.mutation_targets(&changes) {
+            Ok(targets) => targets,
+            Err(error) => {
+                let message = error.to_string();
+                pending.state = VaultMutationConfirmationState::ExecutionFailed {
+                    error: message.clone(),
+                };
+                self.ui.pending_vault_mutation = Some(pending);
+                return Err(color_eyre::eyre::eyre!(message));
+            }
+        };
+        match crate::app::vault_mutation_execute::execute(&pending.kind, &catalog, &data_root) {
+            Ok(submission) => {
+                let operation_id = submission.operation_id().to_owned();
+                let _ = self
+                    .ui
+                    .markdown_vault_workspaces
+                    .refresh_mutation_targets(&targets);
+                pending.state = VaultMutationConfirmationState::CompletedAwaitingChat {
+                    operation_id,
+                    submission,
+                };
+                let instruction = pending.submission.instruction().to_owned();
+                self.ui.pending_vault_mutation = Some(pending);
+                self.send_message(instruction).await
+            }
+            Err(VaultMutationExecutionError::Failed { message }) => {
+                pending.state = VaultMutationConfirmationState::ExecutionFailed {
+                    error: message.to_owned(),
+                };
+                self.ui.pending_vault_mutation = Some(pending);
+                Err(color_eyre::eyre::eyre!(message))
+            }
+            Err(VaultMutationExecutionError::RecoveryRequired { operation_id }) => {
+                let recovery_status = format!(
+                    "Recovery required for operation {operation_id}; run @vault restore {operation_id}"
+                );
+                pending.state = VaultMutationConfirmationState::RecoveryRequired {
+                    operation_id,
+                    recovery_status: recovery_status.clone(),
+                };
+                self.ui.pending_vault_mutation = Some(pending);
+                Err(color_eyre::eyre::eyre!(recovery_status))
+            }
+        }
     }
 
     async fn dispatch_mouse_click(&mut self, action: MouseClickAction) -> color_eyre::Result<()> {

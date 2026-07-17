@@ -6,6 +6,7 @@ use crate::vault::mutation_plan::{
 };
 
 use super::PreparedUserTurn;
+use crate::app::vault_mutation_execute::VaultMutationToolResult;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PendingVaultMutation {
@@ -18,8 +19,21 @@ pub(crate) struct PendingVaultMutation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum VaultMutationConfirmationState {
-    Reviewing { error: Option<String> },
+    Reviewing {
+        error: Option<String>,
+    },
     ReadyForExecution,
+    ExecutionFailed {
+        error: String,
+    },
+    CompletedAwaitingChat {
+        operation_id: String,
+        submission: VaultMutationToolResult,
+    },
+    RecoveryRequired {
+        operation_id: String,
+        recovery_status: String,
+    },
 }
 
 impl PendingVaultMutation {
@@ -65,12 +79,34 @@ impl PendingVaultMutation {
     }
 
     pub(crate) fn can_cancel(&self) -> bool {
-        matches!(self.state, VaultMutationConfirmationState::Reviewing { .. })
+        matches!(
+            self.state,
+            VaultMutationConfirmationState::Reviewing { .. }
+                | VaultMutationConfirmationState::ExecutionFailed { .. }
+                | VaultMutationConfirmationState::RecoveryRequired { .. }
+        )
     }
 
     pub(crate) fn can_confirm(&self) -> bool {
-        self.preview.confirm_enabled
-            && matches!(self.state, VaultMutationConfirmationState::Reviewing { .. })
+        match self.state {
+            VaultMutationConfirmationState::Reviewing { .. } => self.preview.confirm_enabled,
+            VaultMutationConfirmationState::ExecutionFailed { .. }
+            | VaultMutationConfirmationState::CompletedAwaitingChat { .. } => true,
+            VaultMutationConfirmationState::ReadyForExecution
+            | VaultMutationConfirmationState::RecoveryRequired { .. } => false,
+        }
+    }
+
+    pub(crate) fn completed_submission(&self) -> Option<&VaultMutationToolResult> {
+        match &self.state {
+            VaultMutationConfirmationState::CompletedAwaitingChat { submission, .. } => {
+                Some(submission)
+            }
+            VaultMutationConfirmationState::Reviewing { .. }
+            | VaultMutationConfirmationState::ReadyForExecution
+            | VaultMutationConfirmationState::ExecutionFailed { .. }
+            | VaultMutationConfirmationState::RecoveryRequired { .. } => None,
+        }
     }
 
     pub(crate) fn scroll_down(&mut self, rows: usize) {
