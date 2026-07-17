@@ -53,6 +53,11 @@ ephemeral and are never restored after TCUI restarts.
   Shift-Tab move focus between panes. An external change marks a live Editor as
   changed on disk without overwriting or restarting it. Escape follows the
   normal close-risk flow.
+- With a regular file selected in the Tree, press `m` to enter a new
+  vault-relative destination path or `r` to change only its filename. Enter
+  opens the standard mutation preview; Escape cancels path entry. A destination
+  collision is shown in the preview and cannot be confirmed without explicit
+  overwrite authorization.
 - At fewer than 72 content columns, one focused content pane is shown. At 72 or
   more, Viewer and Editor can share the content area. TCUI's minimum terminal
   size is 64×16.
@@ -129,9 +134,9 @@ a mutation or infer overwrite permission.
 Before any disk or Chat mutation, TCUI shows a scrollable source-to-destination
 or before/after preview. Cancel sends nothing, persists nothing, and leaves disk
 unchanged. Confirm revalidates paths, file identities, bytes, collisions, and
-open Editor conflicts before executing. Moves support regular files between
-different profiles only; directories, symlinks, same-profile moves, and
-unapproved collisions are rejected.
+open Editor conflicts before executing. Moves support regular files within one
+profile or between profiles. Direct source/destination overlap, directories,
+symlinks, unsupported file types, and unapproved collisions are rejected.
 
 A confirmed move stages and syncs every destination before removing sources.
 Failure triggers reverse-order rollback: restore sources, restore overwritten

@@ -95,6 +95,52 @@ impl TuiApp {
                 let _ = self.ui.markdown_vault_workspaces.cancel_rebind(tab_id);
                 None
             }
+            MarkdownVaultInputAction::Move {
+                source,
+                destination,
+            } => {
+                let pending = (|| -> color_eyre::Result<_> {
+                    let profile_id = self
+                        .ui
+                        .markdown_vault_workspaces
+                        .get(tab_id)
+                        .map(|workspace| workspace.profile_id().clone())
+                        .ok_or_else(|| {
+                            color_eyre::eyre::eyre!("Markdown Vault workspace is unavailable")
+                        })?;
+                    let catalog = self.vault_catalog();
+                    let source_path = crate::vault::VaultRelativePath::parse(&source)?;
+                    let destination_path = crate::vault::VaultRelativePath::parse(&destination)?;
+                    let pair = crate::vault::move_plan::MovePair::new(
+                        crate::vault::move_plan::VaultFileRef::new(profile_id.clone(), source_path),
+                        crate::vault::move_plan::VaultFileRef::new(profile_id, destination_path),
+                        false,
+                    );
+                    let kind = crate::vault::mutation_plan::VaultMutationKind::Move(
+                        crate::vault::move_plan::MovePlan::build(vec![pair], &catalog, |_| false)?,
+                    );
+                    let instruction = format!(
+                        "Move workspace Vault file {} to {}",
+                        source.display(),
+                        destination.display()
+                    );
+                    let submission = crate::app::submission::InputSubmission::new(
+                        &instruction,
+                        crate::app::submission::PendingDocuments::default(),
+                    )?;
+                    crate::app::submission::PendingVaultMutation::new_workspace(
+                        crate::app::submission::PreparedUserTurn::prepare(&submission),
+                        kind,
+                        &catalog,
+                    )
+                    .map_err(Into::into)
+                })();
+                match pending {
+                    Ok(pending) => self.ui.pending_vault_mutation = Some(pending),
+                    Err(error) => self.ui.show_toast(error.to_string()),
+                }
+                None
+            }
         }
     }
 }

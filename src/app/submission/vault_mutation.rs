@@ -15,6 +15,13 @@ pub(crate) struct PendingVaultMutation {
     pub(crate) preview: VaultMutationPreview,
     pub(crate) scroll: usize,
     pub(crate) state: VaultMutationConfirmationState,
+    origin: VaultMutationOrigin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VaultMutationOrigin {
+    Chat,
+    Workspace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +56,28 @@ impl PendingVaultMutation {
             preview,
             scroll: 0,
             state: VaultMutationConfirmationState::Reviewing { error: None },
+            origin: VaultMutationOrigin::Chat,
         })
+    }
+
+    pub(crate) fn new_workspace(
+        submission: PreparedUserTurn,
+        kind: VaultMutationKind,
+        catalog: &VaultCatalog,
+    ) -> Result<Self, VaultMutationPlanError> {
+        let preview = kind.preview(catalog)?;
+        Ok(Self {
+            submission,
+            kind,
+            preview,
+            scroll: 0,
+            state: VaultMutationConfirmationState::Reviewing { error: None },
+            origin: VaultMutationOrigin::Workspace,
+        })
+    }
+
+    pub(crate) fn is_workspace(&self) -> bool {
+        self.origin == VaultMutationOrigin::Workspace
     }
 
     pub(crate) fn confirm(

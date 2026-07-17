@@ -229,8 +229,8 @@ pub enum MovePlanError {
     DuplicateSource { file: VaultFileRef },
     #[error("move plan contains the same destination more than once: {destination:?}")]
     DuplicateDestination { destination: VaultFileRef },
-    #[error("move source and destination profiles must be distinct at pair {pair_index}")]
-    SameProfile { pair_index: usize },
+    #[error("move source and destination paths overlap: {file:?}")]
+    OverlappingSourceDestination { file: VaultFileRef },
     #[error("move plan path is open in an editor: {file:?}")]
     OpenInEditor { file: VaultFileRef },
     #[error("vault profile is unavailable: {profile_id}")]
@@ -284,10 +284,7 @@ fn validate_request(
 
     let mut sources = HashSet::with_capacity(pairs.len());
     let mut destinations = HashSet::with_capacity(pairs.len());
-    for (pair_index, pair) in pairs.iter().enumerate() {
-        if pair.source.profile_id == pair.destination.profile_id {
-            return Err(MovePlanError::SameProfile { pair_index });
-        }
+    for pair in pairs {
         if !sources.insert(pair.source.clone()) {
             return Err(MovePlanError::DuplicateSource {
                 file: pair.source.clone(),
@@ -303,6 +300,9 @@ fn validate_request(
                 return Err(MovePlanError::OpenInEditor { file: file.clone() });
             }
         }
+    }
+    if let Some(file) = sources.iter().find(|source| destinations.contains(*source)) {
+        return Err(MovePlanError::OverlappingSourceDestination { file: file.clone() });
     }
     Ok(())
 }
@@ -1000,7 +1000,7 @@ mod vault_move_plan {
     }
 
     #[test]
-    fn same_profile_pair_is_rejected() {
+    fn same_profile_pair_with_distinct_paths_is_allowed() {
         // Given
         let fixture = Fixture::new("same-profile");
         fixture.write_source("note.md", b"note");
@@ -1015,7 +1015,34 @@ mod vault_move_plan {
         );
 
         // Then
-        assert!(matches!(result, Err(MovePlanError::SameProfile { .. })));
+        assert_eq!(result.expect("same-profile move plan").file_count(), 1);
+    }
+
+    #[test]
+    fn same_profile_plan_rejects_any_source_destination_overlap() {
+        // Given
+        let fixture = Fixture::new("same-profile-overlap");
+        fixture.write_source("first.md", b"first");
+        fixture.write_source("second.md", b"second");
+        let first = MovePair::new(
+            fixture.source_ref("first.md"),
+            fixture.source_ref("second.md"),
+            true,
+        );
+        let second = MovePair::new(
+            fixture.source_ref("second.md"),
+            fixture.source_ref("third.md"),
+            false,
+        );
+
+        // When
+        let result = MovePlan::build(vec![first, second], &fixture.catalog, |_| false);
+
+        // Then
+        assert!(matches!(
+            result,
+            Err(MovePlanError::OverlappingSourceDestination { .. })
+        ));
     }
 
     #[test]

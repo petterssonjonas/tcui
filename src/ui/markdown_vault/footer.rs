@@ -17,6 +17,7 @@ pub(crate) struct MarkdownVaultFooterProps<'a> {
     pub(crate) selected_profile: usize,
     pub(crate) add_selected: bool,
     pub(crate) profiles: &'a [MarkdownVaultProfileOption],
+    pub(crate) move_available: bool,
 }
 
 pub(crate) fn render_footer(
@@ -69,6 +70,22 @@ pub(crate) fn render_footer(
         profile_area,
     );
     frame.render_widget(Paragraph::new(add_label).style(add_style), add_area);
+    let move_label = "m Move  r Rename";
+    let move_width = u16::try_from(move_label.len()).unwrap_or(u16::MAX);
+    let move_area = Rect::new(
+        area.x
+            .saturating_add(area.width.saturating_sub(move_width) / 2),
+        area.y,
+        move_width.min(area.width),
+        1,
+    );
+    if props.move_available && move_area.x > profile_area.right() && move_area.right() < add_area.x
+    {
+        frame.render_widget(
+            Paragraph::new(move_label).style(Style::default().fg(theme.muted).bg(theme.panel)),
+            move_area,
+        );
+    }
     hit_areas.push(profile_area, MarkdownVaultMouseAction::ProfileDropdown);
     hit_areas.push(add_area, MarkdownVaultMouseAction::AddVault);
 

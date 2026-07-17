@@ -1,4 +1,5 @@
 mod interaction;
+mod move_input;
 mod mutation;
 mod rebind;
 mod reconcile;
@@ -6,6 +7,7 @@ mod registry;
 mod state;
 
 pub(crate) use interaction::MarkdownVaultInputAction;
+pub(crate) use move_input::MarkdownVaultMoveInput;
 pub(crate) use registry::MarkdownVaultWorkspaceRegistry;
 pub(crate) use state::{
     MarkdownVaultContentPane, MarkdownVaultFocus, MarkdownVaultWorkspaceState,

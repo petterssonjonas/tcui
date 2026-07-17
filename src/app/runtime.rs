@@ -1021,6 +1021,9 @@ impl TuiApp {
                 "confirmed Vault mutation cannot be cancelled"
             ));
         }
+        if pending.is_workspace() {
+            return Ok(());
+        }
         let app_tab_id = self.ui.app_tabs.active_id();
         self.transition_submission(
             app_tab_id,
@@ -1075,11 +1078,13 @@ impl TuiApp {
                 self.ui.pending_vault_mutation = Some(pending);
                 return Err(error.into());
             }
-            let app_tab_id = self.ui.app_tabs.active_id();
-            self.transition_submission(
-                app_tab_id,
-                crate::app::submission::SubmissionState::confirm,
-            )?;
+            if !pending.is_workspace() {
+                let app_tab_id = self.ui.app_tabs.active_id();
+                self.transition_submission(
+                    app_tab_id,
+                    crate::app::submission::SubmissionState::confirm,
+                )?;
+            }
         }
         let changes = crate::app::vault_mutation_execute::affected_paths(&pending.kind);
         let targets = match self.ui.markdown_vault_workspaces.mutation_targets(&changes) {
@@ -1095,11 +1100,15 @@ impl TuiApp {
         };
         match crate::app::vault_mutation_execute::execute(&pending.kind, &catalog, &data_root) {
             Ok(submission) => {
-                let operation_id = submission.operation_id().to_owned();
                 let _ = self
                     .ui
                     .markdown_vault_workspaces
                     .refresh_mutation_targets(&targets);
+                if pending.is_workspace() {
+                    self.ui.show_toast("Vault file moved".to_string());
+                    return Ok(());
+                }
+                let operation_id = submission.operation_id().to_owned();
                 pending.state = VaultMutationConfirmationState::CompletedAwaitingChat {
                     operation_id,
                     submission,

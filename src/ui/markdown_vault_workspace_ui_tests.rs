@@ -146,6 +146,12 @@ fn markdown_vault_workspace_ui_render_replaces_chat_chrome_but_keeps_top_bar_and
             &fixture.first_id,
         )
         .expect("activate vault");
+    let tab_id = ui.app_tabs.active_id();
+    ui.markdown_vault_workspaces
+        .get_mut_for_test(tab_id)
+        .expect("workspace")
+        .tree
+        .select_path(Path::new("notes/readme.md"));
     ui.show_toast("vault notice".to_string());
     ui.active_modal = Some(super::Modal::QuitConfirm);
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
@@ -158,6 +164,7 @@ fn markdown_vault_workspace_ui_render_replaces_chat_chrome_but_keeps_top_bar_and
     assert!(text.contains("Markdown Vault"));
     assert!(text.contains("First Vault"));
     assert!(text.contains("+ Add vault"));
+    assert!(text.contains("m Move  r Rename"));
     assert!(text.contains("readme.md"));
     assert!(text.contains("vault notice"));
     assert!(ui.modal_areas.is_some());

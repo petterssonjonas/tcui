@@ -235,6 +235,50 @@ fn move_execution_source_sync_failure_restores_pre_operation_state() {
 }
 
 #[test]
+fn move_execution_same_profile_move_and_rollback_preserve_transaction_guarantees() {
+    for failure in [None, Some(TestFailurePoint::SourceDirectorySync)] {
+        // Given
+        let fixture = Fixture::new(match failure {
+            None => "same-profile-happy",
+            Some(_) => "same-profile-rollback",
+        });
+        fixture.write_source("notes/readme.md", b"source bytes");
+        let pair = MovePair::new(
+            fixture.file_ref(fixture.source_id.clone(), "notes/readme.md"),
+            fixture.file_ref(fixture.source_id.clone(), "archive/readme.md"),
+            false,
+        );
+        let plan = fixture.plan(vec![pair]);
+        if let Some(point) = failure {
+            inject_failure(point);
+        }
+
+        // When
+        let result = fixture.executor().execute(plan);
+
+        // Then
+        if failure.is_some() {
+            assert!(matches!(
+                result,
+                Err(MoveExecuteError::InjectedFailure { .. })
+            ));
+            assert_eq!(
+                fs::read(fixture.source_root.join("notes/readme.md")).expect("restored source"),
+                b"source bytes"
+            );
+            assert!(!fixture.source_root.join("archive/readme.md").exists());
+        } else {
+            result.expect("same-profile move");
+            assert!(!fixture.source_root.join("notes/readme.md").exists());
+            assert_eq!(
+                fs::read(fixture.source_root.join("archive/readme.md")).expect("moved destination"),
+                b"source bytes"
+            );
+        }
+    }
+}
+
+#[test]
 fn move_execution_journal_create_failure_never_mutates_vault() {
     // Given
     let fixture = Fixture::new("journal-create");

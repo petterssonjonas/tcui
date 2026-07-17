@@ -119,6 +119,95 @@ fn markdown_vault_workspace_ui_footer_escape_and_add_vault_are_routed() {
 }
 
 #[test]
+fn markdown_vault_workspace_ui_move_input_emits_selected_source_and_typed_destination() {
+    // Given
+    let fixture = EdgeFixture::new("move-input");
+    let (_tabs, mut workspaces, tab_id) = fixture.workspace();
+    let state = workspaces.get_mut_for_test(tab_id).expect("workspace");
+    state.tree.select_path(Path::new("notes/readme.md"));
+
+    // When
+    state.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+    assert_eq!(state.move_input_value_for_test(), Some("notes/readme.md"));
+    for character in "archive/readme.md".chars() {
+        state.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    let action = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    // Then
+    assert_eq!(
+        action,
+        MarkdownVaultInputAction::Move {
+            source: PathBuf::from("notes/readme.md"),
+            destination: PathBuf::from("archive/readme.md"),
+        }
+    );
+}
+
+#[test]
+fn markdown_vault_workspace_ui_rename_input_keeps_destination_in_source_directory() {
+    // Given
+    let fixture = EdgeFixture::new("rename-input");
+    let (_tabs, mut workspaces, tab_id) = fixture.workspace();
+    let state = workspaces.get_mut_for_test(tab_id).expect("workspace");
+    state.tree.select_path(Path::new("notes/readme.md"));
+
+    // When
+    state.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+    for character in "renamed.md".chars() {
+        state.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    let action = state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    // Then
+    assert_eq!(
+        action,
+        MarkdownVaultInputAction::Move {
+            source: PathBuf::from("notes/readme.md"),
+            destination: PathBuf::from("notes/renamed.md"),
+        }
+    );
+}
+
+#[test]
+fn markdown_vault_workspace_ui_move_input_escape_cancels_without_action() {
+    // Given
+    let fixture = EdgeFixture::new("move-cancel");
+    let (_tabs, mut workspaces, tab_id) = fixture.workspace();
+    let state = workspaces.get_mut_for_test(tab_id).expect("workspace");
+    state.tree.select_path(Path::new("notes/readme.md"));
+    state.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+
+    // When
+    let action = state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    // Then
+    assert_eq!(action, MarkdownVaultInputAction::None);
+    assert!(state.move_input_value_for_test().is_none());
+}
+
+#[test]
+fn markdown_vault_workspace_ui_move_input_blocks_underlying_mouse_and_scroll() {
+    // Given
+    let fixture = EdgeFixture::new("move-mouse-capture");
+    let (_tabs, mut workspaces, tab_id) = fixture.workspace();
+    let state = workspaces.get_mut_for_test(tab_id).expect("workspace");
+    state.tree.select_path(Path::new("notes/readme.md"));
+    state.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+    let selected = state.tree.selected_path().map(Path::to_path_buf);
+
+    // When
+    let action = state.handle_mouse(MarkdownVaultMouseAction::TreeRow(0));
+    let scrolled = state.scroll_at(Position::new(0, 0), true);
+
+    // Then
+    assert_eq!(action, MarkdownVaultInputAction::None);
+    assert!(!scrolled);
+    assert_eq!(state.tree.selected_path(), selected.as_deref());
+    assert_eq!(state.move_input_value_for_test(), Some("notes/readme.md"));
+}
+
+#[test]
 fn markdown_vault_workspace_ui_tiny_guard_clears_wide_hit_areas() {
     let fixture = EdgeFixture::new("stale-hit-areas");
     let mut ui = UI::new();

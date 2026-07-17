@@ -8,6 +8,7 @@ use crate::config::vault_profiles::VaultProfileId;
 use crate::ui::markdown_vault::hit_areas::MarkdownVaultMouseAction;
 use crate::ui::modals::terminal_editor::TerminalEditorState;
 
+use super::move_input::MarkdownVaultMoveMode;
 use super::state::{
     MarkdownVaultContentPane, MarkdownVaultFocus, MarkdownVaultWorkspaceState,
     MarkdownVaultWorkspaceStatus,
@@ -20,11 +21,18 @@ pub(crate) enum MarkdownVaultInputAction {
     Rebind(VaultProfileId),
     ConfirmRebind,
     CancelRebind,
+    Move {
+        source: std::path::PathBuf,
+        destination: std::path::PathBuf,
+    },
     Notice(String),
 }
 
 impl MarkdownVaultWorkspaceState {
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> MarkdownVaultInputAction {
+        if self.move_input.is_some() {
+            return self.handle_move_input_key(key);
+        }
         if matches!(
             self.status,
             MarkdownVaultWorkspaceStatus::RebindConfirmationRequired { .. }
@@ -68,6 +76,12 @@ impl MarkdownVaultWorkspaceState {
                 MarkdownVaultInputAction::None
             }
             KeyCode::Char('e') if self.focus != MarkdownVaultFocus::Editor => self.open_editor(),
+            KeyCode::Char('m') if self.focus == MarkdownVaultFocus::Tree => {
+                self.open_move_input(MarkdownVaultMoveMode::Move)
+            }
+            KeyCode::Char('r') if self.focus == MarkdownVaultFocus::Tree => {
+                self.open_move_input(MarkdownVaultMoveMode::Rename)
+            }
             KeyCode::Enter if self.focus == MarkdownVaultFocus::Tree => self.activate_selected(),
             KeyCode::Enter if self.focus == MarkdownVaultFocus::ProfileControls => {
                 if self.profile_controls.add_selected {
@@ -99,6 +113,9 @@ impl MarkdownVaultWorkspaceState {
         &mut self,
         action: MarkdownVaultMouseAction,
     ) -> MarkdownVaultInputAction {
+        if self.move_input.is_some() {
+            return MarkdownVaultInputAction::None;
+        }
         match action {
             MarkdownVaultMouseAction::TreeRow(index) => {
                 self.tree.select(index);
@@ -158,6 +175,9 @@ impl MarkdownVaultWorkspaceState {
     }
 
     pub(crate) fn scroll_at(&mut self, position: Position, down: bool) -> bool {
+        if self.move_input.is_some() {
+            return false;
+        }
         let Some(action) = self.hit_areas.action_at(position) else {
             return false;
         };

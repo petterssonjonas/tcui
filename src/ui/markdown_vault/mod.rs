@@ -1,6 +1,7 @@
 pub(crate) mod footer;
 pub(crate) mod hit_areas;
 pub(crate) mod layout;
+mod move_input;
 pub(crate) mod tree;
 
 use ratatui::{prelude::*, widgets::Paragraph, Frame};
@@ -18,6 +19,7 @@ use crate::ui::modals::quit_confirm::QuitConfirmModal;
 use self::footer::{render_footer, MarkdownVaultFooterProps};
 use self::hit_areas::MarkdownVaultMouseAction;
 use self::layout::{split_content, workspace_layout};
+use self::move_input::render_move_input;
 use self::tree::render_tree;
 
 #[derive(Debug, Clone, Copy)]
@@ -104,9 +106,17 @@ pub(crate) fn render_workspace(
             selected_profile: state.profile_controls.selected,
             add_selected: state.profile_controls.add_selected,
             profiles: &state.profile_controls.profiles,
+            move_available: state
+                .tree
+                .selected_node()
+                .is_some_and(|node| node.entry_kind == crate::vault::VaultEntryKind::File),
         },
         &mut state.hit_areas,
     );
+
+    if let Some(input) = state.move_input.as_ref() {
+        render_move_input(frame, area, input);
+    }
 
     let confirmation = match &state.status {
         MarkdownVaultWorkspaceStatus::RebindConfirmationRequired { profile_id } => Some((

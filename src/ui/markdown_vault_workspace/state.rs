@@ -15,6 +15,7 @@ use crate::vault::{VaultEntryKind, VaultFs, VaultWalkLimits};
 
 use super::reconcile::WorkspaceReconciliation;
 use super::registry::MarkdownVaultWorkspaceError;
+use super::MarkdownVaultMoveInput;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MarkdownVaultProfileControls {
@@ -76,6 +77,7 @@ pub(crate) struct MarkdownVaultWorkspaceState {
     pub(crate) hit_areas: MarkdownVaultHitAreas,
     pub(crate) status: MarkdownVaultWorkspaceStatus,
     pub(crate) metadata: Option<String>,
+    pub(crate) move_input: Option<MarkdownVaultMoveInput>,
     pub(super) pending_rebind_profile_id: Option<VaultProfileId>,
     #[cfg(test)]
     drop_probe: Option<WorkspaceDropProbe>,
@@ -155,6 +157,7 @@ impl MarkdownVaultWorkspaceState {
             hit_areas: MarkdownVaultHitAreas::default(),
             status: MarkdownVaultWorkspaceStatus::Ready,
             metadata: None,
+            move_input: None,
             pending_rebind_profile_id: None,
             #[cfg(test)]
             drop_probe: None,
