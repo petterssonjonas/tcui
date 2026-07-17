@@ -15,6 +15,7 @@ pub mod launcher;
 pub mod markdown_vault;
 pub mod markdown_vault_workspace;
 pub mod modals;
+pub mod pending_documents;
 pub mod session_list;
 pub mod sidebar;
 pub mod status_bar;
@@ -185,6 +186,7 @@ pub struct ModalAreas {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Modal {
     QuitConfirm,
+    DiscardPendingDocuments,
 }
 
 pub struct ChatTabState {
@@ -209,6 +211,8 @@ pub struct ChatTabState {
     pub reasoning_hit_area: Option<Rect>,
     pub input_area: Option<Rect>,
     pub input_text_area: Option<Rect>,
+    pub pending_document_chips: Vec<pending_documents::PendingDocumentChip>,
+    pub pending_document_chip_hit_areas: Vec<(crate::app::submission::PendingDocumentId, Rect)>,
     pub dropdown_item_areas: Vec<Rect>,
     pub dropdown_scroll_offset: usize,
     pub chat_scrollbar_area: Option<Rect>,
@@ -286,6 +290,8 @@ impl UI {
                 reasoning_hit_area: None,
                 input_area: None,
                 input_text_area: None,
+                pending_document_chips: Vec::new(),
+                pending_document_chip_hit_areas: Vec::new(),
                 dropdown_item_areas: vec![],
                 dropdown_scroll_offset: 0,
                 chat_scrollbar_area: None,
@@ -877,6 +883,16 @@ impl UI {
                         no: areas.no,
                     });
                 }
+                Modal::DiscardPendingDocuments => {
+                    let modal = QuitConfirmModal::new()
+                        .title("Discard documents?")
+                        .message("Discard inserted documents and continue?");
+                    let areas = modal.render(f);
+                    self.modal_areas = Some(ModalAreas {
+                        yes: areas.yes,
+                        no: areas.no,
+                    });
+                }
             }
         }
 
@@ -972,6 +988,8 @@ impl UI {
             reasoning_hit_area: None,
             input_area: None,
             input_text_area: None,
+            pending_document_chips: Vec::new(),
+            pending_document_chip_hit_areas: Vec::new(),
             dropdown_item_areas: vec![],
             dropdown_scroll_offset: 0,
             chat_scrollbar_area: None,

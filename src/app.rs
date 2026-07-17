@@ -13,6 +13,7 @@ pub mod generated_file;
 mod input;
 mod input_events;
 pub mod message;
+mod pending_documents;
 mod popups;
 mod providers;
 mod runtime;
@@ -58,6 +59,8 @@ pub struct TuiApp {
         HashMap<crate::ui::app_tabs::AppTabId, submission::PendingDocuments>,
     pub(crate) submission_states:
         HashMap<crate::ui::app_tabs::AppTabId, submission::SubmissionState>,
+    pub(crate) pending_document_discard_action:
+        Option<pending_documents::PendingDocumentDiscardAction>,
 }
 
 impl TuiApp {
@@ -156,6 +159,7 @@ impl TuiApp {
             terminal_has_focus: Arc::new(AtomicBool::new(true)),
             pending_documents: HashMap::new(),
             submission_states: HashMap::new(),
+            pending_document_discard_action: None,
         };
         let mut app = app;
         app.refresh_visible_selectors();
@@ -170,6 +174,7 @@ impl TuiApp {
         app
     }
 
+    #[cfg(test)]
     pub fn pending_documents_mut(&mut self) -> &mut submission::PendingDocuments {
         let tab_id = self.ui.app_tabs.active_id();
         self.pending_documents.entry(tab_id).or_default()

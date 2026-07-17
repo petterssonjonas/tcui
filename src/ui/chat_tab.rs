@@ -910,7 +910,9 @@ impl<'a> ChatTab<'a> {
 
     fn render_input(&mut self, f: &mut Frame, area: Rect) {
         let theme = crate::theme::active_theme();
-        let box_area = input_box_area(area);
+        let (chip_area, box_area) = composer_areas(area, &self.state.pending_document_chips);
+        self.state.pending_document_chip_hit_areas =
+            crate::ui::pending_documents::render(f, chip_area, &self.state.pending_document_chips);
         self.state.input_area = Some(box_area);
         let max_body_lines = box_area.height.saturating_sub(2) as usize;
         let layout = input_layout(
@@ -991,7 +993,10 @@ impl<'a> ChatTab<'a> {
                 Constraint::Percentage(12),
             ])
             .split(area);
-        let box_area = input_box_area(horizontal[1]);
+        let (chip_area, box_area) =
+            composer_areas(horizontal[1], &self.state.pending_document_chips);
+        self.state.pending_document_chip_hit_areas =
+            crate::ui::pending_documents::render(f, chip_area, &self.state.pending_document_chips);
 
         self.state.input_area = Some(box_area);
         let max_body_lines = box_area.height.saturating_sub(2) as usize;
@@ -1075,6 +1080,24 @@ fn input_box_area(area: Rect) -> Rect {
     })
 }
 
+fn composer_areas(
+    area: Rect,
+    chips: &[crate::ui::pending_documents::PendingDocumentChip],
+) -> (Rect, Rect) {
+    let outer = input_box_area(area);
+    let chip_rows = crate::ui::pending_documents::row_count(chips, outer.width)
+        .min(outer.height.saturating_sub(3));
+    (
+        Rect::new(outer.x, outer.y, outer.width, chip_rows),
+        Rect::new(
+            outer.x,
+            outer.y.saturating_add(chip_rows),
+            outer.width,
+            outer.height.saturating_sub(chip_rows),
+        ),
+    )
+}
+
 fn chat_messages_area(area: Rect) -> Rect {
     Rect::new(
         area.x.saturating_add(4),
@@ -1085,8 +1108,14 @@ fn chat_messages_area(area: Rect) -> Rect {
 }
 
 fn bottom_input_height(state: &crate::ui::ChatTabState, area: Rect) -> u16 {
-    let max_box_height = (area.height / 2).max(3);
     let margin_height = INPUT_MARGIN_VERTICAL.saturating_mul(2);
+    let composer_width = area
+        .width
+        .saturating_sub(INPUT_MARGIN_HORIZONTAL.saturating_mul(2));
+    let chip_rows =
+        crate::ui::pending_documents::row_count(&state.pending_document_chips, composer_width);
+    let minimum_height = 3_u16.saturating_add(chip_rows).min(area.height);
+    let max_box_height = (area.height / 2).max(minimum_height).min(area.height);
     let viewport_height = max_box_height
         .saturating_sub(2)
         .saturating_sub(margin_height) as usize;
@@ -1100,13 +1129,18 @@ fn bottom_input_height(state: &crate::ui::ChatTabState, area: Rect) -> u16 {
         viewport_height.max(1),
         true,
     );
-    (layout.visible_lines.len() as u16 + 2 + margin_height).clamp(3, max_box_height)
+    (layout.visible_lines.len() as u16 + 2 + margin_height + chip_rows)
+        .clamp(minimum_height, max_box_height)
 }
 
 fn centered_input_height(state: &crate::ui::ChatTabState, area: Rect) -> u16 {
     let width = area.width.saturating_mul(76) / 100;
-    let max_box_height = (area.height / 2).max(5);
     let margin_height = INPUT_MARGIN_VERTICAL.saturating_mul(2);
+    let composer_width = width.saturating_sub(INPUT_MARGIN_HORIZONTAL.saturating_mul(2));
+    let chip_rows =
+        crate::ui::pending_documents::row_count(&state.pending_document_chips, composer_width);
+    let minimum_height = 5_u16.saturating_add(chip_rows).min(area.height);
+    let max_box_height = (area.height / 2).max(minimum_height).min(area.height);
     let viewport_height = max_box_height
         .saturating_sub(2)
         .saturating_sub(margin_height) as usize;
@@ -1120,7 +1154,8 @@ fn centered_input_height(state: &crate::ui::ChatTabState, area: Rect) -> u16 {
         viewport_height.max(1),
         true,
     );
-    (layout.visible_lines.len() as u16 + 2 + margin_height).clamp(5, max_box_height)
+    (layout.visible_lines.len() as u16 + 2 + margin_height + chip_rows)
+        .clamp(minimum_height, max_box_height)
 }
 
 pub(crate) fn input_layout(

@@ -30,10 +30,6 @@ impl DocumentDigest {
     pub(super) fn hex(&self) -> String {
         self.0.to_hex().to_string()
     }
-
-    pub fn prefix(&self) -> String {
-        digest_prefix(self.0)
-    }
 }
 
 impl fmt::Debug for DocumentDigest {
@@ -204,6 +200,7 @@ impl PendingDocuments {
         self.items.iter()
     }
 
+    #[cfg(test)]
     pub const fn len(&self) -> usize {
         self.items.len()
     }

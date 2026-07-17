@@ -15,7 +15,7 @@ impl TuiApp {
     }
 
     pub(crate) fn quit_action(&self) -> Action {
-        if self.quit_requires_confirmation() {
+        if self.quit_requires_confirmation() || self.has_pending_documents() {
             Action::ShowQuitConfirm
         } else {
             Action::Quit
@@ -109,16 +109,24 @@ impl TuiApp {
         match action {
             Action::Quit => Ok(()),
             Action::ConfirmQuit => {
+                self.discard_pending_documents();
                 self.action_tx.send(Action::Quit).ok();
                 Ok(())
             }
             Action::CancelModal => {
                 self.ui.active_modal = None;
+                self.cancel_pending_document_discard();
                 self.ctrl_c_count = 0;
                 Ok(())
             }
             Action::ShowQuitConfirm => {
-                if self.quit_requires_confirmation() {
+                if self.has_pending_documents() {
+                    self.request_pending_document_discard(
+                        crate::app::pending_documents::PendingDocumentDiscardAction::Quit,
+                    );
+                    self.ctrl_c_count = 1;
+                    self.last_ctrl_c = Some(std::time::Instant::now());
+                } else if self.quit_requires_confirmation() {
                     self.ui.active_modal = Some(crate::ui::Modal::QuitConfirm);
                     self.ctrl_c_count = 1;
                     self.last_ctrl_c = Some(std::time::Instant::now());
@@ -218,20 +226,26 @@ impl TuiApp {
                 }
                 Ok(())
             }
-            Action::NewChat => self.new_conversation(self.ui.active_tab),
-            Action::CloseChat => {
-                let active_conversation = self
-                    .ui
-                    .tabs
-                    .get(self.ui.active_tab)
-                    .map(|tab| tab.active_conversation)
-                    .unwrap_or(0);
-                if active_conversation != 0 {
-                    self.delete_conversation_by_id(active_conversation)?;
+            Action::NewChat => {
+                let tab_id = self.ui.active_tab;
+                if self.request_pending_document_discard(
+                    crate::app::pending_documents::PendingDocumentDiscardAction::NewConversation(
+                        tab_id,
+                    ),
+                ) {
+                    Ok(())
                 } else {
-                    self.ensure_tab_has_active_conversation(self.ui.active_tab)?;
+                    self.new_conversation(tab_id)
                 }
-                Ok(())
+            }
+            Action::CloseChat => {
+                if self.request_pending_document_discard(
+                    crate::app::pending_documents::PendingDocumentDiscardAction::CloseConversation,
+                ) {
+                    Ok(())
+                } else {
+                    self.close_active_conversation()
+                }
             }
             Action::ToggleConversationPinned(conversation_id) => {
                 self.toggle_conversation_pinned(conversation_id)
@@ -240,28 +254,16 @@ impl TuiApp {
                 self.delete_conversation_by_id(conversation_id)
             }
             Action::SendMessage(msg) => self.send_message(msg).await,
-            Action::QueuePendingDocument(input) => {
-                let document = input.snapshot()?;
-                let status = format!(
-                    "Queued {} ({} lines, {} bytes, {})",
-                    document.display_name(),
-                    document.line_count(),
-                    document.byte_count(),
-                    document.digest().prefix(),
-                );
-                let pending_count = {
-                    let pending = self.pending_documents_mut();
-                    pending.insert(document)?;
-                    pending.len()
-                };
-                let status = format!("{status}; {pending_count} pending");
-                self.ui.update_status(status);
+            Action::QueuePendingDocument(input) => self.queue_pending_document(input),
+            Action::InsertArtifactToChat(handle) => {
+                self.insert_artifact_to_chat(handle);
                 Ok(())
             }
             Action::RemovePendingDocument(document_id) => {
-                self.pending_documents_mut().remove(document_id);
+                self.remove_pending_document(document_id);
                 Ok(())
             }
+            Action::ConfirmPendingDocumentDiscard => self.confirm_pending_document_discard(),
             Action::AwaitSubmissionConfirmation(app_tab_id) => self.transition_submission(
                 app_tab_id,
                 crate::app::submission::SubmissionState::await_confirmation,
@@ -339,8 +341,28 @@ impl TuiApp {
                 }
                 Ok(())
             }
-            Action::LoadConversation(conv_id) => self.load_conversation(conv_id),
-            Action::NewConversation(tab_id) => self.new_conversation(tab_id),
+            Action::LoadConversation(conv_id) => {
+                if self.request_pending_document_discard(
+                    crate::app::pending_documents::PendingDocumentDiscardAction::LoadConversation(
+                        conv_id,
+                    ),
+                ) {
+                    Ok(())
+                } else {
+                    self.load_conversation(conv_id)
+                }
+            }
+            Action::NewConversation(tab_id) => {
+                if self.request_pending_document_discard(
+                    crate::app::pending_documents::PendingDocumentDiscardAction::NewConversation(
+                        tab_id,
+                    ),
+                ) {
+                    Ok(())
+                } else {
+                    self.new_conversation(tab_id)
+                }
+            }
             Action::UpdateModel(model) => {
                 self.ui.update_model(model);
                 Ok(())
@@ -370,10 +392,16 @@ impl TuiApp {
                 Ok(())
             }
             Action::SwitchTab(idx) => {
-                self.ui.active_tab = idx;
-                self.ui.settings_v2 = None;
-                self.refresh_visible_selectors();
-                Ok(())
+                if self.request_pending_document_discard(
+                    crate::app::pending_documents::PendingDocumentDiscardAction::SwitchTab(idx),
+                ) {
+                    Ok(())
+                } else {
+                    self.ui.active_tab = idx;
+                    self.ui.settings_v2 = None;
+                    self.refresh_visible_selectors();
+                    Ok(())
+                }
             }
             Action::AddTab(tab) => {
                 self.ui.add_tab(tab);
@@ -382,9 +410,15 @@ impl TuiApp {
                 Ok(())
             }
             Action::RemoveTab(idx) => {
-                self.ui.remove_tab(idx);
-                self.refresh_visible_selectors();
-                Ok(())
+                if self.request_pending_document_discard(
+                    crate::app::pending_documents::PendingDocumentDiscardAction::RemoveTab(idx),
+                ) {
+                    Ok(())
+                } else {
+                    self.ui.remove_tab(idx);
+                    self.refresh_visible_selectors();
+                    Ok(())
+                }
             }
             Action::ToggleSessionList => {
                 self.ui.show_session_list = !self.ui.show_session_list;
@@ -596,7 +630,7 @@ impl TuiApp {
                 app_tab_id,
                 crate::app::submission::SubmissionState::launch,
             )?;
-            self.pending_documents.remove(&app_tab_id);
+            self.discard_pending_documents();
             return Ok(());
         }
         let endpoint = if is_local_provider {
@@ -912,7 +946,7 @@ impl TuiApp {
         });
 
         self.transition_submission(app_tab_id, crate::app::submission::SubmissionState::launch)?;
-        self.pending_documents.remove(&app_tab_id);
+        self.discard_pending_documents();
 
         Ok(())
     }

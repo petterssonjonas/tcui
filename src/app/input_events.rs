@@ -463,10 +463,17 @@ impl TuiApp {
 
         // Modal input handling takes priority
         if self.ui.active_modal.is_some() {
+            let modal = self.ui.active_modal;
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     self.ui.active_modal = None;
-                    Some(Action::ConfirmQuit)
+                    Some(match modal {
+                        Some(crate::ui::Modal::QuitConfirm) => Action::ConfirmQuit,
+                        Some(crate::ui::Modal::DiscardPendingDocuments) => {
+                            Action::ConfirmPendingDocumentDiscard
+                        }
+                        None => Action::CancelModal,
+                    })
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     self.ui.active_modal = None;
@@ -746,8 +753,20 @@ impl TuiApp {
                     None
                 }
                 KeyCode::Backspace => {
-                    self.backspace_input_char();
-                    None
+                    let last_chip = self
+                        .ui
+                        .tabs
+                        .get(self.ui.active_tab)
+                        .filter(|tab| tab.input_content.is_empty())
+                        .and_then(|tab| tab.pending_document_chips.last())
+                        .map(crate::ui::pending_documents::PendingDocumentChip::id);
+                    match last_chip {
+                        Some(id) => Some(Action::RemovePendingDocument(id)),
+                        None => {
+                            self.backspace_input_char();
+                            None
+                        }
+                    }
                 }
                 _ => None,
             }
@@ -1040,12 +1059,13 @@ impl TuiApp {
             if let Some(chat_area) = self.ui.chat_area {
                 let popup_area = crate::ui::modals::artifact_viewer::popup_area(chat_area);
                 if popup_area.contains(pos) {
-                    let (close, edit, delete, handle) =
+                    let (close, edit, delete, insert_to_chat, handle) =
                         self.ui.artifact_viewer.as_ref().map(|viewer| {
                             (
                                 viewer.hit_areas.close,
                                 viewer.hit_areas.edit,
                                 viewer.hit_areas.delete,
+                                viewer.hit_areas.insert_to_chat,
                                 viewer.handle().clone(),
                             )
                         })?;
@@ -1061,6 +1081,9 @@ impl TuiApp {
                     if delete.is_some_and(|area| area.contains(pos)) {
                         self.ui.delete_confirm = Some(handle);
                         return None;
+                    }
+                    if insert_to_chat.is_some_and(|area| area.contains(pos)) {
+                        return Some(Action::InsertArtifactToChat(handle));
                     }
                     return None;
                 }
@@ -1120,10 +1143,17 @@ impl TuiApp {
         }
 
         if self.ui.active_modal.is_some() {
+            let modal = self.ui.active_modal;
             if let Some(modal_areas) = self.ui.modal_areas {
                 if modal_areas.yes.contains(pos) {
                     self.ui.active_modal = None;
-                    return Some(Action::ConfirmQuit);
+                    return Some(match modal {
+                        Some(crate::ui::Modal::QuitConfirm) => Action::ConfirmQuit,
+                        Some(crate::ui::Modal::DiscardPendingDocuments) => {
+                            Action::ConfirmPendingDocumentDiscard
+                        }
+                        None => Action::CancelModal,
+                    });
                 }
                 if modal_areas.no.contains(pos) {
                     self.ui.active_modal = None;
@@ -1294,6 +1324,14 @@ impl TuiApp {
                     return None;
                 }
             }
+        }
+
+        if let Some(id) = self.ui.tabs.get(self.ui.active_tab).and_then(|tab| {
+            tab.pending_document_chip_hit_areas
+                .iter()
+                .find_map(|(id, area)| area.contains(pos).then_some(*id))
+        }) {
+            return Some(Action::RemovePendingDocument(id));
         }
 
         if self.ui.show_selector {

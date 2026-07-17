@@ -8,7 +8,9 @@ pub enum Action {
     CancelModal,
     SendMessage(String),
     QueuePendingDocument(crate::app::submission::PendingDocumentInput),
+    InsertArtifactToChat(crate::ui::artifact_sidebar::ArtifactHandle),
     RemovePendingDocument(crate::app::submission::PendingDocumentId),
+    ConfirmPendingDocumentDiscard,
     AwaitSubmissionConfirmation(crate::ui::app_tabs::AppTabId),
     ConfirmSubmission(crate::ui::app_tabs::AppTabId),
     SubmissionFailedAfterLaunch(

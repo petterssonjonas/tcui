@@ -65,3 +65,38 @@ fn request_only_document_request_debug_redacts_snapshot_and_delimiters() {
     assert!(!debug.contains("WIRE-DOCUMENT-CONTENT"));
     assert!(!debug.contains("TCUI_DOCUMENT"));
 }
+
+fn assert_insert_to_chat_wire_filter(backend_type: &str) {
+    let body = serialized_text(backend_type);
+
+    assert_eq!(body.matches("wire instruction").count(), 1);
+    assert_eq!(body.matches("WIRE-DOCUMENT-CONTENT").count(), 1);
+    assert!(!body.contains("[wire.md - 1 lines]"));
+    assert!(!body.contains("pending_document_chips"));
+    println!("INSERT_TO_CHAT_WIRE_{backend_type}={body}");
+}
+
+#[test]
+fn insert_to_chat_generic_wire_contains_instruction_and_snapshot_without_chip_metadata() {
+    assert_insert_to_chat_wire_filter("openai");
+}
+
+#[test]
+fn insert_to_chat_anthropic_wire_contains_instruction_and_snapshot_without_chip_metadata() {
+    assert_insert_to_chat_wire_filter("anthropic");
+}
+
+#[test]
+fn insert_to_chat_codex_wire_contains_instruction_and_snapshot_without_chip_metadata() {
+    assert_insert_to_chat_wire_filter("codex");
+}
+
+#[test]
+fn insert_to_chat_debug_output_redacts_snapshot_content_and_chip_metadata() {
+    let debug = format!("{:?}", request_with_documents("openai"));
+
+    assert!(!debug.contains("WIRE-DOCUMENT-CONTENT"));
+    assert!(!debug.contains("[wire.md - 1 lines]"));
+    assert!(!debug.contains("TCUI_DOCUMENT"));
+    println!("INSERT_TO_CHAT_REDACTED_DEBUG={debug}");
+}

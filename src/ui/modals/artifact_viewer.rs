@@ -19,6 +19,7 @@ pub struct ArtifactViewerHitAreas {
     pub edit: Option<Rect>,
     pub save: Option<Rect>,
     pub delete: Option<Rect>,
+    pub insert_to_chat: Option<Rect>,
 }
 
 pub struct ArtifactViewerState {
@@ -138,7 +139,7 @@ impl ArtifactViewerState {
                 edit: !self.view_only && self.artifact.path.is_some(),
                 save: false,
                 delete: !self.view_only,
-                insert_to_chat: false,
+                insert_to_chat: self.can_insert_to_chat(),
             },
         );
         self.scroll = self.document.scroll;
@@ -148,7 +149,19 @@ impl ArtifactViewerState {
             edit: self.document.hit_areas.edit,
             save: self.document.hit_areas.save,
             delete: self.document.hit_areas.delete,
+            insert_to_chat: self.document.hit_areas.insert_to_chat,
         };
+    }
+
+    fn can_insert_to_chat(&self) -> bool {
+        !self.view_only
+            && matches!(
+                self.artifact.kind,
+                ArtifactKind::Markdown | ArtifactKind::Text
+            )
+            && self.artifact.content.as_ref().is_some_and(|content| {
+                !content.is_empty() && content.len() <= crate::app::submission::MAX_DOCUMENT_BYTES
+            })
     }
 }
 
@@ -298,3 +311,7 @@ mod tests {
         assert_eq!(viewer.scroll, 0);
     }
 }
+
+#[cfg(test)]
+#[path = "artifact_viewer_insert_to_chat_tests.rs"]
+mod insert_to_chat_tests;

@@ -3,6 +3,7 @@ use ratatui::layout::Rect;
 use std::sync::Mutex;
 
 mod chat_file_sidebar;
+mod insert_to_chat;
 mod markdown_vault_workspace_ui;
 
 fn env_lock() -> &'static Mutex<()> {
