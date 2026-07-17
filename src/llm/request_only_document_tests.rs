@@ -65,22 +65,22 @@ fn serialized_text(backend_type: &str) -> String {
 }
 
 #[test]
-fn request_only_document_openai_compatible_wire_body_includes_snapshot() {
+fn inserted_document_expansion_openai_compatible_wire_body_includes_snapshot() {
     assert!(serialized_text("openai").contains("WIRE-DOCUMENT-CONTENT"));
 }
 
 #[test]
-fn request_only_document_anthropic_wire_body_includes_snapshot() {
+fn inserted_document_expansion_anthropic_wire_body_includes_snapshot() {
     assert!(serialized_text("anthropic").contains("WIRE-DOCUMENT-CONTENT"));
 }
 
 #[test]
-fn request_only_document_codex_wire_body_includes_snapshot() {
+fn inserted_document_expansion_codex_wire_body_includes_snapshot() {
     assert!(serialized_text("codex").contains("WIRE-DOCUMENT-CONTENT"));
 }
 
 #[test]
-fn request_only_document_request_debug_redacts_snapshot_and_delimiters() {
+fn inserted_document_expansion_request_debug_redacts_snapshot_and_delimiters() {
     let debug = format!("{:?}", request_with_documents("openai"));
 
     assert!(!debug.contains("WIRE-DOCUMENT-CONTENT"));

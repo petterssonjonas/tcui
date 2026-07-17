@@ -40,13 +40,23 @@ from Chat with `@vault`:
 
 Workspace tabs are ephemeral and are not restored after TCUI restarts; profile
 configuration persists. Vault mutations require an exact preview and explicit
-confirmation. Chat files persist with their conversation, while **Save** creates
-an independent Saved file. **Insert to chat** sends an eligible document once in
-the next request without storing its contents or chip in conversation history.
+confirmation. Generated files are stored once in **Saved files**; **Chat files**
+shows conversation-scoped links to those canonical files with View and Del
+actions, but no Save action. Deleting a file from either section removes that
+physical file and all of its links, while deleting a conversation removes only
+its links and preserves the Saved files. For `@save`, TCUI saves the model's
+complete file body directly and replaces the visible response with
+`Saved as <filename>`.
+
+**Insert to chat** keeps removable document chips in the composer until send.
+Sending expands their snapshots in insertion order into the ordinary user
+message text. That exact plain text is persisted, displayed, processed, and
+included in later conversation context just as if it had been pasted manually;
+chip labels and source metadata are not persisted.
 
 See the [canonical Markdown Vault guide](skills/vault/SKILL.md) for profile and
 workspace navigation, exact selector grammar, move rollback and recovery,
-request-only insertion, lock behavior, and every enforced limit.
+persisted document expansion, lock behavior, and every enforced limit.
 
 Markdown Vault works with ordinary Markdown folders, including folders used by
 Obsidian. TCUI is not affiliated with or endorsed by Obsidian, and Markdown

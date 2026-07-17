@@ -8,7 +8,7 @@ use super::submission::{
 };
 
 #[test]
-fn request_only_document_snapshots_utf8_metadata_immutably() {
+fn inserted_document_expansion_snapshots_utf8_metadata_immutably() {
     // Given
     let mut source = b"first\nsecond\n".to_vec();
 
@@ -29,7 +29,7 @@ fn request_only_document_snapshots_utf8_metadata_immutably() {
 }
 
 #[test]
-fn request_only_document_rejects_binary_and_per_item_oversize() {
+fn inserted_document_expansion_rejects_binary_and_per_item_oversize() {
     // Given
     let binary = [0xff, 0xfe];
     let oversized = vec![b'x'; MAX_DOCUMENT_BYTES + 1];
@@ -46,7 +46,7 @@ fn request_only_document_rejects_binary_and_per_item_oversize() {
 }
 
 #[test]
-fn request_only_document_collection_deduplicates_orders_limits_and_removes() {
+fn inserted_document_expansion_collection_deduplicates_orders_limits_and_removes() {
     // Given
     let first = PendingDocument::snapshot("source-a", "a.md", b"alpha").expect("snapshot first");
     let same_source =
@@ -86,7 +86,7 @@ fn request_only_document_collection_deduplicates_orders_limits_and_removes() {
 }
 
 #[test]
-fn request_only_document_collection_rejects_aggregate_oversize() {
+fn inserted_document_expansion_collection_rejects_aggregate_oversize() {
     // Given
     let item = vec![b'x'; MAX_DOCUMENT_BYTES];
     let mut documents = PendingDocuments::default();
@@ -112,7 +112,7 @@ fn request_only_document_collection_rejects_aggregate_oversize() {
 }
 
 #[test]
-fn request_only_document_submission_rejects_empty_instruction() {
+fn inserted_document_expansion_submission_rejects_empty_instruction() {
     // Given
     let documents = PendingDocuments::default();
 
@@ -125,7 +125,7 @@ fn request_only_document_submission_rejects_empty_instruction() {
 }
 
 #[test]
-fn request_only_document_prepared_turn_expands_to_exact_plain_text() {
+fn inserted_document_expansion_prepared_turn_expands_to_exact_plain_text() {
     // Given
     let mut documents = PendingDocuments::default();
     documents
@@ -160,7 +160,7 @@ fn request_only_document_prepared_turn_expands_to_exact_plain_text() {
 }
 
 #[test]
-fn request_only_document_multiple_snapshots_expand_in_insertion_order() {
+fn inserted_document_expansion_multiple_snapshots_expand_in_insertion_order() {
     // Given
     let mut documents = PendingDocuments::default();
     documents
@@ -181,7 +181,7 @@ fn request_only_document_multiple_snapshots_expand_in_insertion_order() {
 }
 
 #[test]
-fn request_only_document_chip_only_submission_expands_to_snapshot() {
+fn inserted_document_expansion_chip_only_submission_expands_to_snapshot() {
     // Given
     let mut documents = PendingDocuments::default();
     documents
@@ -199,7 +199,7 @@ fn request_only_document_chip_only_submission_expands_to_snapshot() {
 }
 
 #[test]
-fn request_only_document_canonical_text_is_visible_to_normal_request_parsers() {
+fn inserted_document_expansion_canonical_text_is_visible_to_normal_request_parsers() {
     // Given
     let mut documents = PendingDocuments::default();
     documents
@@ -233,7 +233,7 @@ fn request_only_document_canonical_text_is_visible_to_normal_request_parsers() {
 }
 
 #[test]
-fn request_only_document_next_turn_reuses_expanded_history_once() {
+fn inserted_document_expansion_next_turn_reuses_expanded_history_once() {
     // Given
     let mut documents = PendingDocuments::default();
     documents
@@ -266,7 +266,7 @@ fn request_only_document_next_turn_reuses_expanded_history_once() {
 }
 
 #[test]
-fn request_only_document_state_transitions_consume_snapshots_only_at_launch() {
+fn inserted_document_expansion_state_transitions_consume_snapshots_only_at_launch() {
     // Given
     let mut documents = PendingDocuments::default();
     documents
@@ -290,7 +290,7 @@ fn request_only_document_state_transitions_consume_snapshots_only_at_launch() {
 }
 
 #[test]
-fn request_only_document_postlaunch_failure_never_restores_snapshots() {
+fn inserted_document_expansion_postlaunch_failure_never_restores_snapshots() {
     // Given
     let mut documents = PendingDocuments::default();
     documents
@@ -316,7 +316,7 @@ fn request_only_document_postlaunch_failure_never_restores_snapshots() {
 }
 
 #[test]
-fn request_only_document_prelaunch_failure_restores_draft_with_documents() {
+fn inserted_document_expansion_prelaunch_failure_restores_draft_with_documents() {
     // Given
     let mut documents = PendingDocuments::default();
     documents
@@ -336,7 +336,7 @@ fn request_only_document_prelaunch_failure_restores_draft_with_documents() {
 }
 
 #[test]
-fn request_only_document_debug_and_errors_redact_content_and_source_paths() {
+fn inserted_document_expansion_debug_and_errors_redact_content_and_source_paths() {
     // Given
     let secret = "DOCUMENT-CONTENT-SECRET";
     let path = "/home/private/absolute/secret.md";
@@ -356,7 +356,7 @@ fn request_only_document_debug_and_errors_redact_content_and_source_paths() {
 }
 
 #[test]
-fn request_only_document_arc_snapshot_is_shared_without_mutation() {
+fn inserted_document_expansion_arc_snapshot_is_shared_without_mutation() {
     // Given
     let document =
         PendingDocument::snapshot("source", "one.md", b"immutable").expect("snapshot document");
@@ -370,7 +370,7 @@ fn request_only_document_arc_snapshot_is_shared_without_mutation() {
 }
 
 #[test]
-fn request_only_document_prelaunch_validation_retains_snapshots_and_persists_nothing() {
+fn inserted_document_expansion_prelaunch_validation_retains_snapshots_and_persists_nothing() {
     super::tests::with_test_app("request-doc-prelaunch", |app| {
         // Given
         app.pending_documents_mut()
@@ -415,7 +415,7 @@ fn request_only_document_prelaunch_validation_retains_snapshots_and_persists_not
 }
 
 #[test]
-fn request_only_document_launch_consumes_snapshots_and_reloads_expanded_text() {
+fn inserted_document_expansion_launch_consumes_snapshots_and_reloads_expanded_text() {
     super::tests::with_test_app("request-doc-launch", |app| {
         // Given
         #[cfg(feature = "memory")]
@@ -461,7 +461,7 @@ fn request_only_document_launch_consumes_snapshots_and_reloads_expanded_text() {
 }
 
 #[test]
-fn request_only_document_whitespace_instruction_launches_nonempty_snapshot() {
+fn inserted_document_expansion_whitespace_instruction_launches_nonempty_snapshot() {
     super::tests::with_test_app("request-doc-empty", |app| {
         // Given
         app.pending_documents_mut()

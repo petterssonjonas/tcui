@@ -162,25 +162,26 @@ mutation lock is busy.
 
 ## Chat files and Saved files
 
-`@save` output is stored as a private, per-conversation **Chat file**. Chat files
-survive normal exit and restart, and the Chat files sidebar section is always
-present. **Saved files**, **Memories**, and **Markdown Vault** are optional,
+Generated files are stored once in the configured **Saved files** folder. The
+**Chat files** section contains conversation-scoped links to those canonical
+files, while **Saved files** lists them globally. Links survive normal exit and
+restart. **Saved files**, **Memories**, and **Markdown Vault** remain optional,
 independently configurable sidebar sections. Each flat section displays up to
 three rows at once and can be scrolled.
 
-Choosing **Save** on a Chat file creates a separate collision-safe copy in the
-configured Saved files folder. The Chat and Saved copies then have independent
-lifecycle: deleting either one does not delete the other. Deleting a
-conversation deletes its Chat files after the conversation deletion commits;
-if cache cleanup fails, TCUI records an orphan marker and retries cleanup on the
-next startup.
+A Chat-file row provides only **View** and **Del** because its target is already
+saved. Deleting through either a Chat-file link or the matching Saved-file row
+deletes the one physical file and removes every link to it. Deleting a
+conversation removes only that conversation's links and preserves the physical
+Saved files. Link metadata is versioned and protected by a nonblocking lock;
+future versions fail closed without rewrite.
 
-Chat-file manifests are versioned. Corrupt current manifests are quarantined
-and rebuilt from safe payloads; future manifest versions fail closed without
-rewrite or quarantine. Per-conversation Chat-file locks are nonblocking and
-independent, so contention in one conversation does not block another.
+For `@save`, the model still returns the complete requested file body for TCUI
+to capture. TCUI saves it directly as the canonical file, adds the producing
+conversation's link, and replaces the user-visible assistant response with
+`Saved as <filename>` using the actual collision-resolved filename.
 
-## Insert one document into one request
+## Insert documents into chat text
 
 Open an eligible nonempty Markdown or text document in the Chat modal Viewer and
 choose **Insert to chat**. The embedded workspace Viewer is view/edit only and
@@ -189,11 +190,14 @@ shows a removable chip such as `[document.md - 241 lines]` above the composer.
 Chips wrap across rows; their close control removes one document, and Backspace
 with empty input removes the last chip.
 
-Send a typed instruction with the chips. Each snapshot is appended as untrusted
-reference data to exactly one prepared provider request. Only the typed
-instruction is persisted as the user message; document bytes, source paths,
-request envelope, and chip metadata are never stored in Chat history, title
-generation, logs, reloaded history, or later model context.
+On send, TCUI trims the typed instruction, appends each exact snapshot in chip
+insertion order, and joins nonempty segments with one blank line. A nonempty
+snapshot can be sent without a typed instruction. The resulting plain text is
+the ordinary user message used for display, history, title generation, skills,
+search and reminder detection, notifications, and every provider request. It
+therefore remains in later model context exactly as manually pasted text would.
+No chip label, display name, source path, digest, line count, delimiter, or
+attachment metadata is added to the persisted message.
 
 A failure before launch retains the snapshots and chips for retry. Once the
 provider task is launched, snapshots and chips are consumed exactly once. A
@@ -214,8 +218,8 @@ rescan; it never silently expands the bound.
 | Search | 10,000 files, 256 MiB total bytes read, 1 MiB per file, and 500 matches. |
 | Native skill transport | Skill source and tool catalogs are each capped at 20,000 characters; rendered tool results are capped at 48,000 characters and marked partial before clipping. |
 | Move | 100 regular files and 256 MiB total source bytes per plan. |
-| Request-only insertion | 256 KiB per document and 1 MiB total pending document bytes per Chat tab. Binary, empty, or oversized documents are rejected without changing pending state. |
-| Chat files | 64 MiB per file, 256 MiB per conversation, and sanitized names capped at 120 bytes. Quota failures do not evict existing files. |
+| Insert-to-chat expansion | 256 KiB per document and 1 MiB total pending document bytes per Chat tab. Binary, empty, or oversized documents are rejected without changing pending state. |
+| Saved filenames | Generated names are sanitized and capped at 120 bytes before any collision suffix is added. |
 | Watch events | Queue capacity 256 and at most 256 events drained per workspace per runtime tick. Overflow requests a full rescan. |
 | Full-rescan reconciliation | At most 1,000 entries converted per tick, within the same 50,000-entry and depth-64 walk bounds. |
 | Open workspaces | One app tab per profile. Tabs are process-local and never persisted. |
