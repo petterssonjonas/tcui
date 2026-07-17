@@ -1,13 +1,13 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::storage::cache_paths::TcuiCachePaths;
+use crate::storage::paths::TcuiDataPaths;
 
-use super::{ChatFileStore, StoreLimits};
+use super::ChatSavedFileStore;
 
-mod chat_file_store_limits;
-mod chat_file_store_locking;
-mod chat_file_store_persistence;
-mod chat_file_store_recovery;
+mod chat_saved_file_store_deletion;
+mod chat_saved_file_store_failures;
+mod chat_saved_file_store_persistence;
+mod chat_saved_file_store_reconciliation;
 
 struct TestRoot {
     path: PathBuf,
@@ -16,29 +16,45 @@ struct TestRoot {
 impl TestRoot {
     fn new(label: &str) -> Self {
         let path = std::env::temp_dir().join(format!(
-            "tcui-chat-file-store-{label}-{}",
+            "tcui-chat-saved-file-store-{label}-{}",
             rand::random::<u64>()
         ));
         std::fs::create_dir_all(&path).expect("create test root");
         Self { path }
     }
 
-    fn paths(&self) -> TcuiCachePaths {
-        TcuiCachePaths::from_root(self.path.join("tcui"))
+    fn saved_root(&self) -> PathBuf {
+        self.path.join("saved")
     }
 
-    fn store(&self) -> ChatFileStore {
-        ChatFileStore::new(self.paths())
+    fn data_paths(&self) -> TcuiDataPaths {
+        TcuiDataPaths::from_root(self.path.join("data").join("tcui"))
     }
 
-    fn store_with_limits(&self, per_file: u64, per_conversation: u64) -> ChatFileStore {
-        ChatFileStore::with_limits(
-            self.paths(),
-            StoreLimits {
-                per_file,
-                per_conversation,
-            },
-        )
+    fn store(&self) -> ChatSavedFileStore {
+        ChatSavedFileStore::new(self.saved_root(), self.data_paths())
+    }
+
+    fn manifest_path(&self) -> PathBuf {
+        self.data_paths().chat_file_links_manifest
+    }
+
+    fn lock_path(&self) -> PathBuf {
+        self.data_paths().chat_file_links_lock
+    }
+
+    fn saved_path(&self, filename: &str) -> PathBuf {
+        self.saved_root().join(filename)
+    }
+
+    fn write_manifest(&self, bytes: &[u8]) {
+        let paths = self.data_paths();
+        std::fs::create_dir_all(&paths.chat_file_links_dir).expect("create link directory");
+        std::fs::write(paths.chat_file_links_manifest, bytes).expect("write link manifest");
+    }
+
+    fn read(&self, path: &Path) -> Vec<u8> {
+        std::fs::read(path).expect("read test file")
     }
 }
 

@@ -58,7 +58,7 @@ use crate::{config::AppConfig, llm::LlmClient, obsidian::Vault, storage::Storage
 
 pub struct TuiApp {
     pub storage: Storage,
-    pub(crate) chat_files: crate::storage::chat_files::ChatFileStore,
+    pub(crate) chat_files: crate::storage::chat_files::ChatSavedFileStore,
     pub config: Arc<tokio::sync::RwLock<AppConfig>>,
     pub ui: crate::ui::UI,
     pub vault: Option<Arc<Vault>>,
@@ -84,7 +84,7 @@ impl TuiApp {
         vault: Option<Arc<Vault>>,
     ) -> Self {
         let mut ui = crate::ui::UI::new();
-        let chat_files = crate::storage::chat_files::ChatFileStore::discover();
+        let chat_files = crate::storage::chat_files::ChatSavedFileStore::discover();
         let orphan_cleanup_error = chat_files.cleanup_orphans().err();
         let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
         let system_prompt = Self::load_system_prompt();

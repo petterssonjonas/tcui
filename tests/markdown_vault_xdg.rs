@@ -15,8 +15,8 @@ const SCENARIOS: [(&str, &str); 9] = [
         "app::markdown_vault_restart_tests::markdown_vault_restart_persists_profiles_and_default_but_not_workspace_tabs",
     ),
     (
-        "Chat-file restart",
-        "storage::chat_files::tests::chat_file_store_persistence::chat_file_store_reloads_records_and_payloads_after_restart",
+        "Saved-file link restart",
+        "storage::chat_files::tests::chat_saved_file_store_persistence::chat_saved_file_store_restart_preserves_link_and_bytes",
     ),
     (
         "per-process Vault lock",
@@ -27,8 +27,8 @@ const SCENARIOS: [(&str, &str); 9] = [
         "vault::vault_move_recovery::vault_move_recovery_restart_and_second_rerun_are_idempotent",
     ),
     (
-        "future Chat manifest fails closed",
-        "storage::chat_files::tests::chat_file_store_recovery::chat_file_store_preserves_future_manifest_without_rewrite",
+        "future Chat link manifest fails closed",
+        "storage::chat_files::tests::chat_saved_file_store_reconciliation::chat_saved_file_store_preserves_future_manifest_without_rewrite",
     ),
     (
         "future move journal fails closed",

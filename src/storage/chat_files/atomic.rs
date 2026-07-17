@@ -12,7 +12,7 @@ use crate::storage::paths::set_unix_mode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AtomicWriteTarget {
-    Payload,
+    SavedFile,
     Manifest,
 }
 
@@ -20,7 +20,7 @@ impl AtomicWriteTarget {
     #[cfg(test)]
     const fn code(self) -> u8 {
         match self {
-            Self::Payload => 1,
+            Self::SavedFile => 1,
             Self::Manifest => 2,
         }
     }
@@ -33,12 +33,38 @@ pub(super) struct AtomicWriter {
 }
 
 impl AtomicWriter {
-    pub(super) fn write(
+    pub(super) fn write_replace(
         &self,
         path: &Path,
         contents: &[u8],
         target: AtomicWriteTarget,
     ) -> Result<(), ChatFileError> {
+        let (mut temp, parent) = self.write_temp(path, contents, target)?;
+        fs::rename(temp.path(), path)?;
+        temp.disarm();
+        set_unix_mode(path, 0o600)?;
+        sync_directory(parent)
+    }
+
+    pub(super) fn write_new(
+        &self,
+        path: &Path,
+        contents: &[u8],
+        target: AtomicWriteTarget,
+    ) -> Result<(), ChatFileError> {
+        let (temp, parent) = self.write_temp(path, contents, target)?;
+        fs::hard_link(temp.path(), path)?;
+        set_unix_mode(path, 0o600)?;
+        fs::remove_file(temp.path())?;
+        sync_directory(parent)
+    }
+
+    fn write_temp<'a>(
+        &self,
+        path: &'a Path,
+        contents: &[u8],
+        target: AtomicWriteTarget,
+    ) -> Result<(TempPath, &'a Path), ChatFileError> {
         #[cfg(not(test))]
         let _ = target;
 
@@ -52,7 +78,7 @@ impl AtomicWriter {
                 .unwrap_or("chat-file"),
             rand::random::<u64>()
         );
-        let mut temp = TempPath::new(parent.join(temp_name));
+        let temp = TempPath::new(parent.join(temp_name));
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -67,11 +93,7 @@ impl AtomicWriter {
             return Err(ChatFileError::InjectedAtomicWriteFailure);
         }
 
-        fs::rename(temp.path(), path)?;
-        temp.disarm();
-        set_unix_mode(path, 0o600)?;
-        sync_directory(parent)?;
-        Ok(())
+        Ok((temp, parent))
     }
 
     #[cfg(test)]
@@ -89,9 +111,7 @@ impl AtomicWriter {
 
 pub(super) fn sync_directory(path: &Path) -> Result<(), ChatFileError> {
     #[cfg(unix)]
-    {
-        OpenOptions::new().read(true).open(path)?.sync_all()?;
-    }
+    OpenOptions::new().read(true).open(path)?.sync_all()?;
 
     #[cfg(not(unix))]
     let _ = path;
@@ -105,7 +125,7 @@ struct TempPath {
 }
 
 impl TempPath {
-    fn new(path: PathBuf) -> Self {
+    const fn new(path: PathBuf) -> Self {
         Self { path, armed: true }
     }
 
@@ -113,7 +133,7 @@ impl TempPath {
         &self.path
     }
 
-    fn disarm(&mut self) {
+    const fn disarm(&mut self) {
         self.armed = false;
     }
 }

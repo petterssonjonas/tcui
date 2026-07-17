@@ -171,11 +171,11 @@ fn close_chat_purges_chat_files_after_storage_delete() {
 }
 
 #[test]
-fn purge_failure_keeps_conversation_deleted_and_startup_cleans_orphan() {
+fn purge_failure_keeps_conversation_deleted_until_link_cleanup_retries() {
     // Given
     let _guard = env_lock().lock().expect("env lock poisoned");
     let root = unique_root("purge-recovery");
-    let cache_home = configure_environment(&root);
+    configure_environment(&root);
     let saved_dir = root.join("saved");
     let mut app = app_with_saved_dir(&saved_dir);
     let conversation_id = app.ui.tabs[0].active_conversation;
@@ -188,25 +188,33 @@ fn purge_failure_keeps_conversation_deleted_and_startup_cleans_orphan() {
 
     // Then
     assert!(app.storage.get_messages(conversation_id).is_err());
-    let chat_files = cache_home.join("tcui/chat-files");
-    assert!(std::fs::read_dir(&chat_files)
-        .expect("read chat-file root")
-        .filter_map(Result::ok)
-        .any(|entry| entry.file_name().to_string_lossy().starts_with(".orphan-")));
-    drop(app);
+    assert_eq!(
+        app.chat_files
+            .list(conversation_id)
+            .expect("list retained link")
+            .len(),
+        1
+    );
+    assert_eq!(
+        app.chat_files.list_saved().expect("list saved files").len(),
+        1
+    );
 
     // When
-    let _restarted = app_with_saved_dir(&saved_dir);
+    app.chat_files
+        .purge_conversation(conversation_id)
+        .expect("retry link cleanup");
 
     // Then
-    assert!(!std::fs::read_dir(&chat_files)
-        .expect("read cleaned chat-file root")
-        .filter_map(Result::ok)
-        .any(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            name.starts_with(".orphan-") || name.starts_with(".purge-")
-        }));
+    assert!(app
+        .chat_files
+        .list(conversation_id)
+        .expect("list cleaned links")
+        .is_empty());
+    assert_eq!(
+        app.chat_files.list_saved().expect("list saved files").len(),
+        1
+    );
     reset_environment(&root);
 }
 
@@ -215,7 +223,7 @@ fn lock_contention_preserves_chat_file_until_delete_can_acquire_lock() {
     // Given
     let _guard = env_lock().lock().expect("env lock poisoned");
     let root = unique_root("lock-contention");
-    let cache_home = configure_environment(&root);
+    configure_environment(&root);
     let mut app = app_with_saved_dir(&root.join("saved"));
     let conversation_id = app.ui.tabs[0].active_conversation;
     let handle = persist_report(&mut app, conversation_id);
@@ -223,9 +231,9 @@ fn lock_contention_preserves_chat_file_until_delete_can_acquire_lock() {
         .read(true)
         .write(true)
         .open(
-            cache_home
-                .join("tcui/chat-files")
-                .join(conversation_id.to_string())
+            root.join("data")
+                .join("tcui")
+                .join("chat-file-links")
                 .join(".lock"),
         )
         .expect("open chat-file lock");
@@ -235,13 +243,13 @@ fn lock_contention_preserves_chat_file_until_delete_can_acquire_lock() {
     app.delete_artifact(handle.clone());
 
     // Then
-    assert_eq!(
-        app.chat_files
-            .list(conversation_id)
-            .expect("list retained file")
-            .len(),
-        1
-    );
+    assert_eq!(app.ui.tabs[0].temporary_artifacts.len(), 1);
+    assert!(root
+        .join("data")
+        .join("tcui")
+        .join("artifacts")
+        .join("report.md")
+        .exists());
     drop(lock);
     app.delete_artifact(handle);
     assert!(app

@@ -1,27 +1,11 @@
 use std::fmt;
 use std::io;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 pub(super) const MANIFEST_VERSION: u32 = 1;
-const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_CONVERSATION_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_NAME_BYTES: usize = 120;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct StoreLimits {
-    pub(super) per_file: u64,
-    pub(super) per_conversation: u64,
-}
-
-impl Default for StoreLimits {
-    fn default() -> Self {
-        Self {
-            per_file: MAX_FILE_BYTES,
-            per_conversation: MAX_CONVERSATION_BYTES,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -37,12 +21,8 @@ impl ChatFileId {
         }
     }
 
-    pub(super) fn parse(value: &str) -> Option<Self> {
-        value
-            .parse::<u64>()
-            .ok()
-            .filter(|value| *value != 0)
-            .map(Self)
+    pub(super) const fn is_nonzero(self) -> bool {
+        self.0 != 0
     }
 }
 
@@ -53,55 +33,59 @@ impl fmt::Display for ChatFileId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ChatFileLink {
+    pub(crate) id: ChatFileId,
+    pub(crate) conversation_id: i64,
+    pub(crate) filename: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ChatFileLinkManifestV1 {
+    pub(crate) version: u32,
+    pub(crate) links: Vec<ChatFileLink>,
+}
+
+impl ChatFileLinkManifestV1 {
+    pub(super) const fn empty() -> Self {
+        Self {
+            version: MANIFEST_VERSION,
+            links: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SavedFileRecord {
+    pub(crate) filename: String,
+    pub(crate) path: PathBuf,
+    pub(crate) size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChatFileRecord {
     pub(crate) id: ChatFileId,
     pub(crate) name: String,
     pub(crate) size_bytes: u64,
 }
 
-impl ChatFileRecord {
-    pub(crate) fn payload_name(&self) -> String {
-        format!("{}--{}", self.id, self.name)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ChatFileManifestV1 {
-    pub(crate) version: u32,
-    pub(crate) conversation_id: i64,
-    pub(crate) files: Vec<ChatFileRecord>,
-}
-
-impl ChatFileManifestV1 {
-    pub(super) fn empty(conversation_id: i64) -> Self {
-        Self {
-            version: MANIFEST_VERSION,
-            conversation_id,
-            files: Vec::new(),
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ChatFileError {
     #[error("conversation ID must be positive")]
     InvalidConversationId,
-    #[error("chat file size {size} exceeds the per-file limit {limit}")]
-    FileQuotaExceeded { size: u64, limit: u64 },
-    #[error("conversation chat-file size {size} exceeds the limit {limit}")]
-    ConversationQuotaExceeded { size: u64, limit: u64 },
-    #[error("chat-file size arithmetic overflowed")]
-    SizeOverflow,
+    #[error("saved filename is invalid")]
+    InvalidFileName,
     #[error("chat files are busy")]
     ChatFilesBusy,
-    #[error("chat-file manifest version {version} is not supported")]
+    #[error("chat-file link manifest version {version} is not supported")]
     UnsupportedManifestVersion { version: u64 },
-    #[error("chat file {id} was not found")]
+    #[error("chat-file link manifest is corrupt")]
+    CorruptManifest,
+    #[error("chat file link {id} was not found")]
     NotFound { id: ChatFileId },
-    #[error("chat file {id} changed outside its manifest")]
-    PayloadChanged { id: ChatFileId },
-    #[error("chat-file payload set contains duplicate ID {id}")]
-    DuplicatePayloadId { id: ChatFileId },
+    #[error("path is outside the Saved files root")]
+    PathOutsideSavedRoot,
+    #[error("saved path is not a regular file: {path}")]
+    NotRegularFile { path: PathBuf },
     #[error("failed to roll back {operation}: {rollback}")]
     RollbackFailed {
         operation: &'static str,
@@ -114,6 +98,9 @@ pub(crate) enum ChatFileError {
     #[cfg(test)]
     #[error("injected conversation purge failure")]
     InjectedPurgeFailure,
+    #[cfg(test)]
+    #[error("injected tombstone removal failure")]
+    InjectedTombstoneRemoveFailure,
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -127,38 +114,8 @@ pub(super) fn validate_conversation_id(conversation_id: i64) -> Result<(), ChatF
     Ok(())
 }
 
-pub(super) fn payload_size(contents: &[u8], limit: u64) -> Result<u64, ChatFileError> {
-    let size = u64::try_from(contents.len()).map_err(|_| ChatFileError::SizeOverflow)?;
-    if size > limit {
-        return Err(ChatFileError::FileQuotaExceeded { size, limit });
-    }
-    Ok(size)
-}
-
-pub(super) fn enforce_conversation_quota(
-    files: &[ChatFileRecord],
-    added_size: u64,
-    limits: StoreLimits,
-) -> Result<(), ChatFileError> {
-    let current_size = files.iter().try_fold(0_u64, |total, record| {
-        total
-            .checked_add(record.size_bytes)
-            .ok_or(ChatFileError::SizeOverflow)
-    })?;
-    let size = current_size
-        .checked_add(added_size)
-        .ok_or(ChatFileError::SizeOverflow)?;
-    if size > limits.per_conversation {
-        return Err(ChatFileError::ConversationQuotaExceeded {
-            size,
-            limit: limits.per_conversation,
-        });
-    }
-    Ok(())
-}
-
 pub(super) fn sanitize_name(input: &str) -> String {
-    let file_name = std::path::Path::new(input)
+    let file_name = Path::new(input)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("chat-file");
@@ -186,8 +143,32 @@ pub(super) fn sanitize_name(input: &str) -> String {
     }
 }
 
-pub(super) fn record_is_structurally_valid(record: &ChatFileRecord, limits: StoreLimits) -> bool {
-    record.id.0 != 0
-        && record.name == sanitize_name(&record.name)
-        && record.size_bytes <= limits.per_file
+pub(super) fn collision_filename(name: &str, suffix: u32) -> String {
+    if suffix == 1 {
+        return name.to_string();
+    }
+    let path = Path::new(name);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("chat-file");
+    match path.extension().and_then(|value| value.to_str()) {
+        Some(extension) => format!("{stem} ({suffix}).{extension}"),
+        None => format!("{stem} ({suffix})"),
+    }
+}
+
+pub(super) fn link_filename_is_valid(filename: &str) -> bool {
+    !filename.is_empty()
+        && filename.len() <= MAX_NAME_BYTES + 24
+        && Path::new(filename).components().count() == 1
+        && Path::new(filename)
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some(filename)
+        && !filename.starts_with('.')
+        && filename.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(character, '.' | '-' | '_' | ' ' | '(' | ')')
+        })
 }

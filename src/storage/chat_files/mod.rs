@@ -1,10 +1,12 @@
 mod atomic;
+mod compat;
+mod deletion;
 mod lock;
 mod manifest;
 mod model;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -12,294 +14,229 @@ use std::sync::{
 };
 
 use atomic::AtomicWriter;
-use lock::ConversationLock;
-use manifest::{ConversationManifest, ManifestInspection};
-use model::StoreLimits;
+use lock::GlobalLinkLock;
+use manifest::LinkManifest;
 
-pub(crate) use model::{ChatFileError, ChatFileId, ChatFileManifestV1, ChatFileRecord};
-
-use crate::storage::cache_paths::TcuiCachePaths;
-
-#[cfg(test)]
 pub(crate) use atomic::AtomicWriteTarget;
+use model::{collision_filename, sanitize_name, validate_conversation_id};
+pub(crate) use model::{
+    ChatFileError, ChatFileId, ChatFileLink, ChatFileLinkManifestV1, ChatFileRecord,
+    SavedFileRecord,
+};
+
+use crate::storage::paths::{ensure_directory, TcuiDataPaths};
 
 #[derive(Debug, Clone)]
-pub(crate) struct ChatFileStore {
-    paths: TcuiCachePaths,
-    limits: StoreLimits,
+pub(crate) struct ChatSavedFileStore {
+    saved_root: PathBuf,
+    paths: TcuiDataPaths,
     writer: AtomicWriter,
+    #[cfg(test)]
+    rollback_failure: Arc<AtomicBool>,
+    #[cfg(test)]
+    tombstone_remove_failure: Arc<AtomicBool>,
     #[cfg(test)]
     purge_failure: Arc<AtomicBool>,
 }
 
-impl ChatFileStore {
-    pub(crate) fn discover() -> Self {
-        Self::new(TcuiCachePaths::discover())
-    }
-
-    pub(crate) fn new(paths: TcuiCachePaths) -> Self {
+impl ChatSavedFileStore {
+    pub(crate) fn new(saved_root: PathBuf, paths: TcuiDataPaths) -> Self {
         Self {
+            saved_root,
             paths,
-            limits: StoreLimits::default(),
             writer: AtomicWriter::default(),
+            #[cfg(test)]
+            rollback_failure: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            tombstone_remove_failure: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             purge_failure: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    #[cfg(test)]
-    fn with_limits(paths: TcuiCachePaths, limits: StoreLimits) -> Self {
-        Self {
-            paths,
-            limits,
-            writer: AtomicWriter::default(),
-            purge_failure: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    pub(crate) fn create(
+    pub(crate) fn create_for_chat(
         &self,
         conversation_id: i64,
         name: &str,
         contents: &[u8],
-    ) -> Result<ChatFileRecord, ChatFileError> {
-        model::validate_conversation_id(conversation_id)?;
-        let size_bytes = model::payload_size(contents, self.limits.per_file)?;
-        let directory = self.paths.conversation_dir(conversation_id);
-        let _lock = ConversationLock::acquire(&self.paths, conversation_id)?;
-        let mut manifest = self
-            .manifest(&directory, conversation_id)
-            .load_or_rebuild()?;
-        model::enforce_conversation_quota(&manifest.files, size_bytes, self.limits)?;
-
-        let name = model::sanitize_name(name);
-        let id = self.allocate_id(&directory, &manifest)?;
-        let record = ChatFileRecord {
-            id,
-            name,
-            size_bytes,
+    ) -> Result<ChatFileLink, ChatFileError> {
+        validate_conversation_id(conversation_id)?;
+        let _lock = GlobalLinkLock::acquire(&self.paths)?;
+        self.ensure_saved_root()?;
+        let mut manifest = self.load_manifest()?;
+        self.prune_stale_links(&mut manifest)?;
+        let (filename, path) = self.write_unique_saved_file(name, contents)?;
+        let link = ChatFileLink {
+            id: self.allocate_id(&manifest),
+            conversation_id,
+            filename,
         };
-        let payload_path = directory.join(record.payload_name());
-        self.writer
-            .write(&payload_path, contents, atomic::AtomicWriteTarget::Payload)?;
-
-        manifest.files.push(record.clone());
-        if let Err(error) = self.manifest(&directory, conversation_id).write(&manifest) {
-            if let Err(rollback) = fs::remove_file(&payload_path) {
-                return Err(ChatFileError::RollbackFailed {
-                    operation: "create",
-                    rollback,
-                });
-            }
-            atomic::sync_directory(&directory)?;
+        manifest.links.push(link.clone());
+        if let Err(error) = self.write_manifest(&manifest) {
+            self.rollback_created_file(&path)?;
             return Err(error);
         }
-        Ok(record)
+        Ok(link)
     }
 
-    pub(crate) fn list(&self, conversation_id: i64) -> Result<Vec<ChatFileRecord>, ChatFileError> {
-        model::validate_conversation_id(conversation_id)?;
-        let directory = self.paths.conversation_dir(conversation_id);
-        if !directory.exists() {
-            return Ok(Vec::new());
-        }
-
-        match self.manifest(&directory, conversation_id).inspect()? {
-            ManifestInspection::Current(manifest) => Ok(manifest.files),
-            ManifestInspection::Future(version) => {
-                Err(ChatFileError::UnsupportedManifestVersion { version })
-            }
-            ManifestInspection::Missing | ManifestInspection::Corrupt => {
-                let _lock = ConversationLock::acquire(&self.paths, conversation_id)?;
-                Ok(self
-                    .manifest(&directory, conversation_id)
-                    .load_or_rebuild()?
-                    .files)
-            }
-        }
+    pub(crate) fn import_for_chat(
+        &self,
+        conversation_id: i64,
+        source: &Path,
+    ) -> Result<ChatFileLink, ChatFileError> {
+        let name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(ChatFileError::InvalidFileName)?;
+        let contents = fs::read(source)?;
+        self.create_for_chat(conversation_id, name, &contents)
     }
 
-    pub(crate) fn open(
+    pub(crate) fn list_saved(&self) -> Result<Vec<SavedFileRecord>, ChatFileError> {
+        self.ensure_saved_root()?;
+        let mut records = Vec::new();
+        for entry in fs::read_dir(&self.saved_root)? {
+            let entry = entry?;
+            let metadata = fs::symlink_metadata(entry.path())?;
+            let Some(filename) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if metadata.file_type().is_file() && !filename.starts_with('.') {
+                records.push(SavedFileRecord {
+                    filename,
+                    path: entry.path(),
+                    size_bytes: metadata.len(),
+                });
+            }
+        }
+        records.sort_by(|left, right| left.filename.cmp(&right.filename));
+        Ok(records)
+    }
+
+    pub(crate) fn list_for_conversation(
+        &self,
+        conversation_id: i64,
+    ) -> Result<Vec<ChatFileLink>, ChatFileError> {
+        validate_conversation_id(conversation_id)?;
+        let _lock = GlobalLinkLock::acquire(&self.paths)?;
+        self.ensure_saved_root()?;
+        let mut manifest = self.load_manifest()?;
+        self.prune_stale_links(&mut manifest)?;
+        Ok(manifest
+            .links
+            .into_iter()
+            .filter(|link| link.conversation_id == conversation_id)
+            .collect())
+    }
+
+    pub(crate) fn open_link(
         &self,
         conversation_id: i64,
         id: ChatFileId,
     ) -> Result<Vec<u8>, ChatFileError> {
-        let record = self
-            .list(conversation_id)?
-            .into_iter()
-            .find(|record| record.id == id)
-            .ok_or(ChatFileError::NotFound { id })?;
-        let path = self
-            .paths
-            .conversation_dir(conversation_id)
-            .join(record.payload_name());
-        let contents = fs::read(path)?;
-        let actual_size = u64::try_from(contents.len()).map_err(|_| ChatFileError::SizeOverflow)?;
-        if actual_size != record.size_bytes {
-            return Err(ChatFileError::PayloadChanged { id });
-        }
-        Ok(contents)
-    }
-
-    pub(crate) fn delete(&self, conversation_id: i64, id: ChatFileId) -> Result<(), ChatFileError> {
-        model::validate_conversation_id(conversation_id)?;
-        let directory = self.paths.conversation_dir(conversation_id);
-        let _lock = ConversationLock::acquire(&self.paths, conversation_id)?;
-        let mut manifest = self
-            .manifest(&directory, conversation_id)
-            .load_or_rebuild()?;
-        let index = manifest
-            .files
+        validate_conversation_id(conversation_id)?;
+        let _lock = GlobalLinkLock::acquire(&self.paths)?;
+        self.ensure_saved_root()?;
+        let mut manifest = self.load_manifest()?;
+        self.prune_stale_links(&mut manifest)?;
+        let link = manifest
+            .links
             .iter()
-            .position(|record| record.id == id)
+            .find(|link| link.conversation_id == conversation_id && link.id == id)
             .ok_or(ChatFileError::NotFound { id })?;
-        let record = manifest.files.remove(index);
-        let payload_path = directory.join(record.payload_name());
-        let tombstone = directory.join(format!(".delete-{}-{}.tmp", id, rand::random::<u64>()));
-        fs::rename(&payload_path, &tombstone)?;
-        atomic::sync_directory(&directory)?;
+        Ok(fs::read(self.saved_path(&link.filename))?)
+    }
 
-        if let Err(error) = self.manifest(&directory, conversation_id).write(&manifest) {
-            if let Err(rollback) = fs::rename(&tombstone, &payload_path) {
-                return Err(ChatFileError::RollbackFailed {
-                    operation: "delete",
-                    rollback,
-                });
-            }
-            atomic::sync_directory(&directory)?;
-            return Err(error);
-        }
-        fs::remove_file(tombstone)?;
-        atomic::sync_directory(&directory)?;
+    fn ensure_saved_root(&self) -> Result<(), ChatFileError> {
+        ensure_directory(&self.saved_root)?;
         Ok(())
     }
 
-    pub(crate) fn purge_conversation(&self, conversation_id: i64) -> Result<(), ChatFileError> {
-        model::validate_conversation_id(conversation_id)?;
-        let result = self.purge_conversation_inner(conversation_id);
-        match result {
-            Ok(()) => {
-                self.remove_orphan_marker(conversation_id)?;
-                Ok(())
-            }
-            Err(error) => {
-                self.write_orphan_marker(conversation_id)?;
-                Err(error)
-            }
-        }
+    fn load_manifest(&self) -> Result<ChatFileLinkManifestV1, ChatFileError> {
+        LinkManifest::new(&self.paths, &self.writer).load()
     }
 
-    pub(crate) fn cleanup_orphans(&self) -> Result<usize, ChatFileError> {
-        if !self.paths.chat_files_dir.exists() {
-            return Ok(0);
-        }
-        let mut conversation_ids = fs::read_dir(&self.paths.chat_files_dir)?
-            .filter_map(Result::ok)
-            .filter_map(|entry| orphan_conversation_id(&entry.file_name().to_string_lossy()))
-            .collect::<Vec<_>>();
-        conversation_ids.sort_unstable();
-        conversation_ids.dedup();
-
-        let mut cleaned = 0;
-        for conversation_id in conversation_ids {
-            self.purge_conversation(conversation_id)?;
-            cleaned += 1;
-        }
-        Ok(cleaned)
+    fn write_manifest(&self, manifest: &ChatFileLinkManifestV1) -> Result<(), ChatFileError> {
+        LinkManifest::new(&self.paths, &self.writer).write(manifest)
     }
 
-    fn purge_conversation_inner(&self, conversation_id: i64) -> Result<(), ChatFileError> {
-        let directory = self.paths.conversation_dir(conversation_id);
-        let conversation_lock = ConversationLock::acquire(&self.paths, conversation_id)?;
-        self.manifest(&directory, conversation_id)
-            .load_or_rebuild()?;
-        let purged = self.paths.chat_files_dir.join(format!(
-            ".purge-{conversation_id}-{}",
-            rand::random::<u64>()
-        ));
-        fs::rename(&directory, &purged)?;
-        atomic::sync_directory(&self.paths.chat_files_dir)?;
-        drop(conversation_lock);
-
-        #[cfg(test)]
-        if self.purge_failure.swap(false, Ordering::SeqCst) {
-            return Err(ChatFileError::InjectedPurgeFailure);
+    fn prune_stale_links(
+        &self,
+        manifest: &mut ChatFileLinkManifestV1,
+    ) -> Result<(), ChatFileError> {
+        let before = manifest.links.len();
+        manifest.links.retain(|link| {
+            fs::symlink_metadata(self.saved_path(&link.filename))
+                .is_ok_and(|metadata| metadata.file_type().is_file())
+        });
+        if manifest.links.len() != before {
+            self.write_manifest(manifest)?;
         }
-
-        let prefix = format!(".purge-{conversation_id}-");
-        for entry in fs::read_dir(&self.paths.chat_files_dir)? {
-            let entry = entry?;
-            if entry.file_name().to_string_lossy().starts_with(&prefix) {
-                fs::remove_dir_all(entry.path())?;
-            }
-        }
-        atomic::sync_directory(&self.paths.chat_files_dir)?;
         Ok(())
     }
 
-    fn write_orphan_marker(&self, conversation_id: i64) -> Result<(), ChatFileError> {
-        self.paths.ensure_layout()?;
-        let marker = self.orphan_marker(conversation_id);
-        fs::write(&marker, [])?;
-        crate::storage::paths::set_unix_mode(&marker, 0o600)?;
-        atomic::sync_directory(&self.paths.chat_files_dir)
-    }
-
-    fn remove_orphan_marker(&self, conversation_id: i64) -> Result<(), ChatFileError> {
-        let marker = self.orphan_marker(conversation_id);
-        match fs::remove_file(marker) {
-            Ok(()) => atomic::sync_directory(&self.paths.chat_files_dir),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.into()),
+    fn write_unique_saved_file(
+        &self,
+        name: &str,
+        contents: &[u8],
+    ) -> Result<(String, PathBuf), ChatFileError> {
+        let sanitized = sanitize_name(name);
+        for suffix in 1..=u32::MAX {
+            let filename = collision_filename(&sanitized, suffix);
+            let path = self.saved_path(&filename);
+            match self
+                .writer
+                .write_new(&path, contents, AtomicWriteTarget::SavedFile)
+            {
+                Ok(()) => return Ok((filename, path)),
+                Err(ChatFileError::Io(error))
+                    if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
         }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "Saved files directory has no available filename",
+        )
+        .into())
     }
 
-    fn orphan_marker(&self, conversation_id: i64) -> std::path::PathBuf {
-        self.paths
-            .chat_files_dir
-            .join(format!(".orphan-{conversation_id}"))
-    }
-
-    pub(crate) fn rebuild_manifest(
-        &self,
-        conversation_id: i64,
-    ) -> Result<Vec<ChatFileRecord>, ChatFileError> {
-        model::validate_conversation_id(conversation_id)?;
-        let directory = self.paths.conversation_dir(conversation_id);
-        let _lock = ConversationLock::acquire(&self.paths, conversation_id)?;
-        Ok(self
-            .manifest(&directory, conversation_id)
-            .force_rebuild()?
-            .files)
-    }
-
-    fn manifest<'a>(
-        &'a self,
-        directory: &'a Path,
-        conversation_id: i64,
-    ) -> ConversationManifest<'a> {
-        ConversationManifest::new(directory, conversation_id, self)
-    }
-
-    fn allocate_id(
-        &self,
-        directory: &Path,
-        manifest: &ChatFileManifestV1,
-    ) -> Result<ChatFileId, ChatFileError> {
+    fn allocate_id(&self, manifest: &ChatFileLinkManifestV1) -> ChatFileId {
         loop {
             let id = ChatFileId::random();
-            let in_manifest = manifest.files.iter().any(|record| record.id == id);
-            let prefix = format!("{id}--");
-            let mut on_disk = false;
-            for entry in fs::read_dir(directory)? {
-                if entry?.file_name().to_string_lossy().starts_with(&prefix) {
-                    on_disk = true;
-                    break;
-                }
+            if manifest.links.iter().all(|link| link.id != id) {
+                return id;
             }
-            if !in_manifest && !on_disk {
-                return Ok(id);
-            }
+        }
+    }
+
+    fn rollback_created_file(&self, path: &Path) -> Result<(), ChatFileError> {
+        #[cfg(test)]
+        if self.rollback_failure.swap(false, Ordering::SeqCst) {
+            return Err(ChatFileError::RollbackFailed {
+                operation: "create",
+                rollback: std::io::Error::other("injected rollback failure"),
+            });
+        }
+        fs::remove_file(path).map_err(|rollback| ChatFileError::RollbackFailed {
+            operation: "create",
+            rollback,
+        })?;
+        atomic::sync_directory(&self.saved_root)
+    }
+
+    fn saved_path(&self, filename: &str) -> PathBuf {
+        self.saved_root.join(filename)
+    }
+
+    fn target_is_regular(&self, path: &Path) -> Result<(), ChatFileError> {
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.file_type().is_file() {
+            Ok(())
+        } else {
+            Err(ChatFileError::NotRegularFile {
+                path: path.to_path_buf(),
+            })
         }
     }
 
@@ -309,15 +246,9 @@ impl ChatFileStore {
     }
 
     #[cfg(test)]
-    pub(crate) fn fail_next_purge(&self) {
-        self.purge_failure.store(true, Ordering::SeqCst);
+    fn fail_next_rollback(&self) {
+        self.rollback_failure.store(true, Ordering::SeqCst);
     }
-}
-
-fn orphan_conversation_id(name: &str) -> Option<i64> {
-    name.strip_prefix(".orphan-")
-        .and_then(|value| value.parse::<i64>().ok())
-        .filter(|value| *value > 0)
 }
 
 #[cfg(test)]
