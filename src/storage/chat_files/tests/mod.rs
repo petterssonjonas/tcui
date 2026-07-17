@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::storage::cache_paths::TcuiCachePaths;
 
@@ -39,10 +39,6 @@ impl TestRoot {
                 per_conversation,
             },
         )
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
     }
 }
 

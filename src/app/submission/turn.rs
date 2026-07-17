@@ -52,11 +52,6 @@ impl InputSubmission {
     pub fn instruction(&self) -> &str {
         &self.instruction
     }
-
-    #[cfg(test)]
-    pub const fn documents(&self) -> &PendingDocuments {
-        &self.documents
-    }
 }
 
 impl fmt::Debug for InputSubmission {

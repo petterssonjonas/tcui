@@ -46,35 +46,6 @@ pub(crate) struct PreparedCodexSession {
     config: AppConfig,
 }
 
-#[cfg(test)]
-pub(crate) async fn stream_codex_responses<F>(
-    client: &reqwest::Client,
-    request: &ChatRequest,
-    on_event: &mut F,
-) -> color_eyre::Result<ChatStreamOutput>
-where
-    F: FnMut(ChatStreamEvent) + Send,
-{
-    if !crate::llm::auth::trusted_provider_endpoint("Codex", &request.endpoint) {
-        return Err(eyre!(
-            "Codex OAuth credentials can only be sent to the ChatGPT subscription endpoint"
-        ));
-    }
-    let config = AppConfig::load()?;
-    let session = load_session(&config)?;
-    let source = session.source;
-    let body = Bytes::from(serialize_request_body(request)?);
-    stream_prepared_with_one_refresh(
-        client,
-        request,
-        body,
-        session,
-        || async { refresh_session(&config, source).await },
-        on_event,
-    )
-    .await
-}
-
 pub(crate) async fn stream_prepared_codex_responses<F>(
     client: &reqwest::Client,
     request: &ChatRequest,
