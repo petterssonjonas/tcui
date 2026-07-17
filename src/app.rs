@@ -42,6 +42,10 @@ mod vault_mutation_execute_tests;
 #[path = "app/chat_file_lifecycle.rs"]
 mod chat_file_lifecycle;
 
+#[cfg(test)]
+#[path = "app/markdown_vault_restart_tests.rs"]
+mod markdown_vault_restart_tests;
+
 pub use action::Action;
 pub use generated_file::GeneratedFile;
 pub use message::Message;
