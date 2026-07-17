@@ -51,12 +51,8 @@ fn insert_to_chat_chat_file_uses_fresh_safe_store_snapshot() {
             .chat_files
             .create_for_chat(conversation_id, "fresh.md", b"FRESH-FROM-SAFE-STORE")
             .expect("create chat file");
-        let artifact = ArtifactEntry::chat_file(
-            conversation_id,
-            record.id,
-            record.filename,
-            "STALE-PREVIEW".to_string(),
-        );
+        let path = app.chat_files.path_for_link(&record);
+        let artifact = ArtifactEntry::chat_file(conversation_id, record.id, record.filename, path);
         let handle = artifact.handle.clone();
         app.ui.tabs[0].temporary_artifacts.push(artifact.clone());
         app.ui.artifact_viewer =

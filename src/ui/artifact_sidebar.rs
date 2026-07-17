@@ -38,6 +38,7 @@ pub enum ArtifactKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactOrigin {
     Temporary,
+    Chat,
     Saved,
     Memory,
     Vault,
@@ -69,7 +70,7 @@ impl ArtifactEntry {
         conversation_id: i64,
         id: crate::storage::chat_files::ChatFileId,
         name: String,
-        content: String,
+        path: PathBuf,
     ) -> Self {
         Self {
             handle: ArtifactHandle::ChatFile {
@@ -77,10 +78,10 @@ impl ArtifactEntry {
                 id,
             },
             name,
-            kind: ArtifactKind::Markdown,
-            origin: ArtifactOrigin::Temporary,
-            content: Some(content),
-            path: None,
+            kind: infer_kind(&path, None),
+            origin: ArtifactOrigin::Chat,
+            content: None,
+            path: Some(path),
         }
     }
 
@@ -155,12 +156,10 @@ impl ArtifactEntry {
     }
 
     pub fn action_label(&self, has_vault: bool) -> Option<&'static str> {
-        if matches!(self.handle, ArtifactHandle::ChatFile { .. }) {
-            return Some("Save");
-        }
         match self.origin {
             ArtifactOrigin::Temporary if self.is_markdown() && has_vault => Some("Vault"),
             ArtifactOrigin::Temporary => Some("Save"),
+            ArtifactOrigin::Chat => None,
             ArtifactOrigin::Memory => Some("Exp"),
             ArtifactOrigin::Saved => Some("Export"),
             ArtifactOrigin::Vault => None,
@@ -182,6 +181,7 @@ impl ArtifactEntry {
     pub fn origin_label(&self) -> &'static str {
         match self.origin {
             ArtifactOrigin::Temporary => "Chat files",
+            ArtifactOrigin::Chat => "Chat files",
             ArtifactOrigin::Saved => "Saved",
             ArtifactOrigin::Memory => "Memory",
             ArtifactOrigin::Vault => "Vault",
@@ -317,6 +317,7 @@ impl ArtifactSidebarState {
         } else {
             *offset = offset.saturating_sub(1);
         }
+        self.clear_hit_areas();
     }
 
     pub fn toggle(&mut self, section: ArtifactSection) {
@@ -326,12 +327,14 @@ impl ArtifactSidebarState {
             ArtifactSection::Memories => self.memory_collapsed = !self.memory_collapsed,
             ArtifactSection::Vault => self.vault_collapsed = !self.vault_collapsed,
         }
+        self.clear_hit_areas();
     }
 
     pub fn toggle_vault_dir(&mut self, path: &Path) {
         if !self.collapsed_vault_dirs.insert(path.to_path_buf()) {
             self.collapsed_vault_dirs.remove(path);
         }
+        self.clear_hit_areas();
     }
 
     fn header_at(&self, pos: Position) -> Option<ArtifactSection> {
@@ -922,6 +925,7 @@ mod tests {
         ArtifactEntry {
             handle: match origin {
                 ArtifactOrigin::Temporary => ArtifactHandle::Temporary(1),
+                ArtifactOrigin::Chat => ArtifactHandle::Temporary(1),
                 ArtifactOrigin::Saved => ArtifactHandle::Saved(PathBuf::from(name)),
                 ArtifactOrigin::Memory => ArtifactHandle::Memory(PathBuf::from(name)),
                 ArtifactOrigin::Vault => ArtifactHandle::Vault(PathBuf::from(name)),

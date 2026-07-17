@@ -104,6 +104,7 @@ impl TuiApp {
     }
 
     pub(crate) fn refresh_artifact_sidebar_catalogs(&mut self) {
+        self.ui.artifact_sidebar_state.clear_hit_areas();
         self.refresh_vault_artifacts();
         self.refresh_saved_artifacts();
         self.refresh_memory_artifacts();
@@ -191,10 +192,29 @@ impl TuiApp {
         let Some(mut artifact) = self.find_artifact(&handle) else {
             return;
         };
-        if artifact.content.is_none() {
-            if let Some(path) = artifact.path.as_ref() {
-                artifact.content = std::fs::read_to_string(path).ok();
+        if matches!(
+            handle,
+            crate::ui::artifact_sidebar::ArtifactHandle::ChatFile { .. }
+                | crate::ui::artifact_sidebar::ArtifactHandle::Saved(_)
+        ) {
+            let Some(path) = artifact.path.as_ref().filter(|path| path.is_file()) else {
+                return;
+            };
+            if matches!(
+                artifact.kind,
+                crate::ui::artifact_sidebar::ArtifactKind::Markdown
+                    | crate::ui::artifact_sidebar::ArtifactKind::Text
+            ) {
+                let Ok(content) = std::fs::read_to_string(path) else {
+                    return;
+                };
+                artifact.content = Some(content);
             }
+        } else if artifact.content.is_none() {
+            artifact.content = artifact
+                .path
+                .as_ref()
+                .and_then(|path| std::fs::read_to_string(path).ok());
         }
         self.ui.artifact_viewer =
             Some(crate::ui::modals::artifact_viewer::ArtifactViewerState::new(artifact));

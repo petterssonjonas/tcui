@@ -85,22 +85,20 @@ impl TuiApp {
         tab_id: usize,
         conversation_id: i64,
     ) -> color_eyre::Result<()> {
+        self.ui.artifact_sidebar_state.clear_hit_areas();
         let links = self.chat_files.list_for_conversation(conversation_id)?;
-        let mut artifacts = Vec::with_capacity(links.len());
-        for link in links {
-            let bytes = self.chat_files.open_link(conversation_id, link.id)?;
-            let path = self.chat_files.path_for_link(&link);
-            let path_source = path.to_string_lossy();
-            let mut artifact = crate::ui::artifact_sidebar::ArtifactEntry::temp_media(&path_source)
-                .ok_or_else(|| color_eyre::eyre::eyre!("saved file path is unavailable"))?;
-            artifact.handle = crate::ui::artifact_sidebar::ArtifactHandle::ChatFile {
-                conversation_id,
-                id: link.id,
-            };
-            artifact.name = link.filename;
-            artifact.content = String::from_utf8(bytes).ok();
-            artifacts.push(artifact);
-        }
+        let artifacts = links
+            .into_iter()
+            .map(|link| {
+                let path = self.chat_files.path_for_link(&link);
+                crate::ui::artifact_sidebar::ArtifactEntry::chat_file(
+                    conversation_id,
+                    link.id,
+                    link.filename,
+                    path,
+                )
+            })
+            .collect();
         if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
             tab.temporary_artifacts = artifacts;
         }
@@ -136,6 +134,7 @@ impl TuiApp {
         tab_id: usize,
         conversation_id: i64,
     ) -> color_eyre::Result<()> {
+        self.ui.artifact_sidebar_state.clear_hit_areas();
         let saved = self
             .chat_files
             .list_saved()?
