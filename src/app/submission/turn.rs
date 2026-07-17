@@ -103,6 +103,14 @@ impl PreparedUserTurn {
         self.submission_id
     }
 
+    pub fn instruction(&self) -> &str {
+        &self.instruction
+    }
+
+    pub(crate) const fn documents(&self) -> &PendingDocuments {
+        &self.documents
+    }
+
     pub fn expand_messages(&self, history: &[Message], conversation_id: i64) -> Vec<Message> {
         let mut messages = Vec::with_capacity(history.len() + 1);
         messages.extend_from_slice(history);

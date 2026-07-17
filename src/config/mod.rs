@@ -4,7 +4,6 @@ pub mod mcp_config;
 pub mod search;
 pub mod soul;
 pub mod tui;
-#[expect(dead_code, reason = "T02B will wire persisted Vault profile consumers")]
 pub mod vault_profiles;
 
 pub use app_config::{

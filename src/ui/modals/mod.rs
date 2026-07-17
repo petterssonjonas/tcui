@@ -9,3 +9,4 @@ pub mod new_tab;
 pub mod quit_confirm;
 pub mod save_file;
 pub mod terminal_editor;
+pub(crate) mod vault_mutation_preview;

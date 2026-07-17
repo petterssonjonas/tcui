@@ -80,6 +80,42 @@ impl TuiApp {
             };
         }
 
+        if let Some(pending) = self.ui.pending_vault_mutation.as_mut() {
+            return match key.code {
+                KeyCode::Esc | KeyCode::Char('n' | 'N') if pending.can_cancel() => {
+                    Some(Action::CancelVaultMutation)
+                }
+                KeyCode::Enter | KeyCode::Char('y' | 'Y') if pending.can_confirm() => {
+                    Some(Action::ConfirmVaultMutation)
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    pending.scroll_up(1);
+                    None
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    pending.scroll_down(1);
+                    None
+                }
+                KeyCode::PageUp => {
+                    pending.scroll_up(8);
+                    None
+                }
+                KeyCode::PageDown => {
+                    pending.scroll_down(8);
+                    None
+                }
+                KeyCode::Home => {
+                    pending.scroll_up(usize::MAX);
+                    None
+                }
+                KeyCode::End => {
+                    pending.scroll_down(usize::MAX);
+                    None
+                }
+                _ => None,
+            };
+        }
+
         if self.ui.pending_vault_action.is_some() {
             if let Some(editor) = self.ui.editor_popup.as_mut() {
                 editor.handle_key(key);
@@ -968,6 +1004,22 @@ impl TuiApp {
     pub(crate) fn handle_mouse_click(&mut self, col: u16, row: u16) -> Option<Action> {
         let pos = ratatui::layout::Position::new(col, row);
         let area = self.ui.last_area?;
+
+        if let Some(areas) = self.ui.pending_vault_mutation_areas {
+            if areas.cancel.contains(pos)
+                && self
+                    .ui
+                    .pending_vault_mutation
+                    .as_ref()
+                    .is_some_and(crate::app::submission::PendingVaultMutation::can_cancel)
+            {
+                return Some(Action::CancelVaultMutation);
+            }
+            if areas.confirm.is_some_and(|area| area.contains(pos)) {
+                return Some(Action::ConfirmVaultMutation);
+            }
+            return None;
+        }
 
         if self.ui.vault_profile_manager.is_some() || self.ui.pending_vault_action.is_some() {
             return None;

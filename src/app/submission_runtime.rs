@@ -26,9 +26,14 @@ pub(crate) struct PreparedLaunch {
     pub(crate) memory_activities: Vec<crate::memory::MemoryActivity>,
 }
 
+pub(crate) enum PreparationOutcome {
+    Ready(Box<PreparedLaunch>),
+    VaultMutation(crate::vault::mutation_plan::VaultMutationKind),
+}
+
 pub(crate) async fn prepare_launch(
     preparation: RequestPreparation,
-) -> color_eyre::Result<PreparedLaunch> {
+) -> color_eyre::Result<PreparationOutcome> {
     let RequestPreparation {
         conversation_id,
         provider,
@@ -85,6 +90,9 @@ pub(crate) async fn prepare_launch(
         messages,
     };
     let skills = crate::skill_runtime::prepare(&config, &instruction, &request).await;
+    if let Some(kind) = skills.vault_mutation {
+        return Ok(PreparationOutcome::VaultMutation(kind));
+    }
     runtime_system_prompt.push_str(&skills.context);
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
     runtime_system_prompt.push_str(&format!(
@@ -168,10 +176,10 @@ pub(crate) async fn prepare_launch(
     }
     request.system_prompt = runtime_system_prompt;
     let request = prepare_chat_request(request)?;
-    Ok(PreparedLaunch {
+    Ok(PreparationOutcome::Ready(Box::new(PreparedLaunch {
         request,
         notices,
         #[cfg(feature = "memory")]
         memory_activities,
-    })
+    })))
 }

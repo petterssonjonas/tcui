@@ -272,6 +272,8 @@ impl TuiApp {
                 app_tab_id,
                 crate::app::submission::SubmissionState::confirm,
             ),
+            Action::CancelVaultMutation => self.cancel_pending_vault_mutation(),
+            Action::ConfirmVaultMutation => self.confirm_pending_vault_mutation(),
             Action::SubmissionFailedAfterLaunch(app_tab_id, submission_id) => {
                 if let Some(state) = self.submission_states.remove(&app_tab_id) {
                     let next = if state.submission_id() == submission_id
@@ -524,6 +526,11 @@ impl TuiApp {
                 "Cannot send a message without a Tokio runtime"
             ));
         }
+        if self.ui.pending_vault_mutation.is_some() {
+            return Err(color_eyre::eyre::eyre!(
+                "Confirm or cancel the pending Vault mutation first"
+            ));
+        }
         let app_tab_id = self.ui.app_tabs.active_id();
         let documents = self
             .pending_documents
@@ -696,14 +703,44 @@ impl TuiApp {
             instruction: instruction.clone(),
             is_local_provider,
         };
-        let prepared = match crate::app::submission_runtime::prepare_launch(preparation).await {
-            Ok(prepared) => prepared,
-            Err(error) => {
+        let preparation_outcome =
+            match crate::app::submission_runtime::prepare_launch(preparation).await {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    self.transition_submission(
+                        app_tab_id,
+                        crate::app::submission::SubmissionState::return_to_draft,
+                    )?;
+                    return Err(error);
+                }
+            };
+        let prepared = match preparation_outcome {
+            crate::app::submission_runtime::PreparationOutcome::Ready(prepared) => *prepared,
+            crate::app::submission_runtime::PreparationOutcome::VaultMutation(kind) => {
+                let catalog = crate::config::vault_profiles::VaultCatalog {
+                    profiles: config_snapshot.vaults.clone(),
+                    default_id: config_snapshot.default_vault_id.clone(),
+                };
+                let pending = match crate::app::submission::PendingVaultMutation::new(
+                    prepared_turn,
+                    kind,
+                    &catalog,
+                ) {
+                    Ok(pending) => pending,
+                    Err(error) => {
+                        self.transition_submission(
+                            app_tab_id,
+                            crate::app::submission::SubmissionState::return_to_draft,
+                        )?;
+                        return Err(error.into());
+                    }
+                };
                 self.transition_submission(
                     app_tab_id,
-                    crate::app::submission::SubmissionState::return_to_draft,
+                    crate::app::submission::SubmissionState::await_confirmation,
                 )?;
-                return Err(error);
+                self.ui.pending_vault_mutation = Some(pending);
+                return Ok(());
             }
         };
         self.transition_submission(
@@ -949,6 +986,51 @@ impl TuiApp {
         self.discard_pending_documents();
 
         Ok(())
+    }
+
+    pub(crate) fn cancel_pending_vault_mutation(&mut self) -> color_eyre::Result<()> {
+        let Some(pending) = self.ui.pending_vault_mutation.take() else {
+            return Ok(());
+        };
+        if !pending.can_cancel() {
+            self.ui.pending_vault_mutation = Some(pending);
+            return Err(color_eyre::eyre::eyre!(
+                "confirmed Vault mutation cannot be cancelled"
+            ));
+        }
+        let app_tab_id = self.ui.app_tabs.active_id();
+        self.transition_submission(
+            app_tab_id,
+            crate::app::submission::SubmissionState::return_to_draft,
+        )?;
+        self.pending_documents
+            .insert(app_tab_id, pending.submission.documents().clone());
+        self.replace_input_content(pending.submission.instruction().to_owned());
+        Ok(())
+    }
+
+    fn confirm_pending_vault_mutation(&mut self) -> color_eyre::Result<()> {
+        let catalog = self
+            .config
+            .try_read()
+            .map(|config| crate::config::vault_profiles::VaultCatalog {
+                profiles: config.vaults.clone(),
+                default_id: config.default_vault_id.clone(),
+            })
+            .map_err(|_| color_eyre::eyre::eyre!("Vault configuration is busy"))?;
+        let pending = self
+            .ui
+            .pending_vault_mutation
+            .as_mut()
+            .ok_or_else(|| color_eyre::eyre::eyre!("Vault mutation preview is unavailable"))?;
+        if let Err(error) = pending.confirm(
+            &catalog,
+            &crate::storage::paths::TcuiDataPaths::discover().root,
+        ) {
+            return Err(error.into());
+        }
+        let app_tab_id = self.ui.app_tabs.active_id();
+        self.transition_submission(app_tab_id, crate::app::submission::SubmissionState::confirm)
     }
 
     async fn dispatch_mouse_click(&mut self, action: MouseClickAction) -> color_eyre::Result<()> {

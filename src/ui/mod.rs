@@ -117,6 +117,9 @@ pub struct UI {
     pub settings_v2: Option<crate::tui::settings_panel::SettingsPanelState>,
     pub vault_profile_manager: Option<crate::tui::vault_profile_ui::VaultProfileManagerState>,
     pub pending_vault_action: Option<crate::tui::vault_profile_ui::PendingVaultAction>,
+    pub(crate) pending_vault_mutation: Option<crate::app::submission::PendingVaultMutation>,
+    pub(crate) pending_vault_mutation_areas:
+        Option<modals::vault_mutation_preview::VaultMutationPreviewAreas>,
     pub keybind_capture: Option<crate::tui::keybind_capture::KeybindCaptureState>,
     pub keybinding_overrides: BTreeMap<String, String>,
     pub show_keybinds: bool,
@@ -326,6 +329,8 @@ impl UI {
             settings_v2: None,
             vault_profile_manager: None,
             pending_vault_action: None,
+            pending_vault_mutation: None,
+            pending_vault_mutation_areas: None,
             keybind_capture: None,
             keybinding_overrides: BTreeMap::new(),
             show_keybinds: false,
@@ -905,6 +910,15 @@ impl UI {
                 yes: areas.yes,
                 no: areas.no,
             });
+        }
+
+        if let Some(pending) = self.pending_vault_mutation.as_ref() {
+            self.pending_vault_mutation_areas = Some(
+                modals::vault_mutation_preview::VaultMutationPreviewModal::new(pending)
+                    .render(f, area),
+            );
+        } else {
+            self.pending_vault_mutation_areas = None;
         }
     }
 

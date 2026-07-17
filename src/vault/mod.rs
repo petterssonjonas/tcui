@@ -9,6 +9,8 @@ pub(crate) mod move_recovery;
 mod move_recovery_fs;
 pub(crate) mod move_rollback;
 mod move_rollback_support;
+pub(crate) mod mutation_plan;
+mod mutation_preview;
 mod path;
 pub(crate) mod read_tools;
 pub(crate) mod target;

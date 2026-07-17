@@ -30,6 +30,10 @@ mod vault_profiles;
 mod request_only_document_tests;
 
 #[cfg(test)]
+#[path = "app/vault_mutation_preview_tests.rs"]
+mod vault_mutation_preview_tests;
+
+#[cfg(test)]
 #[path = "app/chat_file_lifecycle.rs"]
 mod chat_file_lifecycle;
 

@@ -13,6 +13,8 @@ pub enum Action {
     ConfirmPendingDocumentDiscard,
     AwaitSubmissionConfirmation(crate::ui::app_tabs::AppTabId),
     ConfirmSubmission(crate::ui::app_tabs::AppTabId),
+    CancelVaultMutation,
+    ConfirmVaultMutation,
     SubmissionFailedAfterLaunch(
         crate::ui::app_tabs::AppTabId,
         crate::app::submission::SubmissionId,
