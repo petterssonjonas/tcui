@@ -26,7 +26,7 @@ impl TuiApp {
                 id,
             } => self
                 .chat_files
-                .open(*conversation_id, *id)
+                .open_link(*conversation_id, *id)
                 .map_err(|_| InsertArtifactError::Unavailable)?,
             ArtifactHandle::Saved(path) => self.read_saved_artifact(path)?,
             ArtifactHandle::Memory(path) => self.read_memory_artifact(path)?,

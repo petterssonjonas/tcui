@@ -79,7 +79,6 @@ impl TuiApp {
             tab.messages = messages;
         }
         self.hydrate_chat_files(tab_id, conv_id)?;
-        self.sync_message_media(tab_id);
         Ok(())
     }
 
@@ -121,11 +120,20 @@ impl TuiApp {
         conversation_id: i64,
     ) -> color_eyre::Result<()> {
         self.storage.delete_conversation(conversation_id)?;
-        if let Err(error) = self.chat_files.purge_conversation(conversation_id) {
+        if let Err(error) = self.chat_files.remove_conversation_links(conversation_id) {
+            let marker_error = self
+                .chat_files
+                .mark_orphaned_conversation(conversation_id)
+                .err();
             self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::Failed;
-            self.ui.connection_message = Some(format!(
-                "Conversation deleted; chat-file cleanup will retry at startup: {error}"
-            ));
+            self.ui.connection_message = Some(match marker_error {
+                Some(marker_error) => format!(
+                    "Conversation deleted; link cleanup failed ({error}) and retry marker could not be written ({marker_error})"
+                ),
+                None => format!(
+                    "Conversation deleted; chat-file cleanup will retry at startup: {error}"
+                ),
+            });
         }
         let tab_id = self.ui.active_tab;
         let deleting_active = self

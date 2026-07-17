@@ -291,7 +291,6 @@ impl TuiApp {
             }
             Action::StreamResponse(tab_id, message_idx, content) => {
                 self.ui.add_stream_content(tab_id, message_idx, content);
-                self.sync_message_media(tab_id);
                 Ok(())
             }
             Action::StreamThinking(tab_id, message_idx, content) => {
@@ -310,16 +309,8 @@ impl TuiApp {
                 }
                 Ok(())
             }
-            Action::FinalizeAssistantMessage(tab_id, message_idx, message) => {
-                if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
-                    if let Some(existing) = tab.messages.get_mut(message_idx) {
-                        *existing = message;
-                    }
-                    tab.scroll_to_message = Some(message_idx);
-                }
-                self.persist_active_conversation(tab_id)?;
-                self.refresh_tab_conversations(tab_id)?;
-                Ok(())
+            Action::FinalizeAssistantMessage(completion) => {
+                self.finalize_assistant_message(completion)
             }
             Action::StopStream(tab_id) => {
                 self.ui.finish_stream(tab_id);
@@ -332,14 +323,20 @@ impl TuiApp {
                     stored.id = Some(message_id);
                 }
                 self.ui.add_message(tab_id, stored);
-                self.sync_message_media(tab_id);
                 Ok(())
             }
             Action::AddGeneratedFile(tab_id, file) => {
-                if let Err(error) = self.persist_generated_file(tab_id, file) {
-                    self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::Failed;
-                    self.ui.connection_message =
-                        Some(format!("Chat file persistence failed: {error}"));
+                match self.persist_generated_file(tab_id, file) {
+                    Ok(filename) => {
+                        self.ui.connection_status =
+                            crate::ui::status_bar::ConnectionStatus::CloudConnected;
+                        self.ui.connection_message = Some(format!("Saved as {filename}"));
+                    }
+                    Err(error) => {
+                        self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::Failed;
+                        self.ui.connection_message =
+                            Some(format!("Generated file persistence failed: {error}"));
+                    }
                 }
                 Ok(())
             }
@@ -692,6 +689,9 @@ impl TuiApp {
         let action_tx = self.action_tx.clone();
         let system_prompt = self.system_prompt.clone();
         let user_request = canonical_content.clone();
+        let save_requested = crate::skills::mentions(&canonical_content)
+            .iter()
+            .any(|mention| mention == "save");
         let terminal_has_focus = Arc::clone(&self.terminal_has_focus);
 
         let Some(endpoint) = endpoint else {
@@ -879,8 +879,13 @@ impl TuiApp {
                     };
                     if !visible.is_empty() {
                         visible_answer.push_str(&visible);
-                        let _ =
-                            event_tx.send(Action::StreamResponse(tab_id, assistant_idx, visible));
+                        if !save_requested {
+                            let _ = event_tx.send(Action::StreamResponse(
+                                tab_id,
+                                assistant_idx,
+                                visible,
+                            ));
+                        }
                     }
                 }
                 crate::llm::chat::ChatStreamEvent::Thinking(content) => {
@@ -897,11 +902,13 @@ impl TuiApp {
                 let filtered = remember_filter.finish();
                 if !filtered.visible.is_empty() {
                     visible_answer.push_str(&filtered.visible);
-                    let _ = action_tx.send(Action::StreamResponse(
-                        tab_id,
-                        assistant_idx,
-                        filtered.visible,
-                    ));
+                    if !save_requested {
+                        let _ = action_tx.send(Action::StreamResponse(
+                            tab_id,
+                            assistant_idx,
+                            filtered.visible,
+                        ));
+                    }
                 }
                 for issue in filtered.issues {
                     let message = match issue {
@@ -918,14 +925,11 @@ impl TuiApp {
             };
 
             match result {
-                Ok(response) if !visible_answer.is_empty() || !response.thinking.is_empty() => {
-                    let file_id = rand::random();
-                    let generated_file = crate::app::GeneratedFile::from_skill_response(
-                        file_id,
-                        conversation_id,
-                        &user_request,
-                        &visible_answer,
-                    );
+                Ok(response)
+                    if save_requested
+                        || !visible_answer.is_empty()
+                        || !response.thinking.is_empty() =>
+                {
                     #[cfg(feature = "memory")]
                     if let Some(fact) = remembered {
                         memory_activities.push(crate::memory::MemoryActivity::Saving);
@@ -977,12 +981,29 @@ impl TuiApp {
                     msg.token_count = response.total_tokens;
                     #[cfg(feature = "memory")]
                     let _ = crate::memory::set_activities(&mut msg, &memory_activities);
+                    let generated_file = if save_requested {
+                        crate::app::GeneratedFile::from_skill_response(
+                            rand::random(),
+                            conversation_id,
+                            &user_request,
+                            &visible_answer,
+                        )
+                        .map_or(
+                            crate::app::action::GeneratedFileFinalization::Invalid,
+                            crate::app::action::GeneratedFileFinalization::Ready,
+                        )
+                    } else {
+                        crate::app::action::GeneratedFileFinalization::NotRequested
+                    };
                     let _ = action_tx.send(Action::FinalizeAssistantMessage(
-                        tab_id,
-                        assistant_idx,
-                        msg,
+                        crate::app::action::AssistantFinalization {
+                            tab_id,
+                            message_idx: assistant_idx,
+                            message: msg,
+                            generated_file,
+                        },
                     ));
-                    if !terminal_has_focus.load(Ordering::Relaxed) {
+                    if !save_requested && !terminal_has_focus.load(Ordering::Relaxed) {
                         let _ = crate::notifications::notify_finished(
                             &config_snapshot,
                             &user_request,
@@ -990,15 +1011,24 @@ impl TuiApp {
                         )
                         .await;
                     }
-                    if let Some(file) = generated_file {
-                        let _ = action_tx.send(Action::AddGeneratedFile(tab_id, file));
-                    }
                 }
                 Ok(_) => {}
                 Err(err) => {
                     let message = format!("Provider request failed: {err}");
                     let _ = action_tx.send(Action::UpdateStatus(message.clone()));
-                    let _ = action_tx.send(Action::StreamResponse(tab_id, assistant_idx, message));
+                    let _ = action_tx.send(Action::FinalizeAssistantMessage(
+                        crate::app::action::AssistantFinalization {
+                            tab_id,
+                            message_idx: assistant_idx,
+                            message: Message::new(
+                                conversation_id,
+                                "assistant".to_string(),
+                                message,
+                            ),
+                            generated_file:
+                                crate::app::action::GeneratedFileFinalization::NotRequested,
+                        },
+                    ));
                     let _ = action_tx.send(Action::SubmissionFailedAfterLaunch(
                         app_tab_id,
                         submission_id,

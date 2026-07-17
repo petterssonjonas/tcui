@@ -2,6 +2,21 @@
 use crate::app::Message;
 
 #[derive(Debug, Clone)]
+pub(crate) enum GeneratedFileFinalization {
+    NotRequested,
+    Ready(crate::app::GeneratedFile),
+    Invalid,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AssistantFinalization {
+    pub(crate) tab_id: usize,
+    pub(crate) message_idx: usize,
+    pub(crate) message: Message,
+    pub(crate) generated_file: GeneratedFileFinalization,
+}
+
+#[derive(Debug, Clone)]
 pub enum Action {
     Quit,
     ConfirmQuit,
@@ -23,7 +38,7 @@ pub enum Action {
     StreamThinking(usize, usize, String),
     #[cfg(feature = "memory")]
     SetMemoryActivities(usize, usize, Vec<crate::memory::MemoryActivity>),
-    FinalizeAssistantMessage(usize, usize, Message),
+    FinalizeAssistantMessage(AssistantFinalization),
     StopStream(usize),
     AddMessage(usize, Message),
     AddGeneratedFile(usize, crate::app::GeneratedFile),

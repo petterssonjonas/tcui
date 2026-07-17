@@ -20,8 +20,7 @@ use manifest::LinkManifest;
 pub(crate) use atomic::AtomicWriteTarget;
 use model::{collision_filename, sanitize_name, validate_conversation_id};
 pub(crate) use model::{
-    ChatFileError, ChatFileId, ChatFileLink, ChatFileLinkManifestV1, ChatFileRecord,
-    SavedFileRecord,
+    ChatFileError, ChatFileId, ChatFileLink, ChatFileLinkManifestV1, SavedFileRecord,
 };
 
 use crate::storage::paths::{ensure_directory, TcuiDataPaths};
@@ -36,7 +35,7 @@ pub(crate) struct ChatSavedFileStore {
     #[cfg(test)]
     tombstone_remove_failure: Arc<AtomicBool>,
     #[cfg(test)]
-    purge_failure: Arc<AtomicBool>,
+    conversation_cleanup_failure: Arc<AtomicBool>,
 }
 
 impl ChatSavedFileStore {
@@ -50,7 +49,7 @@ impl ChatSavedFileStore {
             #[cfg(test)]
             tombstone_remove_failure: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
-            purge_failure: Arc::new(AtomicBool::new(false)),
+            conversation_cleanup_failure: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -229,6 +228,10 @@ impl ChatSavedFileStore {
         self.saved_root.join(filename)
     }
 
+    pub(crate) fn path_for_link(&self, link: &ChatFileLink) -> PathBuf {
+        self.saved_path(&link.filename)
+    }
+
     fn target_is_regular(&self, path: &Path) -> Result<(), ChatFileError> {
         let metadata = fs::symlink_metadata(path)?;
         if metadata.file_type().is_file() {
@@ -243,6 +246,11 @@ impl ChatSavedFileStore {
     #[cfg(test)]
     fn fail_next_atomic_write(&self, target: AtomicWriteTarget) {
         self.writer.fail_next(target);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_link_write(&self) {
+        self.writer.fail_next(AtomicWriteTarget::Manifest);
     }
 
     #[cfg(test)]

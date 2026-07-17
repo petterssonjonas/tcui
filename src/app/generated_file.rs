@@ -1,8 +1,4 @@
-use std::{
-    fs::OpenOptions,
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedFile {
@@ -10,8 +6,6 @@ pub struct GeneratedFile {
     pub conversation_id: i64,
     pub name: String,
     pub content: String,
-    pub saved_path: Option<PathBuf>,
-    pub chat_file_id: Option<crate::storage::chat_files::ChatFileId>,
 }
 
 impl GeneratedFile {
@@ -39,22 +33,7 @@ impl GeneratedFile {
             conversation_id,
             name,
             content,
-            saved_path: None,
-            chat_file_id: None,
         })
-    }
-
-    pub fn save_to(mut self, base_dir: &Path) -> std::io::Result<Self> {
-        std::fs::create_dir_all(base_dir)?;
-        let path = available_path(base_dir, &self.name)?;
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        output.write_all(self.content.as_bytes())?;
-        output.sync_all()?;
-        self.saved_path = Some(path);
-        Ok(self)
     }
 }
 
@@ -98,32 +77,6 @@ fn complete_markdown_body(answer: &str) -> String {
         }
     }
     trimmed.to_string()
-}
-
-fn available_path(base_dir: &Path, name: &str) -> std::io::Result<PathBuf> {
-    let requested = base_dir.join(name);
-    if !requested.exists() {
-        return Ok(requested);
-    }
-    let path = Path::new(name);
-    let stem = path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("artifact");
-    let extension = path.extension().and_then(|value| value.to_str());
-    for suffix in 2..=u32::MAX {
-        let candidate = match extension {
-            Some(extension) => base_dir.join(format!("{stem} ({suffix}).{extension}")),
-            None => base_dir.join(format!("{stem} ({suffix})")),
-        };
-        if !candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::AlreadyExists,
-        "artifact directory has no available filename",
-    ))
 }
 
 pub(crate) fn expand_user_path(path: &Path, home: Option<&Path>) -> PathBuf {
@@ -244,27 +197,6 @@ mod tests {
 
         // Then
         assert_eq!(file.content, answer);
-    }
-
-    #[test]
-    fn save_skill_writes_the_artifact_to_the_configured_directory() {
-        // Given
-        let root =
-            std::env::temp_dir().join(format!("tcui-save-artifact-{}", rand::random::<u64>()));
-        let file =
-            GeneratedFile::from_skill_response(5, 42, "@save report.md", "# Report\n\nComplete.")
-                .expect("expected @save artifact");
-
-        // When
-        let saved = file.save_to(&root).expect("save artifact");
-
-        // Then
-        let path = saved.saved_path.expect("saved path");
-        assert_eq!(
-            std::fs::read_to_string(&path).expect("read saved artifact"),
-            "# Report\n\nComplete."
-        );
-        std::fs::remove_dir_all(root).expect("cleanup artifact directory");
     }
 
     #[test]

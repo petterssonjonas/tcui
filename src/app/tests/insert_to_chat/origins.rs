@@ -49,12 +49,12 @@ fn insert_to_chat_chat_file_uses_fresh_safe_store_snapshot() {
         let conversation_id = app.ui.tabs[0].active_conversation;
         let record = app
             .chat_files
-            .create(conversation_id, "fresh.md", b"FRESH-FROM-SAFE-STORE")
+            .create_for_chat(conversation_id, "fresh.md", b"FRESH-FROM-SAFE-STORE")
             .expect("create chat file");
         let artifact = ArtifactEntry::chat_file(
             conversation_id,
             record.id,
-            record.name,
+            record.filename,
             "STALE-PREVIEW".to_string(),
         );
         let handle = artifact.handle.clone();

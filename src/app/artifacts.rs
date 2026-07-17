@@ -48,18 +48,21 @@ impl TuiApp {
     }
 
     pub(crate) fn refresh_saved_artifacts(&mut self) {
-        let root = self.export_base_dir();
-        self.ui.saved_artifacts = std::fs::read_dir(&root)
-            .ok()
-            .into_iter()
-            .flat_map(|entries| entries.filter_map(Result::ok))
-            .map(|entry| entry.path())
-            .filter(|path| path.is_file())
-            .map(crate::ui::artifact_sidebar::ArtifactEntry::saved_file)
-            .collect();
-        self.ui
-            .saved_artifacts
-            .sort_by(|left, right| left.name.cmp(&right.name));
+        match self.chat_files.list_saved() {
+            Ok(records) => {
+                self.ui.saved_artifacts = records
+                    .into_iter()
+                    .map(|record| {
+                        crate::ui::artifact_sidebar::ArtifactEntry::saved_file(record.path)
+                    })
+                    .collect();
+            }
+            Err(error) => {
+                self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::Failed;
+                self.ui.connection_message =
+                    Some(format!("Saved files could not be loaded: {error}"));
+            }
+        }
     }
 
     pub(crate) fn refresh_memory_artifacts(&mut self) {
@@ -114,11 +117,10 @@ impl TuiApp {
             return;
         };
         if let crate::ui::artifact_sidebar::ArtifactHandle::ChatFile {
-            conversation_id,
-            id,
+            conversation_id: _,
+            id: _,
         } = &handle
         {
-            self.save_chat_file_copy(&artifact, *conversation_id, *id);
             return;
         }
         if matches!(
@@ -219,13 +221,10 @@ impl TuiApp {
 
     pub(crate) fn delete_artifact(&mut self, handle: crate::ui::artifact_sidebar::ArtifactHandle) {
         match &handle {
-            crate::ui::artifact_sidebar::ArtifactHandle::ChatFile {
-                conversation_id,
-                id,
-            } => self.delete_chat_file(&handle, *conversation_id, *id),
-            crate::ui::artifact_sidebar::ArtifactHandle::Saved(path) => {
-                let _ = std::fs::remove_file(path);
-                self.refresh_saved_artifacts();
+            crate::ui::artifact_sidebar::ArtifactHandle::ChatFile { .. }
+            | crate::ui::artifact_sidebar::ArtifactHandle::Saved(_) => {
+                self.delete_canonical_file(&handle);
+                return;
             }
             crate::ui::artifact_sidebar::ArtifactHandle::Memory(path) => {
                 if let Some(artifact) = self.find_artifact(&handle) {

@@ -14,6 +14,7 @@ use crate::storage::paths::set_unix_mode;
 pub(crate) enum AtomicWriteTarget {
     SavedFile,
     Manifest,
+    OrphanMarker,
 }
 
 impl AtomicWriteTarget {
@@ -22,6 +23,7 @@ impl AtomicWriteTarget {
         match self {
             Self::SavedFile => 1,
             Self::Manifest => 2,
+            Self::OrphanMarker => 3,
         }
     }
 }

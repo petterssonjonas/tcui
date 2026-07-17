@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use super::atomic::sync_directory;
+use super::atomic::{sync_directory, AtomicWriteTarget};
 use super::lock::GlobalLinkLock;
 use super::model::{link_filename_is_valid, validate_conversation_id};
 use super::{ChatFileError, ChatFileId, ChatFileLinkManifestV1, ChatSavedFileStore};
@@ -47,7 +47,62 @@ impl ChatSavedFileStore {
         conversation_id: i64,
     ) -> Result<(), ChatFileError> {
         validate_conversation_id(conversation_id)?;
+        #[cfg(test)]
+        if self
+            .conversation_cleanup_failure
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(ChatFileError::InjectedPurgeFailure);
+        }
         let _lock = GlobalLinkLock::acquire(&self.paths)?;
+        self.remove_conversation_links_locked(conversation_id)
+    }
+
+    pub(crate) fn mark_orphaned_conversation(
+        &self,
+        conversation_id: i64,
+    ) -> Result<(), ChatFileError> {
+        validate_conversation_id(conversation_id)?;
+        crate::storage::paths::ensure_directory(&self.paths.chat_file_links_dir)?;
+        self.writer.write_replace(
+            &self.orphan_marker_path(conversation_id),
+            b"",
+            AtomicWriteTarget::OrphanMarker,
+        )
+    }
+
+    pub(crate) fn cleanup_orphans(&self) -> Result<usize, ChatFileError> {
+        let _lock = GlobalLinkLock::acquire(&self.paths)?;
+        crate::storage::paths::ensure_directory(&self.paths.chat_file_links_dir)?;
+        let mut markers = Vec::new();
+        for entry in fs::read_dir(&self.paths.chat_file_links_dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(raw_id) = name.strip_prefix(".orphan-conversation-") else {
+                continue;
+            };
+            let Ok(conversation_id) = raw_id.parse::<i64>() else {
+                continue;
+            };
+            if conversation_id > 0 {
+                markers.push((conversation_id, entry.path()));
+            }
+        }
+        markers.sort_by_key(|(conversation_id, _)| *conversation_id);
+        for (conversation_id, marker) in &markers {
+            self.remove_conversation_links_locked(*conversation_id)?;
+            fs::remove_file(marker)?;
+            sync_directory(&self.paths.chat_file_links_dir)?;
+        }
+        Ok(markers.len())
+    }
+
+    fn remove_conversation_links_locked(&self, conversation_id: i64) -> Result<(), ChatFileError> {
         self.ensure_saved_root()?;
         let mut manifest = self.load_manifest()?;
         self.prune_stale_links(&mut manifest)?;
@@ -59,6 +114,12 @@ impl ChatSavedFileStore {
             self.write_manifest(&manifest)?;
         }
         Ok(())
+    }
+
+    fn orphan_marker_path(&self, conversation_id: i64) -> std::path::PathBuf {
+        self.paths
+            .chat_file_links_dir
+            .join(format!(".orphan-conversation-{conversation_id}"))
     }
 
     fn delete_filename(
@@ -142,6 +203,12 @@ impl ChatSavedFileStore {
     #[cfg(test)]
     pub(super) fn fail_next_tombstone_remove(&self) {
         self.tombstone_remove_failure
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_conversation_cleanup(&self) {
+        self.conversation_cleanup_failure
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }

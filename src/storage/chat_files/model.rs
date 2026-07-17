@@ -61,13 +61,6 @@ pub(crate) struct SavedFileRecord {
     pub(crate) size_bytes: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ChatFileRecord {
-    pub(crate) id: ChatFileId,
-    pub(crate) name: String,
-    pub(crate) size_bytes: u64,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ChatFileError {
     #[error("conversation ID must be positive")]

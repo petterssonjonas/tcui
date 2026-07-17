@@ -1050,22 +1050,6 @@ impl UI {
         }
     }
 
-    pub fn add_generated_file(&mut self, tab_id: usize, file: crate::app::GeneratedFile) {
-        if let Some(tab) = self.tabs.get_mut(tab_id) {
-            let artifact = match (file.chat_file_id, file.saved_path) {
-                (Some(chat_file_id), _) => ArtifactEntry::chat_file(
-                    file.conversation_id,
-                    chat_file_id,
-                    file.name,
-                    file.content,
-                ),
-                (None, Some(path)) => ArtifactEntry::saved_markdown(path, file.content),
-                (None, None) => ArtifactEntry::temp_markdown(file.id, file.name, file.content),
-            };
-            tab.temporary_artifacts.push(artifact);
-        }
-    }
-
     pub fn add_stream_content(&mut self, tab_id: usize, message_idx: usize, content: String) {
         if let Some(tab) = self.tabs.get_mut(tab_id) {
             if let Some(message) = tab.messages.get_mut(message_idx) {

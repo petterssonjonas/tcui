@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -209,7 +209,6 @@ impl TuiApp {
             app.ui
                 .show_toast(format!("Legacy Chat/Saved reset skipped: {error}"));
         }
-        app.sync_message_media(app.ui.active_tab);
         app.queue_connection_check_for_active_tab();
         app
     }
@@ -338,35 +337,6 @@ impl TuiApp {
                 Storage::chat_key_path().display()
             ));
         }
-    }
-
-    pub(crate) fn sync_message_media(&mut self, tab_id: usize) {
-        let Some(tab) = self.ui.tabs.get_mut(tab_id) else {
-            return;
-        };
-
-        let existing: HashSet<_> = tab
-            .temporary_artifacts
-            .iter()
-            .filter_map(|artifact| match &artifact.handle {
-                crate::ui::artifact_sidebar::ArtifactHandle::Media(source) => Some(source.clone()),
-                _ => None,
-            })
-            .collect();
-        let mut discovered = Vec::new();
-        for message in &tab.messages {
-            for source in local_media_sources(&message.content) {
-                if existing.contains(&source) {
-                    continue;
-                }
-                if let Some(artifact) =
-                    crate::ui::artifact_sidebar::ArtifactEntry::temp_media(&source)
-                {
-                    discovered.push(artifact);
-                }
-            }
-        }
-        tab.temporary_artifacts.extend(discovered);
     }
 
     pub(crate) fn scroll_active_chat_lines(&mut self, delta: isize) {
