@@ -83,6 +83,24 @@ fn insert_to_chat_empty_input_backspace_removes_last_chip_only() {
 }
 
 #[test]
+fn insert_to_chat_empty_input_enter_submits_pending_document() {
+    with_test_app("insert-to-chat-chip-only-enter", |app| {
+        // Given
+        queue_document(app, "one", "one.md", b"chip only");
+
+        // When
+        let action = app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+
+        // Then
+        assert!(matches!(action, Some(Action::SendMessage(content)) if content.is_empty()));
+        assert_eq!(app.ui.tabs[0].pending_document_chips.len(), 1);
+    });
+}
+
+#[test]
 fn insert_to_chat_chip_close_click_removes_selected_snapshot() {
     with_test_app("insert-to-chat-chip-click", |app| {
         // Given

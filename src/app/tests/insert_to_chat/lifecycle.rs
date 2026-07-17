@@ -26,7 +26,7 @@ fn insert_to_chat_prelaunch_failure_retains_chip_and_snapshot() {
 }
 
 #[test]
-fn insert_to_chat_launch_consumes_chip_and_reload_stays_instruction_only() {
+fn insert_to_chat_launch_consumes_chip_and_reload_shows_expanded_text() {
     with_test_app("insert-to-chat-launch", |app| {
         // Given
         #[cfg(feature = "memory")]
@@ -58,17 +58,19 @@ fn insert_to_chat_launch_consumes_chip_and_reload_stays_instruction_only() {
             .is_none());
         assert!(app.ui.tabs[0].pending_document_chips.is_empty());
         assert_eq!(app.ui.tabs[0].messages.len(), 1);
-        assert_eq!(app.ui.tabs[0].messages[0].content, "typed instruction");
-        assert!(!app.ui.tabs[0].messages[0]
-            .content
-            .contains("ONE-REQUEST-ONLY"));
+        assert_eq!(
+            app.ui.tabs[0].messages[0].content,
+            "typed instruction\n\nONE-REQUEST-ONLY"
+        );
         let title = app.ui.tabs[0]
             .generated_title
             .as_deref()
             .expect("generated title");
         println!("INSERT_TO_CHAT_TITLE={title}");
-        assert_eq!(title, TuiApp::generate_title("typed instruction"));
-        assert!(!title.contains("ONE-REQUEST-ONLY"));
+        assert_eq!(
+            title,
+            TuiApp::generate_title("typed instruction\n\nONE-REQUEST-ONLY")
+        );
         println!("INSERT_TO_CHAT_STATE Draft -> Preparing -> Prepared -> Committed -> Launched; chips=consumed");
     });
 }

@@ -34,9 +34,9 @@ impl SubmissionState {
 
     pub fn await_confirmation(self) -> Result<Self, SubmissionTransitionError> {
         match self {
-            Self::Preparing(submission) => Ok(Self::AwaitingConfirmation(
-                PreparedUserTurn::prepare(&submission),
-            )),
+            Self::Preparing(submission) => PreparedUserTurn::prepare(&submission)
+                .map(Self::AwaitingConfirmation)
+                .map_err(|_| SubmissionTransitionError),
             Self::Draft(_)
             | Self::AwaitingConfirmation(_)
             | Self::Prepared(_)
@@ -60,9 +60,9 @@ impl SubmissionState {
 
     pub fn finish_preparing(self) -> Result<Self, SubmissionTransitionError> {
         match self {
-            Self::Preparing(submission) => {
-                Ok(Self::Prepared(PreparedUserTurn::prepare(&submission)))
-            }
+            Self::Preparing(submission) => PreparedUserTurn::prepare(&submission)
+                .map(Self::Prepared)
+                .map_err(|_| SubmissionTransitionError),
             Self::Draft(_)
             | Self::AwaitingConfirmation(_)
             | Self::Prepared(_)

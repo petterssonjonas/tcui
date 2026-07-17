@@ -26,10 +26,6 @@ impl DocumentDigest {
     pub const fn as_bytes(&self) -> &[u8; 32] {
         self.0.as_bytes()
     }
-
-    pub(super) fn hex(&self) -> String {
-        self.0.to_hex().to_string()
-    }
 }
 
 impl fmt::Debug for DocumentDigest {
@@ -91,10 +87,12 @@ impl PendingDocument {
         self.line_count
     }
 
+    #[cfg(test)]
     pub const fn byte_count(&self) -> usize {
         self.byte_count
     }
 
+    #[cfg(test)]
     pub const fn digest(&self) -> DocumentDigest {
         self.digest
     }

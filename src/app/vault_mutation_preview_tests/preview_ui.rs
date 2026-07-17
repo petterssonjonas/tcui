@@ -69,10 +69,9 @@ impl VaultMutationFixture {
         let submission = InputSubmission::new(
             "@vault move source.md to Archive",
             PendingDocuments::default(),
-        )
-        .expect("submission");
+        );
         PendingVaultMutation::new(
-            PreparedUserTurn::prepare(&submission),
+            PreparedUserTurn::prepare(&submission).expect("prepare turn"),
             VaultMutationKind::Move(self.create_plan(overwrite)),
             &self.catalog,
         )

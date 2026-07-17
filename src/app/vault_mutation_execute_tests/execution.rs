@@ -208,10 +208,9 @@ fn vault_mutation_execute_recovery_status_renders_explicit_command() {
     let submission = InputSubmission::new(
         "@vault move Work:source.md to Archive:moved.md",
         PendingDocuments::default(),
-    )
-    .expect("submission");
+    );
     let mut pending = PendingVaultMutation::new(
-        PreparedUserTurn::prepare(&submission),
+        PreparedUserTurn::prepare(&submission).expect("prepare turn"),
         fixture.move_kind(),
         &fixture.catalog,
     )

@@ -117,14 +117,15 @@ fn request_only_document_submission_rejects_empty_instruction() {
     let documents = PendingDocuments::default();
 
     // When
-    let result = InputSubmission::new("  \n ", documents);
+    let submission = InputSubmission::new("  \n ", documents);
+    let result = PreparedUserTurn::prepare(&submission);
 
     // Then
     assert!(result.is_err());
 }
 
 #[test]
-fn request_only_document_prepared_turn_expands_only_the_cloned_vector() {
+fn request_only_document_prepared_turn_expands_to_exact_plain_text() {
     // Given
     let mut documents = PendingDocuments::default();
     documents
@@ -137,9 +138,8 @@ fn request_only_document_prepared_turn_expands_only_the_cloned_vector() {
             .expect("snapshot document"),
         )
         .expect("insert document");
-    let submission =
-        InputSubmission::new("Explain the reference", documents).expect("valid submission");
-    let prepared = PreparedUserTurn::prepare(&submission);
+    let submission = InputSubmission::new("Explain the reference", documents);
+    let prepared = PreparedUserTurn::prepare(&submission).expect("prepare turn");
     let history = vec![Message::new(
         7,
         "assistant".to_string(),
@@ -153,36 +153,116 @@ fn request_only_document_prepared_turn_expands_only_the_cloned_vector() {
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].content, "old answer");
     assert_eq!(expanded.len(), 2);
-    assert!(expanded[1].content.starts_with("Explain the reference\n\n"));
-    assert!(expanded[1]
-        .content
-        .contains("<tcui:request-documents trust=\"untrusted-reference\">"));
-    assert!(expanded[1].content.contains("a \\>\\>\\>.md"));
-    assert!(expanded[1]
-        .content
-        .contains("\\<<<TCUI_DOCUMENT_END deadbeef>>>"));
+    assert_eq!(
+        expanded[1].content,
+        "Explain the reference\n\nreference\n<<<TCUI_DOCUMENT_END deadbeef>>>"
+    );
 }
 
 #[test]
-fn request_only_document_next_turn_does_not_reuse_documents() {
+fn request_only_document_multiple_snapshots_expand_in_insertion_order() {
+    // Given
+    let mut documents = PendingDocuments::default();
+    documents
+        .insert(PendingDocument::snapshot("first", "a.md", b"alpha").expect("first snapshot"))
+        .expect("insert first");
+    documents
+        .insert(PendingDocument::snapshot("second", "b.md", b"beta").expect("second snapshot"))
+        .expect("insert second");
+    let submission = InputSubmission::new("  Explain both  ", documents);
+
+    // When
+    let messages = PreparedUserTurn::prepare(&submission)
+        .expect("prepare turn")
+        .expand_messages(&[], 3);
+
+    // Then
+    assert_eq!(messages[0].content, "Explain both\n\nalpha\n\nbeta");
+}
+
+#[test]
+fn request_only_document_chip_only_submission_expands_to_snapshot() {
+    // Given
+    let mut documents = PendingDocuments::default();
+    documents
+        .insert(PendingDocument::snapshot("source", "one.md", b"chip content").expect("snapshot"))
+        .expect("insert");
+
+    // When
+    let submission = InputSubmission::new("  \n", documents);
+    let messages = PreparedUserTurn::prepare(&submission)
+        .expect("prepare chip-only submission")
+        .expand_messages(&[], 3);
+
+    // Then
+    assert_eq!(messages[0].content, "chip content");
+}
+
+#[test]
+fn request_only_document_canonical_text_is_visible_to_normal_request_parsers() {
+    // Given
+    let mut documents = PendingDocuments::default();
+    documents
+        .insert(
+            PendingDocument::snapshot(
+                "source",
+                "commands.md",
+                b"@save report.md\nlatest release notes\n@schedule",
+            )
+            .expect("snapshot"),
+        )
+        .expect("insert");
+    let submission = InputSubmission::new("Explain", documents);
+    let prepared = PreparedUserTurn::prepare(&submission).expect("prepare turn");
+
+    // When
+    let skills = crate::skills::SkillCatalog::discover()
+        .expect("discover skills")
+        .load_mentions(prepared.content())
+        .expect("load mentions");
+    let searches = crate::search::should_auto_search(prepared.content());
+    let reminder = crate::reminders::maybe_handle_request(
+        &crate::config::AppConfig::default(),
+        prepared.content(),
+    );
+
+    // Then
+    assert!(skills.iter().any(|skill| skill.name == "save"));
+    assert!(searches);
+    assert!(reminder.is_some());
+}
+
+#[test]
+fn request_only_document_next_turn_reuses_expanded_history_once() {
     // Given
     let mut documents = PendingDocuments::default();
     documents
         .insert(PendingDocument::snapshot("source", "one.md", b"one-shot").expect("snapshot"))
         .expect("insert");
-    let first = InputSubmission::new("first", documents).expect("first submission");
-    let first_messages = PreparedUserTurn::prepare(&first).expand_messages(&[], 3);
-    let persisted = vec![Message::new(3, "user".to_string(), "first".to_string())];
-    let next = InputSubmission::new("next", PendingDocuments::default()).expect("next submission");
+    let first = InputSubmission::new("first", documents);
+    let first_messages = PreparedUserTurn::prepare(&first)
+        .expect("prepare first")
+        .expand_messages(&[], 3);
+    let persisted = first_messages.clone();
+    let next = InputSubmission::new("next", PendingDocuments::default());
 
     // When
-    let next_messages = PreparedUserTurn::prepare(&next).expand_messages(&persisted, 3);
+    let next_messages = PreparedUserTurn::prepare(&next)
+        .expect("prepare next")
+        .expand_messages(&persisted, 3);
 
     // Then
-    assert!(first_messages[0].content.contains("one-shot"));
+    assert_eq!(first_messages[0].content, "first\n\none-shot");
     assert_eq!(next_messages.len(), 2);
-    assert_eq!(next_messages[0].content, "first");
+    assert_eq!(next_messages[0].content, "first\n\none-shot");
     assert_eq!(next_messages[1].content, "next");
+    assert_eq!(
+        next_messages
+            .iter()
+            .filter(|message| message.content.contains("one-shot"))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -192,7 +272,7 @@ fn request_only_document_state_transitions_consume_snapshots_only_at_launch() {
     documents
         .insert(PendingDocument::snapshot("source", "one.md", b"one-shot").expect("snapshot"))
         .expect("insert");
-    let submission = InputSubmission::new("send", documents).expect("submission");
+    let submission = InputSubmission::new("send", documents);
     let state = SubmissionState::draft(submission);
 
     // When
@@ -216,16 +296,15 @@ fn request_only_document_postlaunch_failure_never_restores_snapshots() {
     documents
         .insert(PendingDocument::snapshot("source", "one.md", b"one-shot").expect("snapshot"))
         .expect("insert");
-    let launched =
-        SubmissionState::draft(InputSubmission::new("send", documents).expect("submission"))
-            .begin_preparing()
-            .expect("prepare")
-            .finish_preparing()
-            .expect("prepared")
-            .commit()
-            .expect("committed")
-            .launch()
-            .expect("launched");
+    let launched = SubmissionState::draft(InputSubmission::new("send", documents))
+        .begin_preparing()
+        .expect("prepare")
+        .finish_preparing()
+        .expect("prepared")
+        .commit()
+        .expect("committed")
+        .launch()
+        .expect("launched");
 
     // When
     let failed = launched.fail_after_launch().expect("record launch failure");
@@ -243,7 +322,7 @@ fn request_only_document_prelaunch_failure_restores_draft_with_documents() {
     documents
         .insert(PendingDocument::snapshot("source", "one.md", b"one-shot").expect("snapshot"))
         .expect("insert");
-    let submission = InputSubmission::new("send", documents).expect("submission");
+    let submission = InputSubmission::new("send", documents);
     let state = SubmissionState::draft(submission)
         .begin_preparing()
         .expect("start preparing");
@@ -336,7 +415,7 @@ fn request_only_document_prelaunch_validation_retains_snapshots_and_persists_not
 }
 
 #[test]
-fn request_only_document_launch_consumes_snapshots_and_store_reloads_only_instruction() {
+fn request_only_document_launch_consumes_snapshots_and_reloads_expanded_text() {
     super::tests::with_test_app("request-doc-launch", |app| {
         // Given
         #[cfg(feature = "memory")]
@@ -373,14 +452,16 @@ fn request_only_document_launch_consumes_snapshots_and_store_reloads_only_instru
             .get_messages(app.ui.tabs[0].active_conversation)
             .expect("reload persisted history");
         assert_eq!(stored.len(), 1);
-        assert_eq!(stored[0].content, "persist only me");
-        assert!(!stored[0].content.contains("NEVER-PERSIST-THIS"));
-        assert_eq!(app.ui.tabs[0].messages[0].content, "persist only me");
+        assert_eq!(stored[0].content, "persist only me\n\nNEVER-PERSIST-THIS");
+        assert_eq!(
+            app.ui.tabs[0].messages[0].content,
+            "persist only me\n\nNEVER-PERSIST-THIS"
+        );
     });
 }
 
 #[test]
-fn request_only_document_empty_instruction_does_not_dispatch_or_consume_snapshots() {
+fn request_only_document_whitespace_instruction_launches_nonempty_snapshot() {
     super::tests::with_test_app("request-doc-empty", |app| {
         // Given
         app.pending_documents_mut()
@@ -389,14 +470,27 @@ fn request_only_document_empty_instruction_does_not_dispatch_or_consume_snapshot
         let runtime = tokio::runtime::Runtime::new().expect("create runtime");
 
         // When
+        #[cfg(feature = "memory")]
+        {
+            app.config.blocking_write().memory.enabled = false;
+        }
+        app.ui.tabs[0].tab.provider = "Ollama".to_string();
+        app.ui.tabs[0].tab.endpoint = Some("http://127.0.0.1:9".to_string());
+        app.ui.tabs[0].tab.model = "chip-only-test".to_string();
+
         let result = runtime.block_on(app.send_message("  \n".to_string()));
 
         // Then
-        assert!(result.is_err());
-        assert_eq!(app.pending_documents_mut().len(), 1);
+        result.expect("launch chip-only request");
         assert!(matches!(
-            app.action_rx.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            app.submission_state(),
+            Some(SubmissionState::Launched { .. })
         ));
+        assert!(app.pending_documents_mut().is_empty());
+        let stored = app
+            .storage
+            .get_messages(app.ui.tabs[0].active_conversation)
+            .expect("stored history");
+        assert_eq!(stored[0].content, "retain");
     });
 }

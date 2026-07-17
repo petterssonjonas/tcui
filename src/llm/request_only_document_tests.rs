@@ -12,7 +12,7 @@ fn request_with_documents(backend_type: &str) -> ChatRequest {
                 .expect("snapshot"),
         )
         .expect("insert");
-    let submission = InputSubmission::new("wire instruction", documents).expect("submission");
+    let submission = InputSubmission::new("wire instruction", documents);
     let history = vec![Message::new(
         9,
         "assistant".to_string(),
@@ -33,14 +33,35 @@ fn request_with_documents(backend_type: &str) -> ChatRequest {
         backend_type: backend_type.to_string(),
         api_key: None,
         system_prompt: "system".to_string(),
-        messages: PreparedUserTurn::prepare(&submission).expand_messages(&history, 9),
+        messages: PreparedUserTurn::prepare(&submission)
+            .expect("prepare turn")
+            .expand_messages(&history, 9),
+    }
+}
+
+fn serialized_body(backend_type: &str) -> serde_json::Value {
+    let bytes = serialize_request_body(&request_with_documents(backend_type))
+        .expect("serialize provider request");
+    serde_json::from_slice(&bytes).expect("provider request is JSON")
+}
+
+fn count_exact_string(value: &serde_json::Value, expected: &str) -> usize {
+    match value {
+        serde_json::Value::String(text) => usize::from(text == expected),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(|item| count_exact_string(item, expected))
+            .sum(),
+        serde_json::Value::Object(fields) => fields
+            .values()
+            .map(|item| count_exact_string(item, expected))
+            .sum(),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => 0,
     }
 }
 
 fn serialized_text(backend_type: &str) -> String {
-    let bytes = serialize_request_body(&request_with_documents(backend_type))
-        .expect("serialize provider request");
-    String::from_utf8(bytes).expect("JSON is UTF-8")
+    serialized_body(backend_type).to_string()
 }
 
 #[test]
@@ -67,13 +88,18 @@ fn request_only_document_request_debug_redacts_snapshot_and_delimiters() {
 }
 
 fn assert_insert_to_chat_wire_filter(backend_type: &str) {
-    let body = serialized_text(backend_type);
+    let body = serialized_body(backend_type);
+    let text = body.to_string();
 
-    assert_eq!(body.matches("wire instruction").count(), 1);
-    assert_eq!(body.matches("WIRE-DOCUMENT-CONTENT").count(), 1);
-    assert!(!body.contains("[wire.md - 1 lines]"));
-    assert!(!body.contains("pending_document_chips"));
-    println!("INSERT_TO_CHAT_WIRE_{backend_type}={body}");
+    assert_eq!(
+        count_exact_string(&body, "wire instruction\n\nWIRE-DOCUMENT-CONTENT"),
+        1
+    );
+    assert!(!text.contains("wire.md"));
+    assert!(!text.contains("TCUI_DOCUMENT"));
+    assert!(!text.contains("request-documents"));
+    assert!(!text.contains("pending_document_chips"));
+    println!("INSERT_TO_CHAT_WIRE_{backend_type}={text}");
 }
 
 #[test]

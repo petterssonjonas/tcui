@@ -131,9 +131,8 @@ pub(super) fn install_pending(
     let submission = InputSubmission::new(
         "@vault move Work:source.md to Archive:moved.md",
         PendingDocuments::default(),
-    )
-    .expect("submission");
-    let prepared = PreparedUserTurn::prepare(&submission);
+    );
+    let prepared = PreparedUserTurn::prepare(&submission).expect("prepare turn");
     let pending =
         PendingVaultMutation::new(prepared, kind, &fixture.catalog).expect("pending mutation");
     let tab_id = app.ui.app_tabs.active_id();

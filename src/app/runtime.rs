@@ -552,8 +552,9 @@ impl TuiApp {
                     .unwrap_or_default(),
             ),
         };
-        let submission = crate::app::submission::InputSubmission::new(&content, documents)?;
-        let instruction = submission.instruction().to_string();
+        let submission = crate::app::submission::InputSubmission::new(&content, documents);
+        let prepared_turn = crate::app::submission::PreparedUserTurn::prepare(&submission)?;
+        let canonical_content = prepared_turn.content().to_owned();
         let preparing =
             crate::app::submission::SubmissionState::draft(submission.clone()).begin_preparing()?;
         self.submission_states.insert(app_tab_id, preparing);
@@ -580,7 +581,6 @@ impl TuiApp {
             .find(|entry| entry.id == model)
             .map(|entry| entry.supported_reasoning_efforts.clone())
             .unwrap_or_default();
-        let prepared_turn = crate::app::submission::PreparedUserTurn::prepare(&submission);
         let messages = prepared_turn.expand_messages(&tab_state.messages, conversation_id);
         let tab_endpoint = tab_state.tab.endpoint.clone();
         if model.trim().is_empty() {
@@ -592,7 +592,7 @@ impl TuiApp {
         }
         let config_snapshot = self.config.read().await.clone();
         if let Some(response) =
-            crate::reminders::maybe_handle_request(&config_snapshot, &instruction)
+            crate::reminders::maybe_handle_request(&config_snapshot, &canonical_content)
         {
             self.transition_submission(
                 app_tab_id,
@@ -613,8 +613,11 @@ impl TuiApp {
             } else {
                 conversation_id
             };
-            let mut user_message =
-                Message::new(conversation_id, "user".to_string(), instruction.clone());
+            let mut user_message = Message::new(
+                conversation_id,
+                "user".to_string(),
+                canonical_content.clone(),
+            );
             match self.storage.save_message(&user_message) {
                 Ok(message_id) => user_message.id = Some(message_id),
                 Err(error) => {
@@ -638,7 +641,7 @@ impl TuiApp {
             self.ui.add_message(tab_id, user_message);
             if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
                 if tab.messages.len() == 1 && tab.generated_title.is_none() {
-                    let title = Self::generate_title(&instruction);
+                    let title = Self::generate_title(&canonical_content);
                     tab.generated_title = Some(title.clone());
                     self.storage
                         .update_conversation_title(conversation_id, &title)?;
@@ -688,7 +691,7 @@ impl TuiApp {
             .map(|(_, env_var, _)| env_var.clone());
         let action_tx = self.action_tx.clone();
         let system_prompt = self.system_prompt.clone();
-        let user_request = instruction.clone();
+        let user_request = canonical_content.clone();
         let terminal_has_focus = Arc::clone(&self.terminal_has_focus);
 
         let Some(endpoint) = endpoint else {
@@ -715,7 +718,7 @@ impl TuiApp {
             system_prompt,
             messages,
             config: config_snapshot.clone(),
-            instruction: instruction.clone(),
+            user_request: canonical_content.clone(),
             is_local_provider,
             vault_result: completed_vault_result,
         };
@@ -779,8 +782,11 @@ impl TuiApp {
         } else {
             conversation_id
         };
-        let mut user_message =
-            Message::new(conversation_id, "user".to_string(), instruction.clone());
+        let mut user_message = Message::new(
+            conversation_id,
+            "user".to_string(),
+            canonical_content.clone(),
+        );
         match crate::app::vault_mutation_execute::persist_user_message(
             &self.storage,
             &user_message,
@@ -805,7 +811,7 @@ impl TuiApp {
         self.ui.add_message(tab_id, user_message);
         if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
             if tab.messages.len() == 1 && tab.generated_title.is_none() {
-                let title = Self::generate_title(&instruction);
+                let title = Self::generate_title(&canonical_content);
                 tab.generated_title = Some(title.clone());
                 if let Err(error) = self
                     .storage

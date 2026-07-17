@@ -47,8 +47,9 @@ impl TuiApp {
     }
 
     pub(crate) fn take_input_submission(&mut self) -> Option<String> {
+        let has_pending_documents = self.has_pending_documents();
         let tab = self.ui.tabs.get_mut(self.ui.active_tab)?;
-        if tab.input_content.is_empty() {
+        if tab.input_content.is_empty() && !has_pending_documents {
             return None;
         }
         let content = std::mem::take(&mut tab.input_content);

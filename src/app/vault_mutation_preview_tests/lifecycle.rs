@@ -23,9 +23,8 @@ fn vault_mutation_preview_cancel_restores_exact_draft_without_side_effects() {
         .expect("snapshot document");
         let mut documents = PendingDocuments::default();
         documents.insert(document).expect("insert document");
-        let submission = InputSubmission::new("@vault move source.md to Archive", documents)
-            .expect("submission");
-        let prepared = PreparedUserTurn::prepare(&submission);
+        let submission = InputSubmission::new("@vault move source.md to Archive", documents);
+        let prepared = PreparedUserTurn::prepare(&submission).expect("prepare turn");
         let pending = PendingVaultMutation::new(
             prepared,
             VaultMutationKind::Move(fixture.create_plan(false)),
@@ -83,10 +82,9 @@ fn vault_mutation_preview_stale_confirm_keeps_submission_unconsumed() {
     let submission = InputSubmission::new(
         "@vault move source.md to Archive",
         PendingDocuments::default(),
-    )
-    .expect("submission");
+    );
     let mut pending = PendingVaultMutation::new(
-        PreparedUserTurn::prepare(&submission),
+        PreparedUserTurn::prepare(&submission).expect("prepare turn"),
         VaultMutationKind::Move(fixture.create_plan(false)),
         &fixture.catalog,
     )
@@ -104,7 +102,10 @@ fn vault_mutation_preview_stale_confirm_keeps_submission_unconsumed() {
         pending.state,
         VaultMutationConfirmationState::Reviewing { error: Some(_) }
     ));
-    assert_eq!(pending.submission.instruction(), submission.instruction());
+    assert_eq!(
+        pending.submission.instruction(),
+        "@vault move source.md to Archive"
+    );
 }
 
 #[test]
@@ -113,10 +114,9 @@ fn vault_mutation_preview_valid_confirm_is_noncancellable_t12c_handoff() {
     let submission = InputSubmission::new(
         "@vault move source.md to Archive",
         PendingDocuments::default(),
-    )
-    .expect("submission");
+    );
     let mut pending = PendingVaultMutation::new(
-        PreparedUserTurn::prepare(&submission),
+        PreparedUserTurn::prepare(&submission).expect("prepare turn"),
         VaultMutationKind::Move(fixture.create_plan(false)),
         &fixture.catalog,
     )

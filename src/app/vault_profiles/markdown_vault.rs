@@ -127,9 +127,9 @@ impl TuiApp {
                     let submission = crate::app::submission::InputSubmission::new(
                         &instruction,
                         crate::app::submission::PendingDocuments::default(),
-                    )?;
+                    );
                     crate::app::submission::PendingVaultMutation::new_workspace(
-                        crate::app::submission::PreparedUserTurn::prepare(&submission),
+                        crate::app::submission::PreparedUserTurn::prepare(&submission)?,
                         kind,
                         &catalog,
                     )

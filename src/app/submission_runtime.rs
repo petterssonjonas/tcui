@@ -15,7 +15,7 @@ pub(crate) struct RequestPreparation {
     pub(crate) system_prompt: String,
     pub(crate) messages: Vec<Message>,
     pub(crate) config: AppConfig,
-    pub(crate) instruction: String,
+    pub(crate) user_request: String,
     pub(crate) is_local_provider: bool,
     pub(crate) vault_result: Option<crate::app::vault_mutation_execute::VaultMutationToolResult>,
 }
@@ -48,7 +48,7 @@ pub(crate) async fn prepare_launch(
         system_prompt,
         messages,
         config,
-        instruction,
+        user_request,
         is_local_provider,
         vault_result,
     } = preparation;
@@ -101,7 +101,7 @@ pub(crate) async fn prepare_launch(
             memory_activities: Vec::new(),
         })));
     }
-    let skills = crate::skill_runtime::prepare(&config, &instruction, &request).await;
+    let skills = crate::skill_runtime::prepare(&config, &user_request, &request).await;
     if let Some(kind) = skills.vault_mutation {
         return Ok(PreparationOutcome::VaultMutation(kind));
     }
@@ -113,7 +113,7 @@ pub(crate) async fn prepare_launch(
     request.messages.extend(skills.messages);
     let mut notices = skills.notices;
 
-    match crate::search::maybe_search(&config, &instruction, false).await {
+    match crate::search::maybe_search(&config, &user_request, false).await {
         Ok(Some(context)) => request
             .messages
             .push(crate::search::untrusted_context_message(&context)),
@@ -127,7 +127,7 @@ pub(crate) async fn prepare_launch(
     if config.memory.enabled {
         memory_activities.push(crate::memory::MemoryActivity::Recalling);
         let recall_config = config.clone();
-        let recall_query = instruction.clone();
+        let recall_query = user_request.clone();
         match tokio::task::spawn_blocking(move || {
             crate::memory::recall(&recall_config, &recall_query)
         })
@@ -156,7 +156,7 @@ pub(crate) async fn prepare_launch(
         }
 
         let operation_config = config.clone();
-        let operation_request = instruction.clone();
+        let operation_request = user_request.clone();
         match tokio::task::spawn_blocking(move || {
             crate::memory::run_skill_operation(&operation_config, &operation_request)
         })
