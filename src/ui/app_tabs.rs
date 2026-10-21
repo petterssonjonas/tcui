@@ -9,7 +9,7 @@ pub struct AppTabId(u64);
 
 impl AppTabId {
     fn next() -> Self {
-        match NEXT_APP_TAB_ID.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        match NEXT_APP_TAB_ID.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             current.checked_add(1)
         }) {
             Ok(id) => Self(id),
@@ -22,6 +22,10 @@ impl AppTabId {
 pub enum AppView {
     Chat,
     Launcher,
+    Terminal {
+        session_id: u64,
+    },
+    Settings,
     MarkdownVault {
         profile_id: VaultProfileId,
     },
@@ -40,6 +44,8 @@ impl AppView {
         match self {
             Self::Chat => "Chat",
             Self::Launcher => "Launcher",
+            Self::Terminal { .. } => "Terminal",
+            Self::Settings => "Settings",
             Self::MarkdownVault { .. } => "Markdown Vault",
             #[cfg(test)]
             Self::Placeholder { .. } => "Placeholder",
@@ -200,6 +206,29 @@ impl AppTabs {
         id
     }
 
+    pub fn open_view(&mut self, view: AppView) -> AppTabId {
+        if let Some(id) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.view == view)
+            .map(AppTab::id)
+        {
+            self.active = id;
+            return id;
+        }
+        if self
+            .active_tab()
+            .is_some_and(|tab| tab.view == AppView::Launcher)
+            && self.replace_launcher(self.active, view.clone()).is_ok()
+        {
+            return self.active;
+        }
+        let id = AppTabId::next();
+        self.tabs.push(AppTab { id, view });
+        self.active = id;
+        id
+    }
+
     pub fn replace_launcher(
         &mut self,
         id: AppTabId,
@@ -211,7 +240,10 @@ impl AppTabs {
         if tab.view != AppView::Launcher {
             return Err(ReplaceLauncherError::NotLauncher(id));
         }
-        if !matches!(replacement, AppView::MarkdownVault { .. }) {
+        if !matches!(
+            replacement,
+            AppView::MarkdownVault { .. } | AppView::Terminal { .. } | AppView::Settings
+        ) {
             return Err(ReplaceLauncherError::InvalidReplacement(id));
         }
         tab.view = replacement;

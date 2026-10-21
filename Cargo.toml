@@ -16,18 +16,23 @@ memory = [
 ]
 
 [dependencies]
-ratatui = "0.30"
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "process", "io-util", "io-std", "net", "signal", "test-util"] }
 futures = "0.3"
 pulldown-cmark = "0.13"
+merman-core = { version = "=0.9.1", default-features = false, features = ["diagram-flowchart", "diagram-xychart", "diagram-pie"] }
+merman-ascii = { version = "=0.9.1", default-features = false, features = ["diagram-flowchart"] }
 ratatui-image = { version = "11", default-features = false, features = ["crossterm"] }
 tui-term = "0.3.4"
 portable-pty = "0.9"
 bytes = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-native-roots"] }
-rmcp = { version = "1.8", default-features = false, features = ["client", "transport-child-process"] }
+rmcp = { version = "1.8", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+mcp-reqwest = { package = "reqwest", version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
+lol_html = "3.0.1"
+htmlize = { version = "1.1", features = ["unescape"] }
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
 similar = "2"
 serde = { version = "1", features = ["derive"] }
@@ -40,6 +45,8 @@ base64 = "0.22"
 dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }
 aes-gcm = "0.10"
+argon2 = { version = "0.5", features = ["zeroize"] }
+zeroize = "1"
 cap-std = "4.0.2"
 cap-fs-ext = "4.0.2"
 libc = "0.2"

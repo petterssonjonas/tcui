@@ -92,6 +92,7 @@ pub(crate) fn live_editor() -> (TerminalEditorState, TerminalEditorTestProbe) {
         master: Box::new(FakeMaster(Arc::clone(&counts))),
         input_tx,
         output_rx,
+        transport: None,
     };
     (
         TerminalEditorState::from_spawned(session, Rect::new(0, 0, 80, 24)),

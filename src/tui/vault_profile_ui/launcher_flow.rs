@@ -52,7 +52,11 @@ pub(crate) fn activate_profile(
         AppView::MarkdownVault {
             profile_id: open_id,
         } if open_id == &profile_id => Some(tab.id()),
-        AppView::Chat | AppView::Launcher | AppView::MarkdownVault { .. } => None,
+        AppView::Chat
+        | AppView::Launcher
+        | AppView::MarkdownVault { .. }
+        | AppView::Terminal { .. }
+        | AppView::Settings => None,
         #[cfg(test)]
         AppView::Placeholder { .. } => None,
     });

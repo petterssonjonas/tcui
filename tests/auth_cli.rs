@@ -13,47 +13,47 @@ use std::process::Stdio;
 use support::{configure_openrouter, CliEnvironment, JsonEndpoint};
 
 #[test]
-fn auth_cli_delegates_codex_then_preserves_external_credentials_until_external_logout(
+fn auth_cli_ignores_external_codex_credentials_until_explicit_external_logout(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Given
     let environment = CliEnvironment::new("codex-round-trip")?;
-    environment.install_codex(
-        "umask 077\ncase \"$1\" in\nlogin) printf '%s' '{\"tokens\":{\"access_token\":\"external-token-canary\",\"account_id\":\"account\"}}' > \"$HOME/.codex/auth.json\" ;;\nlogout) /bin/rm -f \"$HOME/.codex/auth.json\" ;;\nesac",
+    environment
+        .install_codex("if [ \"$1\" = logout ]; then /bin/rm -f \"$HOME/.codex/auth.json\"; fi")?;
+    std::fs::write(
+        environment.auth_path(),
+        r#"{"tokens":{"access_token":"external-token-canary","account_id":"account"}}"#,
     )?;
-
-    // When
-    let login = environment
-        .command()
-        .args(["auth", "login", "codex"])
-        .output()?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(
+        environment.auth_path(),
+        std::fs::Permissions::from_mode(0o600),
+    )?;
     let status = environment
         .command()
-        .args(["auth", "status", "codex"])
+        .args(["auth", "--plaintext", "status", "codex"])
         .output()?;
     let local_logout = environment
         .command()
-        .args(["auth", "logout", "codex"])
+        .args(["auth", "--plaintext", "logout", "codex"])
         .output()?;
     let preserved_after_local_logout = environment.auth_path().exists();
     let repeated_local_logout = environment
         .command()
-        .args(["auth", "logout", "codex"])
+        .args(["auth", "--plaintext", "logout", "codex"])
         .output()?;
     let external_logout = environment
         .command()
-        .args(["auth", "logout", "codex", "--external"])
+        .args(["auth", "--plaintext", "logout", "codex", "--external"])
         .output()?;
 
     // Then
-    assert!(login.status.success());
-    assert!(status.status.success());
+    assert_eq!(status.status.code(), Some(10));
     assert!(local_logout.status.success());
     assert!(repeated_local_logout.status.success());
     assert!(external_logout.status.success());
     assert!(preserved_after_local_logout);
     assert!(!environment.auth_path().exists());
-    assert!(String::from_utf8(status.stdout)?.contains("source=external-cli"));
-    assert!(!String::from_utf8(login.stdout)?.contains("external-token-canary"));
+    assert!(!String::from_utf8(status.stdout)?.contains("external-token-canary"));
     Ok(())
 }
 
@@ -66,7 +66,7 @@ fn auth_cli_exchanges_openrouter_headless_code_then_reports_and_removes_only_loc
     let mut login = environment.command();
     configure_openrouter(&mut login, &endpoint);
     login
-        .args(["auth", "login", "openrouter", "--headless"])
+        .args(["auth", "--plaintext", "login", "openrouter", "--headless"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped());
 
@@ -80,19 +80,19 @@ fn auth_cli_exchanges_openrouter_headless_code_then_reports_and_removes_only_loc
     endpoint.finish()?;
     let status = environment
         .command()
-        .args(["auth", "status", "openrouter"])
+        .args(["auth", "--plaintext", "status", "openrouter"])
         .output()?;
     let logout = environment
         .command()
-        .args(["auth", "logout", "openrouter"])
+        .args(["auth", "--plaintext", "logout", "openrouter"])
         .output()?;
     let repeated_logout = environment
         .command()
-        .args(["auth", "logout", "openrouter"])
+        .args(["auth", "--plaintext", "logout", "openrouter"])
         .output()?;
     let after_logout = environment
         .command()
-        .args(["auth", "status", "openrouter"])
+        .args(["auth", "--plaintext", "status", "openrouter"])
         .output()?;
 
     // Then
@@ -103,7 +103,8 @@ fn auth_cli_exchanges_openrouter_headless_code_then_reports_and_removes_only_loc
     assert!(String::from_utf8(after_logout.stderr)?.contains("OpenRouter is not authenticated."));
     assert!(String::from_utf8(login.stdout)?.contains("OpenRouter authorization URL:"));
     assert!(String::from_utf8(status.stdout)?.contains("source=tcui-pkce expires_at=none"));
-    assert!(!std::fs::read_to_string(environment.key_path())?.contains("openrouter-key-canary"));
+    assert!(environment.key_path().exists());
+    assert!(!environment.root_path().join("data/tcui/keys.toml").exists());
     Ok(())
 }
 
@@ -116,11 +117,81 @@ fn auth_cli_rejects_unsupported_provider_without_opening_a_browser(
     // When
     let output = environment
         .command()
-        .args(["auth", "login", "claude"])
+        .args(["auth", "--plaintext", "login", "claude"])
         .output()?;
 
     // Then
     assert_eq!(output.status.code(), Some(12));
     assert!(String::from_utf8(output.stderr)?.contains("Supported providers: codex, openrouter"));
+    Ok(())
+}
+
+#[test]
+fn auth_cli_requires_explicit_storage_choice_before_browser_login(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let environment = CliEnvironment::new("storage-choice")?;
+    let output = environment
+        .command()
+        .args(["auth", "login", "openrouter"])
+        .output()?;
+    assert_eq!(output.status.code(), Some(14));
+    let error = String::from_utf8(output.stderr)?;
+    assert!(error.contains("--plaintext") && error.contains("--vault-password-stdin"));
+    assert!(!String::from_utf8(output.stdout)?.contains("authorization URL"));
+    Ok(())
+}
+
+#[test]
+fn auth_cli_encrypts_console_login_with_explicit_password_stdin(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let environment = CliEnvironment::new("encrypted-login")?;
+    let endpoint = JsonEndpoint::respond_once(r#"{"key":"encrypted-oauth-canary"}"#)?;
+    let mut command = environment.command();
+    configure_openrouter(&mut command, &endpoint);
+    let mut child = command
+        .args([
+            "auth",
+            "--vault-password-stdin",
+            "login",
+            "openrouter",
+            "--headless",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or("stdin missing")?
+        .write_all(b"fixture vault password\nheadless-code\n")?;
+    let output = child.wait_with_output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    endpoint.finish()?;
+    let bytes = std::fs::read(environment.key_path())?;
+    assert!(!bytes
+        .windows(b"encrypted-oauth-canary".len())
+        .any(|window| window == b"encrypted-oauth-canary"));
+    let locked = environment
+        .command()
+        .args(["auth", "status", "openrouter"])
+        .output()?;
+    assert_eq!(locked.status.code(), Some(14));
+    let mut child = environment
+        .command()
+        .args(["auth", "--vault-password-stdin", "status", "openrouter"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or("stdin missing")?
+        .write_all(b"fixture vault password\n")?;
+    assert!(child.wait_with_output()?.status.success());
     Ok(())
 }

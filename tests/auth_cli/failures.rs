@@ -23,7 +23,7 @@ fn auth_cli_maps_openrouter_denial_timeout_and_network_failure_to_stable_exits(
     let mut denied = denied_environment.command();
     configure_openrouter(&mut denied, &denied_endpoint);
     denied
-        .args(["auth", "login", "openrouter", "--headless"])
+        .args(["auth", "--plaintext", "login", "openrouter", "--headless"])
         .stdin(Stdio::piped());
 
     let timeout_environment = CliEnvironment::new("openrouter-timeout")?;
@@ -35,14 +35,14 @@ fn auth_cli_maps_openrouter_denial_timeout_and_network_failure_to_stable_exits(
     let mut timeout = timeout_environment.command();
     configure_openrouter_url(&mut timeout, &timeout_endpoint.url, "10");
     timeout
-        .args(["auth", "login", "openrouter", "--headless"])
+        .args(["auth", "--plaintext", "login", "openrouter", "--headless"])
         .stdin(Stdio::piped());
 
     let no_network_environment = CliEnvironment::new("openrouter-network")?;
     let mut no_network = no_network_environment.command();
     configure_openrouter_url(&mut no_network, "http://127.0.0.1:9", "10");
     no_network
-        .args(["auth", "login", "openrouter", "--headless"])
+        .args(["auth", "--plaintext", "login", "openrouter", "--headless"])
         .stdin(Stdio::piped());
 
     let denied_output = run_headless(denied)?;
@@ -54,12 +54,13 @@ fn auth_cli_maps_openrouter_denial_timeout_and_network_failure_to_stable_exits(
     assert_eq!(denied_output.status.code(), Some(11));
     assert_eq!(timeout_output.status.code(), Some(14));
     assert_eq!(no_network_output.status.code(), Some(14));
-    assert!(!std::fs::read_to_string(timeout_environment.key_path())
-        .unwrap_or_default()
-        .contains("late-key-canary"));
-    assert!(!std::fs::read_to_string(no_network_environment.key_path())
-        .unwrap_or_default()
-        .contains("headless-code"));
+    for (environment, secret) in [
+        (&timeout_environment, b"late-key-canary".as_slice()),
+        (&no_network_environment, b"headless-code".as_slice()),
+    ] {
+        let bytes = std::fs::read(environment.key_path())?;
+        assert!(!bytes.windows(secret.len()).any(|window| window == secret));
+    }
     Ok(())
 }
 
@@ -70,14 +71,15 @@ fn auth_cli_maps_native_browser_failure_without_persisting_a_credential(
 
     let browser_failure = browser_environment
         .command()
-        .args(["auth", "login", "codex", "--native"])
+        .args(["auth", "--plaintext", "login", "codex", "--open-browser"])
         .output()?;
 
     assert_eq!(browser_failure.status.code(), Some(14));
     assert!(String::from_utf8(browser_failure.stdout)?.contains("Codex native authorization URL:"));
-    assert!(!std::fs::read_to_string(browser_environment.key_path())
-        .unwrap_or_default()
-        .contains("access_token"));
+    let bytes = std::fs::read(browser_environment.key_path())?;
+    assert!(!bytes
+        .windows(b"access_token".len())
+        .any(|window| window == b"access_token"));
     Ok(())
 }
 
@@ -91,7 +93,7 @@ fn auth_cli_prints_native_device_details_before_cancellation(
     let mut device = device_environment.command();
     configure_codex_native(&mut device, &device_endpoint);
     device
-        .args(["auth", "login", "codex", "--native", "--headless"])
+        .args(["auth", "--plaintext", "login", "codex", "--headless"])
         .stdout(Stdio::piped());
 
     let device_child = device.spawn()?;
@@ -150,7 +152,7 @@ fn auth_cli_sigint_escalates_codex_group_from_term_to_kill(
     )?;
     let mut command = environment.command();
     command
-        .args(["auth", "login", "codex"])
+        .args(["auth", "--plaintext", "logout", "codex", "--external"])
         .stdout(Stdio::null());
     let child = command.spawn()?;
     let guard = ProcessGuard::new(child);
@@ -181,14 +183,16 @@ fn sigint_cancels_codex_and_openrouter() -> Result<(), Box<dyn std::error::Error
         "/bin/sleep 30 &\nprintf '%s %s' \"$$\" \"$!\" > \"$HOME/codex-started\"\nwait",
     )?;
     let mut codex = codex_environment.command();
-    codex.args(["auth", "login", "codex"]).stdout(Stdio::null());
+    codex
+        .args(["auth", "--plaintext", "logout", "codex", "--external"])
+        .stdout(Stdio::null());
     let codex_child = codex.spawn()?;
     let codex_guard = ProcessGuard::new(codex_child);
 
     let input_environment = CliEnvironment::new("sigint-headless-input")?;
     let mut input = input_environment.command();
     input
-        .args(["auth", "login", "openrouter", "--headless"])
+        .args(["auth", "--plaintext", "login", "openrouter", "--headless"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped());
     let input_child = input.spawn()?;
@@ -228,7 +232,7 @@ fn sigint_cancels_codex_and_openrouter() -> Result<(), Box<dyn std::error::Error
     assert_eq!(input_status.code(), Some(11));
     let input_status = input_environment
         .command()
-        .args(["auth", "status", "openrouter"])
+        .args(["auth", "--plaintext", "status", "openrouter"])
         .output()?;
     assert_eq!(input_status.status.code(), Some(10));
 

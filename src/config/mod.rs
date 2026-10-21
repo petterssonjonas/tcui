@@ -11,9 +11,9 @@ pub use app_config::{
 };
 pub use key_store::KeyStore;
 pub use mcp_config::McpServerConfig;
-pub use search::WebSearchConfig;
+pub use search::{SearchBackend, WebSearchConfig};
 #[allow(unused_imports)]
-pub use tui::{PanelMode, StatusWidgetPlacement, ToastPosition, TuiConfig};
+pub use tui::{PanelMode, StatusWidgetPlacement, TerminalPlacement, ToastPosition, TuiConfig};
 
 #[cfg(test)]
 mod tests;

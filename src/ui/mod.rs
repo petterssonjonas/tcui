@@ -10,6 +10,8 @@ use ratatui::{
 pub mod app_tabs;
 pub mod artifact_sidebar;
 pub mod chat_tab;
+pub mod command_blocks;
+pub mod command_review;
 pub mod components;
 pub mod launcher;
 pub mod markdown_vault;
@@ -17,9 +19,12 @@ pub mod markdown_vault_workspace;
 pub mod modals;
 pub mod pending_documents;
 pub mod session_list;
+pub mod settings_workspace;
 pub mod sidebar;
 pub mod status_bar;
 pub mod tab_bar;
+pub mod terminal_workspace;
+pub mod text_selection;
 pub mod toast;
 pub mod top_bar;
 
@@ -64,6 +69,14 @@ use top_bar::TopBar;
 
 pub const HELP_MARKDOWN: &str = include_str!("help.md");
 
+pub(crate) fn provider_display_name(name: &str) -> &str {
+    match name {
+        "Codex" => "OpenAI OAuth",
+        "OpenRouter" => "OpenRouter API key",
+        _ => name,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
     pub id: String,
@@ -98,10 +111,14 @@ pub enum Action {
 }
 
 pub struct UI {
+    pub text_selection: text_selection::TextSelection,
     pub tabs: Vec<ChatTabState>,
     pub active_tab: usize,
     pub app_tabs: app_tabs::AppTabs,
     pub markdown_vault_workspaces: markdown_vault_workspace::MarkdownVaultWorkspaceRegistry,
+    pub terminals: terminal_workspace::TerminalWorkspace,
+    pub command_review: Option<command_review::CommandReview>,
+    pub settings_workspace: settings_workspace::SettingsWorkspaceState,
     pub panel_state: crate::tui::shell::PanelState,
     pub sidebar_open: bool,
     pub artifact_sidebar_open: bool,
@@ -115,12 +132,12 @@ pub struct UI {
     pub list_popup: Option<ListPopup>,
     pub palette: Option<crate::tui::palette::PaletteState>,
     pub settings_v2: Option<crate::tui::settings_panel::SettingsPanelState>,
+    pub(crate) credential_manager: Option<crate::app::credential_manager::CredentialManager>,
     pub vault_profile_manager: Option<crate::tui::vault_profile_ui::VaultProfileManagerState>,
     pub pending_vault_action: Option<crate::tui::vault_profile_ui::PendingVaultAction>,
     pub(crate) pending_vault_mutation: Option<crate::app::submission::PendingVaultMutation>,
     pub(crate) pending_vault_mutation_areas:
         Option<modals::vault_mutation_preview::VaultMutationPreviewAreas>,
-    pub keybind_capture: Option<crate::tui::keybind_capture::KeybindCaptureState>,
     pub keybinding_overrides: BTreeMap<String, String>,
     pub show_keybinds: bool,
     pub mouse_hit_areas: Vec<(Rect, MouseAction)>,
@@ -194,6 +211,7 @@ pub enum Modal {
 
 pub struct ChatTabState {
     pub tab: crate::app::tab::Tab,
+    pub manual_model_override: bool,
     pub messages: Vec<crate::app::message::Message>,
     pub active_conversation: i64,
     pub conversations: Vec<ConversationEntry>,
@@ -222,6 +240,8 @@ pub struct ChatTabState {
     pub chat_scrollbar_thumb: Option<Rect>,
     pub thinking_hit_areas: Vec<(usize, Rect)>,
     pub link_hit_areas: Vec<(Rect, String)>,
+    pub copy_hit_areas: Vec<(usize, Rect)>,
+    pub command_hit_areas: Vec<(usize, Rect)>,
     pub thinking_fold_overrides: HashSet<usize>,
     pub scroll_to_message: Option<usize>,
     pub answer_anchor_lines: Vec<(usize, usize)>,
@@ -267,12 +287,14 @@ pub enum DiffStatus {
 impl UI {
     pub fn new() -> Self {
         Self {
+            text_selection: text_selection::TextSelection::default(),
             tabs: vec![ChatTabState {
                 tab: crate::app::tab::Tab::new(
                     "Chat".to_string(),
                     "Ollama".to_string(),
                     "llama3.1".to_string(),
                 ),
+                manual_model_override: false,
                 messages: vec![],
                 active_conversation: 0,
                 conversations: vec![],
@@ -301,6 +323,8 @@ impl UI {
                 chat_scrollbar_thumb: None,
                 thinking_hit_areas: vec![],
                 link_hit_areas: vec![],
+                copy_hit_areas: vec![],
+                command_hit_areas: vec![],
                 thinking_fold_overrides: HashSet::new(),
                 scroll_to_message: None,
                 answer_anchor_lines: vec![],
@@ -312,6 +336,9 @@ impl UI {
             }],
             active_tab: 0,
             app_tabs: app_tabs::AppTabs::default(),
+            terminals: terminal_workspace::TerminalWorkspace::default(),
+            command_review: None,
+            settings_workspace: settings_workspace::SettingsWorkspaceState::default(),
             markdown_vault_workspaces:
                 markdown_vault_workspace::MarkdownVaultWorkspaceRegistry::default(),
             panel_state: crate::tui::shell::PanelState::new(),
@@ -327,11 +354,11 @@ impl UI {
             list_popup: None,
             palette: None,
             settings_v2: None,
+            credential_manager: None,
             vault_profile_manager: None,
             pending_vault_action: None,
             pending_vault_mutation: None,
             pending_vault_mutation_areas: None,
-            keybind_capture: None,
             keybinding_overrides: BTreeMap::new(),
             show_keybinds: false,
             mouse_hit_areas: Vec::new(),
@@ -384,6 +411,30 @@ impl UI {
         self.status_bar_areas = None;
         self.chat_area = None;
         self.mouse_hit_areas.clear();
+        self.terminals.clear_areas();
+        self.terminals.show_helpers = self.tui_config.helper_enabled;
+        self.terminals.show_cursor = self.active_modal.is_none()
+            && self.command_review.is_none()
+            && self.terminals.close_pending.is_none()
+            && self.delete_confirm.is_none()
+            && self.save_file_dialog.is_none()
+            && self.export_dialog.is_none()
+            && self.artifact_viewer.is_none()
+            && self.editor_popup.is_none()
+            && self.list_popup.is_none()
+            && self.palette.is_none()
+            && self.settings_v2.is_none()
+            && self.credential_manager.is_none()
+            && self.vault_profile_manager.is_none()
+            && self.pending_vault_mutation.is_none()
+            && !self.show_keybinds
+            && !self.show_session_list
+            && !self.tabs.get(self.active_tab).is_some_and(|tab| {
+                tab.provider_dropdown_open || tab.model_dropdown_open || tab.reasoning_dropdown_open
+            });
+        for tab in &mut self.tabs {
+            tab.command_hit_areas.clear();
+        }
         self.artifact_sidebar_state.clear_hit_areas();
         let active_app_tab_id = self.app_tabs.active_id();
         if let Some(state) = self.markdown_vault_workspaces.get_mut(active_app_tab_id) {
@@ -434,6 +485,35 @@ impl UI {
 
         let active_view = self.app_tabs.active_tab().map(app_tabs::AppTab::view);
         match active_view {
+            Some(app_tabs::AppView::Terminal { session_id }) => {
+                let session_id = *session_id;
+                self.terminals.focused = true;
+                self.terminals.render_session(
+                    f,
+                    Rect::new(
+                        area.x,
+                        area.y + 1,
+                        area.width,
+                        area.height.saturating_sub(1),
+                    ),
+                    session_id,
+                );
+                self.render_global_overlays(f, area, 0);
+                return;
+            }
+            Some(app_tabs::AppView::Settings) => {
+                self.settings_workspace.render(
+                    f,
+                    Rect::new(
+                        area.x,
+                        area.y + 1,
+                        area.width,
+                        area.height.saturating_sub(1),
+                    ),
+                );
+                self.render_global_overlays(f, area, 0);
+                return;
+            }
             Some(app_tabs::AppView::Launcher) => {
                 let launcher_area = Rect::new(
                     area.x,
@@ -609,14 +689,42 @@ impl UI {
 
         let right_handle_rects = panels.handle_right_rects(main_layout[1]);
 
-        self.chat_area = Some(content_layout[1]);
+        let chat_content_area = self.terminals.split_chat(f, content_layout[1]);
+        self.chat_area = Some(chat_content_area);
 
         // Content area
+        let chat_cursor_visible = self.focus == crate::tui::focus::Focus::Chat
+            && !self.terminals.focused
+            && self.command_review.is_none()
+            && self.active_modal.is_none()
+            && self.delete_confirm.is_none()
+            && self.save_file_dialog.is_none()
+            && self.export_dialog.is_none()
+            && self.artifact_viewer.is_none()
+            && self.editor_popup.is_none()
+            && self.palette.is_none()
+            && self.settings_v2.is_none()
+            && self.credential_manager.is_none()
+            && self.vault_profile_manager.is_none()
+            && self.pending_vault_mutation.is_none()
+            && !self.show_keybinds
+            && !self.show_session_list
+            && !left_overlays_chat
+            && !right_overlays_chat
+            && self
+                .list_popup
+                .as_ref()
+                .is_none_or(|popup| popup.live_input)
+            && self.tabs.get(self.active_tab).is_some_and(|tab| {
+                !tab.provider_dropdown_open
+                    && !tab.model_dropdown_open
+                    && !tab.reasoning_dropdown_open
+            });
         if let Some(tab_state) = self.tabs.get_mut(self.active_tab) {
             let pane =
                 Block::default().style(Style::default().fg(theme.foreground).bg(theme.background));
-            let pane_area = pane.inner(content_layout[1]);
-            f.render_widget(pane, content_layout[1]);
+            let pane_area = pane.inner(chat_content_area);
+            f.render_widget(pane, chat_content_area);
 
             let chat_chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -643,6 +751,7 @@ impl UI {
                         reasoning_options: &self.current_reasoning_options,
                     },
                 );
+                chat_tab.show_cursor = chat_cursor_visible;
                 chat_tab.render(f, chat_chunks[0]);
             }
 
@@ -836,7 +945,7 @@ impl UI {
         }
 
         if let Some(ref settings) = self.settings_v2 {
-            settings.render_with_keybindings(f, area, &self.keybinding_overrides);
+            settings.render(f, area);
             self.mouse_hit_areas.extend(
                 settings
                     .visible_item_areas(area)
@@ -849,8 +958,8 @@ impl UI {
             manager.render(f, area);
         }
 
-        if let Some(ref capture) = self.keybind_capture {
-            capture.render(f, area);
+        if let Some(manager) = &self.credential_manager {
+            manager.render(f, area);
         }
 
         toast::render(
@@ -877,11 +986,20 @@ impl UI {
             self.render_keybinds(f, area);
         }
 
+        if let Some(review) = self.command_review.as_mut() {
+            review.render(f, area);
+        }
+        self.terminals.render_close_confirmation(f);
         // Modal overlay (rendered on top of everything)
         if let Some(modal) = self.active_modal {
             match modal {
                 Modal::QuitConfirm => {
                     let modal = QuitConfirmModal::new();
+                    let modal = if self.terminals.has_running() {
+                        modal.message("Quit TCUI and terminate all running terminal processes?")
+                    } else {
+                        modal
+                    };
                     let areas = modal.render(f);
                     self.modal_areas = Some(ModalAreas {
                         yes: areas.yes,
@@ -920,6 +1038,7 @@ impl UI {
         } else {
             self.pending_vault_mutation_areas = None;
         }
+        self.text_selection.render(f.buffer_mut());
     }
 
     fn render_keybinds(&self, f: &mut Frame, area: Rect) {
@@ -938,28 +1057,18 @@ impl UI {
             Line::styled("Esc or Enter dismisses.", Style::default().fg(theme.muted)),
             Line::from(""),
         ];
-        for setting in crate::tui::settings_panel::all_settings()
-            .iter()
-            .filter(|setting| {
-                matches!(
-                    setting.setting_type,
-                    crate::tui::settings_panel::SettingType::Keybind { .. }
-                )
-            })
-            .take(6)
-        {
-            if let crate::tui::settings_panel::SettingType::Keybind {
-                default_binding, ..
-            } = setting.setting_type
-            {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("  {default_binding:<14}"),
-                        Style::default().fg(theme.muted),
-                    ),
-                    Span::raw(setting.title.to_string()),
-                ]));
-            }
+        for (binding, label) in [
+            ("ctrl+p", "Search settings and commands"),
+            ("ctrl+,", "Open Settings tab"),
+            ("ctrl+t", "Open launcher tab"),
+            ("ctrl+w", "Close app tab"),
+            ("F6", "Focus chat / terminal"),
+            ("F7", "Cycle terminal placement"),
+        ] {
+            lines.push(Line::from(format!("  {binding:<14}{label}")));
+        }
+        for (command, binding) in &self.keybinding_overrides {
+            lines.push(Line::from(format!("  {binding:<14}{command} (override)")));
         }
         lines.extend([
             Line::from("  shift+enter  Insert newline"),
@@ -982,6 +1091,7 @@ impl UI {
     pub fn add_tab(&mut self, tab: crate::app::tab::Tab) {
         self.tabs.push(ChatTabState {
             tab,
+            manual_model_override: false,
             messages: vec![],
             active_conversation: 0,
             conversations: vec![],
@@ -1010,6 +1120,8 @@ impl UI {
             chat_scrollbar_thumb: None,
             thinking_hit_areas: vec![],
             link_hit_areas: vec![],
+            copy_hit_areas: vec![],
+            command_hit_areas: vec![],
             thinking_fold_overrides: HashSet::new(),
             scroll_to_message: None,
             answer_anchor_lines: vec![],
@@ -1175,6 +1287,7 @@ mod tests {
         assert!(screen.contains("Launcher"));
         assert!(screen.contains("Markdown Vault"));
         assert!(screen.contains("Memory management"));
+        assert!(screen.contains("Terminal"));
         assert!(screen.contains("Pomodoro"));
         assert!(!screen.contains("[New Chat]"));
         assert_eq!(

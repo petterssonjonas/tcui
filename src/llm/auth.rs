@@ -3,7 +3,7 @@
     expect(
         dead_code,
         unused_imports,
-        reason = "Todos 5 and 6 consume this isolated OAuth engine."
+        reason = "Shared OAuth protocol helpers also support the protocol fixtures."
     )
 )]
 pub(crate) mod oauth;
@@ -12,7 +12,7 @@ pub(crate) mod oauth;
     not(test),
     expect(
         dead_code,
-        reason = "Todo 7 wires the static OpenRouter adapter to the non-TUI auth command."
+        reason = "Management-key code creation is exercised by protocol fixtures."
     )
 )]
 pub(crate) mod openrouter;
@@ -21,11 +21,8 @@ pub(crate) mod codex;
 
 mod credential;
 mod policy;
-mod reader;
 mod resolver;
-
-#[cfg(test)]
-mod legacy;
+pub(crate) mod tui;
 
 #[cfg(test)]
 #[path = "auth/resolver_tests.rs"]
@@ -57,40 +54,31 @@ pub(crate) use resolver::{resolve_provider_credential, CredentialRequest};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CredentialSource {
-    Environment,
-    DotEnv,
-    LegacyKeyStore,
     TcuiStoredApiKey,
     TcuiNativeOAuth,
     ExternalCodexCli,
-    PassiveExternalToken,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum CredentialError {
+    #[error("Credential store is locked or unavailable. Use /vault to unlock, then /connect.")]
+    CredentialStore,
     #[error("the configured provider endpoint is not trusted for credentials")]
     UntrustedEndpoint,
-    #[error("the TCUI configuration required for Codex credentials is unavailable")]
-    CodexConfiguration,
     #[error("the stored Codex credential is corrupt or has invalid metadata")]
     CodexCredentialUnavailable,
-    #[error("the expired TCUI-native Codex credential could not be refreshed")]
+    #[error("OpenAI OAuth refresh failed. Unlock /vault or reconnect using /connect.")]
     NativeRefreshFailed,
     #[error("the concurrent Codex credential refresh did not complete")]
     NativeRefreshInterrupted,
 }
 
-#[cfg(test)]
-pub(crate) use reader::read_oauth_token;
-
-#[cfg(test)]
-pub(crate) use reader::read_codex_account_id;
-
-#[cfg(test)]
-pub(crate) use legacy::read_provider_api_key;
-
-#[cfg(test)]
-use crate::storage::Storage;
+pub(crate) fn redact_known_secret(text: &str, secret: Option<&str>) -> String {
+    match secret.filter(|secret| !secret.is_empty()) {
+        Some(secret) => redact_secrets(&text.replace(secret, "[redacted]")),
+        None => redact_secrets(text),
+    }
+}
 
 pub(crate) fn redact_secrets(text: &str) -> String {
     text.split_whitespace()

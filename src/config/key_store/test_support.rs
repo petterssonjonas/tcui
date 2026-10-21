@@ -46,6 +46,17 @@ impl TestEnv {
         }
     }
 
+    pub(super) fn initialized_config(&self) -> AppConfig {
+        let config = self.config();
+        super::KeyStore::initialize_vault(&config, "test-only-vault-password")
+            .expect("initialize isolated vault");
+        config
+    }
+
+    pub(super) fn database_path(&self) -> PathBuf {
+        self.data_home().join("tcui").join("tcui.db")
+    }
+
     pub(super) fn data_home(&self) -> PathBuf {
         self.root.join("data")
     }
@@ -53,6 +64,7 @@ impl TestEnv {
 
 impl Drop for TestEnv {
     fn drop(&mut self) {
+        let _ = super::KeyStore::lock_vault(&self.config());
         match self.original_data_home.take() {
             Some(value) => std::env::set_var("XDG_DATA_HOME", value),
             None => std::env::remove_var("XDG_DATA_HOME"),

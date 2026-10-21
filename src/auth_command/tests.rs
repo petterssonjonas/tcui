@@ -21,20 +21,40 @@ fn login_request_parses_codex_headless() {
     assert!(matches!(
         request,
         AuthCommandRequest::Login(login)
-            if login.provider == AuthProvider::Codex && login.headless && !login.native
+            if login.provider == AuthProvider::Codex && login.headless
     ));
 }
 
 #[test]
-fn login_request_parses_explicit_codex_native_mode() {
-    let request = parse_auth_request(&["tcui", "auth", "login", "codex", "--native"])
-        .expect("native Codex request");
+fn login_request_uses_native_codex_by_default() {
+    let request =
+        parse_auth_request(&["tcui", "auth", "login", "codex"]).expect("native Codex request");
 
     assert!(matches!(
         request,
         AuthCommandRequest::Login(login)
-            if login.provider == AuthProvider::Codex && !login.headless && login.native
+            if login.provider == AuthProvider::Codex && !login.headless && !login.open_browser
     ));
+}
+
+#[test]
+fn login_only_opens_host_browser_when_explicitly_requested() {
+    for provider in ["codex", "openrouter"] {
+        let request = parse_auth_request(&["tcui", "auth", "login", provider]).unwrap();
+        assert!(matches!(request, AuthCommandRequest::Login(login) if !login.open_browser));
+        let request =
+            parse_auth_request(&["tcui", "auth", "login", provider, "--open-browser"]).unwrap();
+        assert!(matches!(request, AuthCommandRequest::Login(login) if login.open_browser));
+    }
+    assert!(Cli::try_parse_from([
+        "tcui",
+        "auth",
+        "login",
+        "codex",
+        "--headless",
+        "--open-browser"
+    ])
+    .is_err());
 }
 
 #[test]
@@ -90,17 +110,8 @@ fn unknown_provider_error_lists_supported_provider_ids() {
 }
 
 #[test]
-fn native_login_rejects_openrouter() {
-    let error = parse_auth_request(&["tcui", "auth", "login", "openrouter", "--native"])
-        .expect_err("native OpenRouter login is invalid");
-
-    assert!(matches!(
-        error,
-        AuthCommandError::UnsupportedOption {
-            provider: AuthProvider::OpenRouter,
-            option: "--native"
-        }
-    ));
+fn obsolete_native_flag_is_rejected() {
+    assert!(Cli::try_parse_from(["tcui", "auth", "login", "codex", "--native"]).is_err());
 }
 
 #[test]
@@ -128,7 +139,8 @@ fn login_help_describes_supported_provider_ids_and_flags() {
     assert!(
         help.contains("codex, openrouter")
             && help.contains("--headless")
-            && help.contains("--native")
+            && help.contains("--vault-password-stdin")
+            && help.contains("--plaintext")
     );
 }
 
@@ -147,17 +159,16 @@ fn auth_help_describes_the_stable_exit_code_taxonomy() {
 }
 
 #[test]
-fn native_disclosure_is_available_only_for_explicit_native_codex_login() {
-    let native = parse_auth_request(&["tcui", "auth", "login", "codex", "--native"])
-        .expect("native Codex request");
-    let default =
-        parse_auth_request(&["tcui", "auth", "login", "codex"]).expect("default Codex request");
-
+fn codex_login_discloses_its_native_authorization() {
+    let native =
+        parse_auth_request(&["tcui", "auth", "login", "codex"]).expect("native Codex request");
+    let openrouter =
+        parse_auth_request(&["tcui", "auth", "login", "openrouter"]).expect("OpenRouter request");
     assert_eq!(
         native.disclosure(),
         Some(CODEX_NATIVE_EXPERIMENTAL_DISCLOSURE)
     );
-    assert_eq!(default.disclosure(), None);
+    assert_eq!(openrouter.disclosure(), None);
 }
 
 #[test]

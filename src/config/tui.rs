@@ -22,6 +22,16 @@ pub enum ToastPosition {
     Off,
 }
 
+/// Preferred location for newly opened terminal sessions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalPlacement {
+    #[default]
+    Bottom,
+    Right,
+    Tab,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StatusWidgetPlacement {
@@ -65,6 +75,10 @@ pub struct TuiConfig {
     pub toast_position: ToastPosition,
     pub pinned_commands: Vec<String>,
     pub keybinding_overrides: BTreeMap<String, String>,
+    pub terminal_placement: TerminalPlacement,
+    /// An executable path or name, never a shell command with arguments.
+    pub terminal_shell: Option<String>,
+    pub terminal_start_directory: Option<String>,
 }
 
 impl Default for TuiConfig {
@@ -82,6 +96,9 @@ impl Default for TuiConfig {
             toast_position: ToastPosition::TopRight,
             pinned_commands: Vec::new(),
             keybinding_overrides: BTreeMap::new(),
+            terminal_placement: TerminalPlacement::Bottom,
+            terminal_shell: None,
+            terminal_start_directory: None,
         }
     }
 }
@@ -432,6 +449,25 @@ area = 6
         let serialized = toml::to_string_pretty(&config).expect("serialize");
         let reparsed: crate::config::AppConfig = toml::from_str(&serialized).expect("reparse");
         assert_eq!(reparsed.tui, config.tui);
+    }
+
+    #[test]
+    fn terminal_preferences_round_trip_and_old_configs_use_defaults() {
+        let old: crate::config::AppConfig = toml::from_str("").expect("old config");
+        assert_eq!(old.tui.terminal_placement, TerminalPlacement::Bottom);
+        assert!(old.tui.terminal_shell.is_none());
+        assert!(old.tui.terminal_start_directory.is_none());
+        let mut config = old;
+        config.tui.terminal_placement = TerminalPlacement::Right;
+        config.tui.terminal_shell = Some("/bin/sh".into());
+        config.tui.terminal_start_directory = Some("/tmp".into());
+        let text = toml::to_string(&config).expect("serialize");
+        let restored: crate::config::AppConfig = toml::from_str(&text).expect("deserialize");
+        assert_eq!(restored.tui, config.tui);
+        assert!(toml::from_str::<crate::config::AppConfig>(
+            "[tui]\nterminal_placement = 'unknown'"
+        )
+        .is_err());
     }
 
     #[test]

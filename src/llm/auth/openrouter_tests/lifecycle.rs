@@ -8,9 +8,9 @@ use crate::config::key_store::{
 use crate::config::{AppConfig, KeyStore};
 use crate::llm::auth::{
     oauth::{oauth_cancellation, RedirectUri},
-    read_provider_api_key,
+    resolve_provider_credential, CredentialRequest,
 };
-use crate::storage::Storage;
+use secrecy::ExposeSecret;
 
 use super::fixture::{body, fixture, response};
 
@@ -32,6 +32,8 @@ impl TestEnv {
         std::env::set_var("XDG_CONFIG_HOME", root.join("config"));
         std::env::set_var("XDG_DATA_HOME", root.join("data"));
         std::env::remove_var("OPENROUTER_API_KEY");
+        KeyStore::initialize_vault(&AppConfig::default(), "openrouter fixture password")
+            .expect("initialize encrypted fixture vault");
         Self {
             root,
             config_home,
@@ -41,7 +43,7 @@ impl TestEnv {
     }
 
     pub(super) fn key_file(&self) -> PathBuf {
-        self.root.join("data").join("tcui").join("keys.toml")
+        self.root.join("data").join("tcui").join("tcui.db")
     }
 }
 
@@ -64,7 +66,7 @@ fn restore_env(name: &str, value: Option<OsString>) {
 fn local_credential(value: &str) -> Credential {
     Credential::ApiKey(
         ApiKeyCredential::new(
-            "OpenRouter",
+            "OpenRouter OAuth",
             value,
             ApiKeyCredentialOwnership::Tcui,
             ApiKeyCredentialSource::OpenRouterPkce,
@@ -108,15 +110,31 @@ async fn successful_exchange_replaces_prior_key_without_serializing_either_secre
         )
         .await?;
     let replacement_bytes = std::fs::read(env.key_file())?;
-    let raw = std::str::from_utf8(&replacement_bytes)?;
-    let resolved = read_provider_api_key("OpenRouter", "OPENROUTER_API_KEY", &Storage::new()?);
-    let stored = KeyStore::get_credential(&config, "OpenRouter")?;
+    let resolved = resolve_provider_credential(CredentialRequest::new(
+        "OpenRouter OAuth",
+        "IGNORED",
+        "https://openrouter.ai/api/v1",
+    ))
+    .await?;
+    let stored = KeyStore::get_credential(&config, "OpenRouter OAuth")?;
     let _ = fixture.finish().await?;
 
     // Then
     assert_ne!(prior_bytes, replacement_bytes);
-    assert!(!raw.contains("prior-key-canary") && !raw.contains("replacement-key-canary"));
-    assert_eq!(resolved.as_deref(), Some("replacement-key-canary"));
+    for secret in [
+        b"prior-key-canary".as_slice(),
+        b"replacement-key-canary".as_slice(),
+    ] {
+        assert!(!replacement_bytes
+            .windows(secret.len())
+            .any(|window| window == secret));
+    }
+    assert_eq!(
+        resolved
+            .as_ref()
+            .map(|credential| credential.bearer_token().expose_secret()),
+        Some("replacement-key-canary")
+    );
     assert_eq!(stored, Some(local_credential("replacement-key-canary")));
     Ok(())
 }
@@ -162,9 +180,13 @@ async fn documented_code_creation_exchange_resolve_and_local_logout_round_trip(
         .adapter
         .exchange_and_persist(&config, grant, &cancellation)
         .await?;
-    let storage = Storage::new()?;
-    let resolved = read_provider_api_key("OpenRouter", "OPENROUTER_API_KEY", &storage);
-    let stored = KeyStore::get_credential(&config, "OpenRouter")?;
+    let resolved = resolve_provider_credential(CredentialRequest::new(
+        "OpenRouter OAuth",
+        "IGNORED",
+        "https://openrouter.ai/api/v1",
+    ))
+    .await?;
+    let stored = KeyStore::get_credential(&config, "OpenRouter OAuth")?;
     let removed = crate::llm::auth::openrouter::OpenRouterAdapter::logout(&config)?;
     let removed_again = crate::llm::auth::openrouter::OpenRouterAdapter::logout(&config)?;
     let requests = fixture.finish().await?;
@@ -181,7 +203,12 @@ async fn documented_code_creation_exchange_resolve_and_local_logout_round_trip(
     assert_eq!(exchange["code"], "created-code");
     assert_eq!(exchange["code_challenge_method"], "S256");
     assert!(!requests[1].to_ascii_lowercase().contains("authorization:"));
-    assert_eq!(resolved.as_deref(), Some("exchanged-key"));
+    assert_eq!(
+        resolved
+            .as_ref()
+            .map(|credential| credential.bearer_token().expose_secret()),
+        Some("exchanged-key")
+    );
     assert_eq!(
         stored.as_ref().map(Credential::as_api_key),
         Some("exchanged-key")

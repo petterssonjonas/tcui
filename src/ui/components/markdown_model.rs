@@ -3,11 +3,33 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::config::app_config::{HeadingDownscale, MarkdownMode};
 use crate::theme::ThemeSpec;
 use crate::ui::components::terminal_capabilities::TerminalCapabilities;
+
+#[path = "markdown_code.rs"]
+mod code;
+
+#[cfg(test)]
+#[path = "markdown_code_tests.rs"]
+mod code_tests;
+
+#[path = "markdown_rich.rs"]
+mod rich;
+
+#[cfg(test)]
+#[path = "markdown_rich_tests.rs"]
+mod rich_tests;
+
+#[path = "markdown_charts.rs"]
+mod charts;
+
+#[cfg(test)]
+#[path = "markdown_charts_tests.rs"]
+mod chart_tests;
 
 #[derive(Debug, Clone)]
 pub struct RenderedMarkdown {
@@ -99,8 +121,9 @@ enum Block {
     Code {
         language: Option<String>,
         content: String,
+        closed: bool,
     },
-    Table(Vec<Vec<String>>),
+    Table(rich::Table),
     Rule,
     MediaImage {
         alt: String,
@@ -158,10 +181,25 @@ pub fn render_markdown(content: &str, opts: RenderOptions) -> RenderedMarkdown {
                 render_list(&mut lines, &mut link_targets, ordered, &items, opts)
             }
             Block::Quote(items) => render_quote(&mut lines, &mut link_targets, &items, opts),
-            Block::Code { language, content } => {
-                render_code(&mut lines, language.as_deref(), &content, opts.width)
+            Block::Code {
+                language,
+                content,
+                closed,
+            } => {
+                if language
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("mermaid"))
+                {
+                    if !charts::render_chart(&mut lines, &content, opts.width, closed) {
+                        rich::render_mermaid(&mut lines, &content, opts.width, closed);
+                    }
+                } else {
+                    code::render_code(&mut lines, language.as_deref(), &content, opts.width);
+                }
             }
-            Block::Table(rows) => render_table(&mut lines, rows, opts.width),
+            Block::Table(table) => {
+                rich::render_table(&mut lines, &mut link_targets, table, opts.width)
+            }
             Block::Rule => lines.push(Line::from("─".repeat(opts.width.max(3)))),
             Block::MediaImage { alt, source } => {
                 let image_height = opts.width.clamp(4, 12);
@@ -293,6 +331,7 @@ fn parse_blocks(content: &str) -> Vec<Block> {
     let mut blocks = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
     let mut idx = 0usize;
+    let mut tables = rich::parse_tables(content);
 
     while idx < lines.len() {
         let line = lines[idx].trim_end();
@@ -300,17 +339,36 @@ fn parse_blocks(content: &str) -> Vec<Block> {
             idx += 1;
             continue;
         }
+        let offset = lines[idx].as_ptr() as usize - content.as_ptr() as usize;
+        while tables.front().is_some_and(|(range, _)| range.end <= offset) {
+            tables.pop_front();
+        }
+        if let Some((range, _)) = tables.front() {
+            if offset < range.end && range.start < offset + lines[idx].len() {
+                if let Some((range, table)) = tables.pop_front() {
+                    while idx < lines.len()
+                        && (lines[idx].as_ptr() as usize - content.as_ptr() as usize) < range.end
+                    {
+                        idx += 1;
+                    }
+                    blocks.push(Block::Table(table));
+                    continue;
+                }
+            }
+        }
         if let Some((fence, language)) = parse_fence_start(line) {
             let mut body = Vec::new();
             idx += 1;
-            while idx < lines.len() && !lines[idx].trim_start().starts_with(fence) {
+            while idx < lines.len() && !is_fence_end(lines[idx], fence) {
                 body.push(lines[idx]);
                 idx += 1;
             }
+            let closed = idx < lines.len();
             idx += usize::from(idx < lines.len());
             blocks.push(Block::Code {
                 language,
                 content: body.join("\n"),
+                closed,
             });
             continue;
         }
@@ -327,16 +385,6 @@ fn parse_blocks(content: &str) -> Vec<Block> {
         if let Some((alt, source)) = parse_image_line(line) {
             blocks.push(Block::MediaImage { alt, source });
             idx += 1;
-            continue;
-        }
-        if is_table_header(line, lines.get(idx + 1).copied()) {
-            let mut rows = vec![split_table_row(line)];
-            idx += 2;
-            while idx < lines.len() && lines[idx].contains('|') && !lines[idx].trim().is_empty() {
-                rows.push(split_table_row(lines[idx]));
-                idx += 1;
-            }
-            blocks.push(Block::Table(rows));
             continue;
         }
         if line.trim_start().starts_with('>') {
@@ -382,6 +430,10 @@ fn parse_blocks(content: &str) -> Vec<Block> {
             && parse_fence_start(lines[idx]).is_none()
             && !lines[idx].trim_start().starts_with('>')
             && !is_rule(lines[idx])
+            && !tables.front().is_some_and(|(range, _)| {
+                let offset = lines[idx].as_ptr() as usize - content.as_ptr() as usize;
+                offset >= range.start && offset < range.end
+            })
         {
             paragraph.push(lines[idx].trim().to_string());
             idx += 1;
@@ -479,60 +531,6 @@ fn render_quote(
     }
 }
 
-fn render_code(
-    lines: &mut Vec<Line<'static>>,
-    language: Option<&str>,
-    content: &str,
-    width: usize,
-) {
-    let theme = crate::theme::active_theme();
-    if let Some(language) = language.filter(|language| !language.is_empty()) {
-        lines.push(Line::from(Span::styled(
-            format!(" {language} "),
-            Style::default()
-                .fg(theme.selection_fg)
-                .bg(theme.selection_bg)
-                .add_modifier(Modifier::BOLD),
-        )));
-    }
-    for line in content.lines() {
-        let mut text = line.to_string();
-        if UnicodeWidthStr::width(text.as_str()) > width {
-            text = truncate_to_display_width(&text, width);
-        }
-        lines.push(Line::from(Span::styled(
-            text,
-            Style::default().fg(theme.code_fg).bg(theme.code_bg),
-        )));
-    }
-}
-
-fn render_table(lines: &mut Vec<Line<'static>>, rows: Vec<Vec<String>>, width: usize) {
-    if rows.is_empty() {
-        return;
-    }
-    let col_count = rows.iter().map(Vec::len).max().unwrap_or(0);
-    let col_width = (width.saturating_sub(col_count + 1) / col_count.max(1)).max(3);
-    for (idx, row) in rows.iter().enumerate() {
-        let mut rendered = String::from("|");
-        for cell in row {
-            let mut cell = cell.trim().to_string();
-            if UnicodeWidthStr::width(cell.as_str()) > col_width {
-                cell = truncate_to_display_width(&cell, col_width.saturating_sub(1));
-                cell.push('…');
-            }
-            rendered.push_str(&format!(" {:width$}|", cell, width = col_width));
-        }
-        lines.push(Line::from(rendered));
-        if idx == 0 {
-            lines.push(Line::from(format!(
-                "|{}|",
-                "─".repeat((col_width + 2) * row.len() + row.len().saturating_sub(1))
-            )));
-        }
-    }
-}
-
 fn render_heading(
     lines: &mut Vec<Line<'static>>,
     text: &str,
@@ -562,8 +560,17 @@ fn render_heading(
 }
 
 fn parse_inline_runs(text: &str, base_style: Style) -> Vec<StyledRun> {
+    parse_inline_events(
+        Parser::new_ext(text, Options::ENABLE_STRIKETHROUGH),
+        base_style,
+    )
+}
+
+fn parse_inline_events<'a>(
+    parser: impl IntoIterator<Item = Event<'a>>,
+    base_style: Style,
+) -> Vec<StyledRun> {
     let theme = crate::theme::active_theme();
-    let parser = Parser::new_ext(text, Options::ENABLE_STRIKETHROUGH);
     let mut runs = Vec::new();
     let mut styles = vec![base_style];
     let mut links = Vec::new();
@@ -649,6 +656,7 @@ fn owned_line(runs: Vec<StyledRun>) -> Line<'static> {
 }
 
 fn wrap_runs(runs: Vec<StyledRun>, width: usize) -> Vec<Vec<StyledRun>> {
+    let width = width.max(1);
     let mut out = vec![Vec::new()];
     let mut current_width = 0usize;
     for run in runs {
@@ -660,6 +668,9 @@ fn wrap_runs(runs: Vec<StyledRun>, width: usize) -> Vec<Vec<StyledRun>> {
             }
             let token_width = UnicodeWidthStr::width(token.as_str());
             let is_space = token.trim().is_empty();
+            if is_space && (current_width == 0 || current_width + token_width > width) {
+                continue;
+            }
             if token_width > width && !is_space {
                 if current_width > 0 {
                     out.push(Vec::new());
@@ -667,8 +678,10 @@ fn wrap_runs(runs: Vec<StyledRun>, width: usize) -> Vec<Vec<StyledRun>> {
                 }
                 let mut chunk = String::new();
                 let mut chunk_width = 0usize;
-                for ch in token.chars() {
-                    let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                for grapheme in token.graphemes(true) {
+                    let ch_width = UnicodeWidthStr::width(grapheme);
+                    let grapheme = if ch_width > width { "�" } else { grapheme };
+                    let ch_width = UnicodeWidthStr::width(grapheme);
                     if chunk_width + ch_width > width && !chunk.is_empty() {
                         out.last_mut().expect("line exists").push(StyledRun {
                             text: std::mem::take(&mut chunk),
@@ -678,7 +691,7 @@ fn wrap_runs(runs: Vec<StyledRun>, width: usize) -> Vec<Vec<StyledRun>> {
                         out.push(Vec::new());
                         chunk_width = 0;
                     }
-                    chunk.push(ch);
+                    chunk.push_str(grapheme);
                     chunk_width += ch_width;
                 }
                 if !chunk.is_empty() {
@@ -736,24 +749,6 @@ fn tokenize(text: &str) -> Vec<String> {
     tokens
 }
 
-fn truncate_to_display_width(text: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-
-    let mut width = 0usize;
-    let mut end = 0usize;
-    for (idx, ch) in text.char_indices() {
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + ch_width > max_width {
-            break;
-        }
-        width += ch_width;
-        end = idx + ch.len_utf8();
-    }
-    text[..end].to_string()
-}
-
 fn append_link_targets(targets: &mut Vec<LinkTarget>, line: usize, runs: &[StyledRun]) {
     let mut column = 0;
     for run in runs {
@@ -790,12 +785,24 @@ fn parse_heading(line: &str) -> Option<(usize, String)> {
 
 fn parse_fence_start(line: &str) -> Option<(&str, Option<String>)> {
     let trimmed = line.trim_start();
-    trimmed.strip_prefix("```").map(|rest| {
-        (
-            "```",
-            (!rest.trim().is_empty()).then_some(rest.trim().to_string()),
-        )
-    })
+    let marker = trimmed.as_bytes().first().copied()?;
+    if marker != b'`' && marker != b'~' {
+        return None;
+    }
+    let length = trimmed.bytes().take_while(|&byte| byte == marker).count();
+    if length < 3 {
+        return None;
+    }
+    let rest = trimmed[length..].trim();
+    Some((
+        &trimmed[..length],
+        (!rest.is_empty()).then(|| rest.to_string()),
+    ))
+}
+
+fn is_fence_end(line: &str, fence: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.len() >= fence.len() && trimmed.bytes().all(|byte| byte == fence.as_bytes()[0])
 }
 
 fn parse_image_line(line: &str) -> Option<(String, String)> {
@@ -826,27 +833,6 @@ fn is_rule(line: &str) -> bool {
     ["---", "***", "___"]
         .iter()
         .any(|marker| trimmed.len() >= 3 && trimmed.chars().all(|c| marker.contains(c)))
-}
-
-fn is_table_header(line: &str, next: Option<&str>) -> bool {
-    line.contains('|')
-        && next
-            .map(|next| {
-                let trimmed = next.trim().trim_matches('|').replace(' ', "");
-                !trimmed.is_empty()
-                    && trimmed
-                        .split('|')
-                        .all(|part| part.chars().all(|c| c == '-' || c == ':'))
-            })
-            .unwrap_or(false)
-}
-
-fn split_table_row(line: &str) -> Vec<String> {
-    line.trim()
-        .trim_matches('|')
-        .split('|')
-        .map(|part| part.trim().to_string())
-        .collect()
 }
 
 fn enhanced_heading_tier(level: usize, downscale: HeadingDownscale) -> Option<KittyHeadingTier> {
@@ -950,7 +936,7 @@ mod tests {
     use crate::theme::find_theme;
     use crate::ui::components::terminal_capabilities::TerminalCapabilities;
 
-    fn opts(width: usize) -> RenderOptions {
+    pub(super) fn opts(width: usize) -> RenderOptions {
         RenderOptions {
             mode: MarkdownMode::Full,
             width,
@@ -1003,20 +989,21 @@ mod tests {
     }
 
     #[test]
-    fn render_markdown_table_truncates_multibyte_cells_without_panicking() {
+    fn render_markdown_table_wraps_multibyte_cells_inside_box() {
         let rendered = render_markdown("| col |\n| --- |\n| 🙂🙂 |", opts(5));
         let joined = rendered
             .lines
             .iter()
-            .map(|line| line.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-
-        assert!(joined.contains('…'));
+        assert_eq!(joined.matches('🙂').count(), 2);
+        assert!(joined.contains('┌') && joined.contains('└') && joined.contains('│'));
+        assert!(rendered.lines.iter().all(|line| line.width() <= 5));
     }
 
     #[test]
-    fn render_markdown_code_truncates_multibyte_lines_without_panicking() {
+    fn render_markdown_code_wraps_multibyte_lines_without_panicking() {
         let rendered = render_markdown("```\n🙂🙂🙂\n```", opts(3));
         let joined = rendered
             .lines
@@ -1025,6 +1012,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(joined.contains('🙂'));
+        assert_eq!(joined.matches('🙂').count(), 3);
+        assert!(rendered.lines.iter().all(|line| line.width() <= 3));
     }
 }

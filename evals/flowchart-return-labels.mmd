@@ -1,0 +1,7 @@
+flowchart TD
+U[User] -->|Enters a message| T[Terminal Chat UI]
+T -->|Sends request| A[Assistant]
+A -->|Interprets request and generates reply| M[Language model]
+M -->|Returns response| A
+A -->|Formats response| T
+T -->|Displays reply| U

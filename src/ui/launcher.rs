@@ -5,6 +5,7 @@ pub enum LauncherAction {
     MarkdownVault,
     MemoryManagement,
     Settings,
+    Terminal,
     System,
     Research,
     Todo,
@@ -19,7 +20,7 @@ struct LauncherFeature {
     action: LauncherAction,
 }
 
-const FEATURES: [LauncherFeature; 9] = [
+const FEATURES: [LauncherFeature; 10] = [
     LauncherFeature {
         label: "Markdown Vault",
         action: LauncherAction::MarkdownVault,
@@ -55,6 +56,10 @@ const FEATURES: [LauncherFeature; 9] = [
     LauncherFeature {
         label: "Pomodoro",
         action: LauncherAction::Pomodoro,
+    },
+    LauncherFeature {
+        label: "Terminal",
+        action: LauncherAction::Terminal,
     },
 ];
 
@@ -112,7 +117,7 @@ fn cards(area: Rect) -> Vec<(LauncherFeature, Rect)> {
         return cards;
     }
 
-    for row in 0..4_u16 {
+    for row in 0..5_u16 {
         let y = grid
             .y
             .saturating_add(row.saturating_mul(row_height.saturating_add(1)));
@@ -125,13 +130,6 @@ fn cards(area: Rect) -> Vec<(LauncherFeature, Rect)> {
         }
     }
 
-    let last_y = grid
-        .y
-        .saturating_add(4_u16.saturating_mul(row_height.saturating_add(1)));
-    cards.push((
-        FEATURES[8],
-        Rect::new(grid.x, last_y, grid.width, row_height),
-    ));
     cards
 }
 

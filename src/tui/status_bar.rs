@@ -103,9 +103,9 @@ impl StatusBar {
         }
         let theme = crate::theme::active_theme();
         let provider = if self.provider.is_empty() {
-            "none"
+            "/connect"
         } else {
-            self.provider.as_str()
+            crate::ui::provider_display_name(&self.provider)
         };
         let color = if self.provider.is_empty() {
             theme.warning

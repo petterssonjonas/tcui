@@ -103,7 +103,9 @@ pub(crate) async fn dispatch(config: &AppConfig, id: &str) -> color_eyre::Result
         return Ok(());
     };
     let message = record.message_text()?;
-    crate::notifications::notify_reminder(config, &message).await?;
+    // External delivery is best-effort; keep the in-app/journal notice and
+    // one-shot bookkeeping even when a configured notification backend fails.
+    let _ = crate::notifications::notify_reminder(config, &message).await;
     println!("tcui reminder: {message}");
     if !record.recurring {
         store::remove(id)?;

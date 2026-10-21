@@ -75,7 +75,7 @@ pub(crate) async fn prepare_launch(
         && api_key.is_none()
     {
         return Err(color_eyre::eyre::eyre!(
-            "No API key or OAuth token found for {provider}. Open Settings > Providers or set the provider env var."
+            "No saved API key or OAuth token found for {provider}. Use /connect to add credentials, or /vault to unlock encrypted credentials."
         ));
     }
 
@@ -113,12 +113,21 @@ pub(crate) async fn prepare_launch(
     request.messages.extend(skills.messages);
     let mut notices = skills.notices;
 
-    match crate::search::maybe_search(&config, &user_request, false).await {
-        Ok(Some(context)) => request
-            .messages
-            .push(crate::search::untrusted_context_message(&context)),
-        Ok(None) => {}
-        Err(error) => notices.push(format!("Web search unavailable: {error}")),
+    if config.web_search.enabled || skills.search_requested {
+        runtime_system_prompt.push_str(crate::search::EVIDENCE_POLICY);
+    }
+    if !skills.search_requested {
+        match crate::search::maybe_search(&config, &user_request, false).await {
+            Ok(Some(message)) => request.messages.push(message),
+            Ok(None) => {}
+            Err(error) => {
+                let notice = format!("Web search unavailable: {error}");
+                request
+                    .messages
+                    .push(crate::search::unavailable_message(&notice));
+                notices.push(notice);
+            }
+        }
     }
 
     #[cfg(feature = "memory")]
@@ -194,4 +203,58 @@ pub(crate) async fn prepare_launch(
         #[cfg(feature = "memory")]
         memory_activities,
     })))
+}
+#[test]
+fn explicit_search_runs_with_automatic_search_off_and_coalesces_same_source_mentions() {
+    crate::app::tests::with_test_app_config("explicit-search", AppConfig::default(), |app| {
+        let mut config = app.config.blocking_read().clone();
+        config.web_search.enabled = false;
+        tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(async {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("search fixture");
+                    config.web_search.local_endpoint = Some(format!("http://{}/search", listener.local_addr().expect("address")));
+                    let server = tokio::spawn(async move {
+                        let (mut socket, _) = listener.accept().await.expect("search request");
+                        let mut request = Vec::new();
+                        let mut buffer = [0_u8; 1024];
+                        while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                            let count = socket.read(&mut buffer).await.expect("request bytes");
+                            assert!(count > 0 && request.len() < 16_384);
+                            request.extend_from_slice(&buffer[..count]);
+                        }
+                        let body = r#"{"results":[{"title":"Fingerprint support","url":"https://fprint.freedesktop.org/","content":"Supported devices and drivers."}]}"#;
+                        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                        socket.write_all(response.as_bytes()).await.expect("search result");
+                        String::from_utf8(request).expect("request text")
+                    });
+                    let request = ChatRequest {
+                        provider: crate::config::LOCAL_PROVIDER_NAME.into(),
+                        endpoint: "http://127.0.0.1:9/v1".into(),
+                        model: "unused-search-planner".into(),
+                        reasoning_effort: None,
+                        supported_reasoning_efforts: Vec::new(),
+                        backend_type: "openai".into(),
+                        api_key: None,
+                        system_prompt: String::new(),
+                        messages: Vec::new(),
+                    };
+                    let prepared = tokio::time::timeout(
+                        std::time::Duration::from_secs(3),
+                        crate::skill_runtime::prepare(&config, "@websearch @research Linux fingerprint reader", &request),
+                    ).await.expect("search finishes without a planner");
+                    let wire = server.await.expect("fixture");
+                    assert!(wire.starts_with("GET /search?"));
+                    assert!(!wire.contains("%40websearch") && !wire.contains("%40research"));
+                    assert!(prepared.search_requested);
+                    assert!(prepared.notices.is_empty(), "{:?}", prepared.notices);
+                    assert_eq!(prepared.messages.len(), 1);
+                    assert_eq!(prepared.messages[0].role, "user");
+                    assert!(prepared.messages[0].content.contains("https://fprint.freedesktop.org/"));
+                    assert!(prepared.messages[0].content.contains("[UNTRUSTED WEB SEARCH DATA]"));
+                });
+    });
 }

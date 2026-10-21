@@ -8,6 +8,11 @@ impl TuiApp {
             "/skills" => Some(Action::ShowSkillsPopup),
             "/mcp" => Some(Action::ShowMcpPopup),
             "/settings" => Some(Action::OpenSettingsPanel),
+            "/terminal" => Some(Action::OpenTerminal),
+            "/providers" | "/connect" => Some(Action::OpenProviders),
+            "/vault" => Some(Action::OpenCredentialVault),
+            "/vault-search" => Some(Action::ShowLocalSearch(String::new())),
+            "/model" => Some(Action::SetManualModel(String::new())),
             "/help" => Some(Action::ShowHelp),
             "/keybinds" => Some(Action::ShowKeybinds),
             "/web" => Some(Action::ToggleWebSearch),
@@ -21,55 +26,13 @@ impl TuiApp {
         if key.kind != crossterm::event::KeyEventKind::Press {
             return None;
         }
+        self.ui.text_selection.cancel();
+        if self.ui.command_review.is_some() || self.ui.terminals.close_pending.is_some() {
+            return self.terminal_key(key).flatten();
+        }
 
-        // TODO: Keybind editing is disabled in the settings UI (no keybind entries in
-        // all_settings). This capture flow is preserved and persisted to config, but
-        // normal key dispatch does not yet consult keybinding_overrides. Re-enable
-        // keybind entries in all_settings() once dispatch is wired through the binding map.
-        if let Some(mut capture) = self.ui.keybind_capture.take() {
-            let mut effective_bindings = std::collections::BTreeMap::new();
-            for setting in crate::tui::settings_panel::all_settings() {
-                if let crate::tui::settings_panel::SettingType::Keybind {
-                    action_id,
-                    default_binding,
-                    reserved: _,
-                } = setting.setting_type
-                {
-                    effective_bindings.insert(action_id.to_string(), default_binding.to_string());
-                }
-            }
-            effective_bindings.extend(self.ui.keybinding_overrides.clone());
-            let result = capture.capture_with_overrides(key, &effective_bindings);
-            match result {
-                crate::tui::keybind_capture::CaptureResult::Captured(_) => {
-                    let action_id = capture.action_id.clone();
-                    let action_label = capture.action_label.clone();
-                    if let Some(binding) = capture.confirm() {
-                        self.ui
-                            .keybinding_overrides
-                            .insert(action_id.clone(), binding.clone());
-                        self.ui
-                            .show_toast(format!("Bound {action_label} → {binding}"));
-                        if let Ok(mut config) = self.config.try_write() {
-                            config.tui.keybinding_overrides = self.ui.keybinding_overrides.clone();
-                            let _ = config.save();
-                        }
-                    }
-                }
-                crate::tui::keybind_capture::CaptureResult::Cleared => {
-                    let action_id = capture.action_id.clone();
-                    self.ui.keybinding_overrides.remove(&action_id);
-                    if let Ok(mut config) = self.config.try_write() {
-                        config.tui.keybinding_overrides = self.ui.keybinding_overrides.clone();
-                        let _ = config.save();
-                    }
-                }
-                crate::tui::keybind_capture::CaptureResult::Conflict(_)
-                | crate::tui::keybind_capture::CaptureResult::Waiting => {
-                    self.ui.keybind_capture = Some(capture);
-                }
-                crate::tui::keybind_capture::CaptureResult::Cancelled => {}
-            }
+        if self.ui.credential_manager.is_some() {
+            self.handle_credential_manager_key(key);
             return None;
         }
 
@@ -182,76 +145,17 @@ impl TuiApp {
                     None
                 }
                 KeyCode::Enter => {
-                    if settings.confirm.is_some() {
-                        settings.confirm_reset();
-                        return None;
-                    }
-                    let selected_id = settings
-                        .selected_setting(&catalog)
-                        .map(|setting| setting.id);
                     match settings.enter(&catalog) {
-                        crate::tui::settings_panel::EnterResult::OpenKeybind {
-                            action_id,
-                            action_label,
-                        } => {
-                            self.ui.keybind_capture =
-                                Some(crate::tui::keybind_capture::KeybindCaptureState::new(
-                                    action_id,
-                                    action_label,
-                                ));
-                        }
                         crate::tui::settings_panel::EnterResult::RunCommand(id) => {
                             self.ui.settings_v2 = None;
                             return crate::tui::settings_panel::command_action(id);
                         }
-                        crate::tui::settings_panel::EnterResult::SelectTheme(theme) => {
-                            let _ = self.apply_theme_selection(theme);
+                        crate::tui::settings_panel::EnterResult::NavigateSetting(id) => {
+                            self.ui.settings_v2 = None;
+                            return Some(Action::OpenSettingsPage(id.to_string()));
                         }
-                        crate::tui::settings_panel::EnterResult::SelectToastPosition(position) => {
-                            let _ = self.apply_toast_position_selection(position);
-                        }
-                        crate::tui::settings_panel::EnterResult::ToggledBool => match selected_id {
-                            Some("web_search") => return Some(Action::ToggleWebSearch),
-                            Some("collapse_thinking") => {
-                                return Some(Action::ToggleCollapseThinking);
-                            }
-                            Some(
-                                id @ ("show_saved_files" | "show_memories" | "show_markdown_vault"),
-                            ) => {
-                                let _ = self.toggle_sidebar_visibility(id);
-                            }
-                            _ => {}
-                        },
-                        crate::tui::settings_panel::EnterResult::Nothing
-                        | crate::tui::settings_panel::EnterResult::EnteredSubsection
-                        | crate::tui::settings_panel::EnterResult::RequestConfirm => {}
+                        crate::tui::settings_panel::EnterResult::Nothing => {}
                     }
-                    None
-                }
-                KeyCode::Char(' ') => {
-                    let selected_id = settings
-                        .selected_setting(&catalog)
-                        .map(|setting| setting.id);
-                    if !settings.toggle_bool(&catalog) {
-                        settings.insert_char(' ');
-                    } else {
-                        match selected_id {
-                            Some("web_search") => return Some(Action::ToggleWebSearch),
-                            Some("collapse_thinking") => {
-                                return Some(Action::ToggleCollapseThinking);
-                            }
-                            Some(
-                                id @ ("show_saved_files" | "show_memories" | "show_markdown_vault"),
-                            ) => {
-                                let _ = self.toggle_sidebar_visibility(id);
-                            }
-                            _ => {}
-                        }
-                    }
-                    None
-                }
-                KeyCode::Left | KeyCode::Right if settings.confirm.is_some() => {
-                    settings.toggle_confirm_selection();
                     None
                 }
                 KeyCode::Up => {
@@ -262,7 +166,7 @@ impl TuiApp {
                     settings.move_down(&catalog);
                     None
                 }
-                KeyCode::Tab if settings.confirm.is_none() => {
+                KeyCode::Tab => {
                     settings.toggle_descriptions();
                     None
                 }
@@ -332,6 +236,38 @@ impl TuiApp {
             };
         }
 
+        if self.ui.active_modal.is_none()
+            && self.ui.delete_confirm.is_none()
+            && self.ui.save_file_dialog.is_none()
+            && self.ui.artifact_viewer.is_none()
+            && self.ui.editor_popup.is_none()
+            && self.ui.list_popup.is_none()
+            && !self.ui.show_session_list
+        {
+            if let Some(action) = self.terminal_key(key) {
+                return action;
+            }
+            if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                return Some(Action::OpenCommandPalette);
+            }
+            if let Some(action) =
+                crate::ui::settings_workspace::keybinding_action(key, &self.ui.keybinding_overrides)
+            {
+                return Some(action);
+            }
+            if self.ui.app_tabs.active_view() == crate::ui::app_tabs::AppView::Settings {
+                return match key.code {
+                    KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.request_app_tab_close(self.ui.app_tabs.active_id());
+                        None
+                    }
+                    KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Some(self.quit_action())
+                    }
+                    _ => self.settings_workspace_key(key),
+                };
+            }
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('e') {
             self.open_chat_draft_editor();
             return None;
@@ -386,6 +322,29 @@ impl TuiApp {
                 }
                 _ => None,
             };
+        }
+
+        if key.code == KeyCode::Enter
+            && !key.modifiers.contains(KeyModifiers::SHIFT)
+            && !self
+                .ui
+                .list_popup
+                .as_ref()
+                .is_some_and(|popup| popup.selected.is_some())
+        {
+            let credential_action =
+                self.ui.tabs.get(self.ui.active_tab).and_then(|tab| {
+                    match tab.input_content.split_whitespace().next() {
+                        Some("/vault") => Some(Action::OpenCredentialVault),
+                        Some("/connect" | "/providers") => Some(Action::OpenProviders),
+                        _ => None,
+                    }
+                });
+            if let Some(action) = credential_action {
+                self.take_input_submission();
+                self.ui.list_popup = None;
+                return Some(action);
+            }
         }
 
         if self.ui.list_popup.is_some() {
@@ -738,46 +697,46 @@ impl TuiApp {
                     } else {
                         if let Some(content) = self.take_input_submission() {
                             let trimmed = content.trim();
-                            match trimmed {
-                                "/quit" | "/exit" | "/q" => return Some(self.quit_action()),
-                                "/skills" => return Some(Action::ShowSkillsPopup),
-                                "/mcp" => return Some(Action::ShowMcpPopup),
-                                "/settings" => return Some(Action::OpenSettingsPanel),
-                                "/help" => return Some(Action::ShowHelp),
-                                "/keybinds" => return Some(Action::ShowKeybinds),
-                                "/web" => return Some(Action::ToggleWebSearch),
-                                _ => {
-                                    if trimmed == "/theme" {
-                                        self.show_theme_popup("");
-                                        return None;
+                            if let Some(action) = self.action_for_slash_command(trimmed) {
+                                return Some(action);
+                            }
+                            match trimmed.split_whitespace().next() {
+                                Some("/vault") => return Some(Action::OpenCredentialVault),
+                                Some("/connect" | "/providers") => {
+                                    return Some(Action::OpenProviders)
+                                }
+                                _ => {}
+                            }
+                            if trimmed == "/theme" {
+                                self.show_theme_popup("");
+                                return None;
+                            }
+                            if let Some(theme_name) = trimmed.strip_prefix("/theme ") {
+                                let _ = self.apply_theme_selection(theme_name.trim());
+                                return None;
+                            }
+                            if let Some(query) = trimmed.strip_prefix("/vault-search ") {
+                                return Some(Action::ShowLocalSearch(query.trim().to_string()));
+                            }
+                            if let Some(model) = trimmed.strip_prefix("/model ") {
+                                return Some(Action::SetManualModel(model.trim().to_string()));
+                            }
+                            if let Some(value) = trimmed.strip_prefix("/web ") {
+                                let value = value.trim().to_lowercase();
+                                if value == "on" || value == "off" {
+                                    let enabled = value == "on";
+                                    let current = self
+                                        .config
+                                        .try_read()
+                                        .map(|config| config.web_search.enabled)
+                                        .unwrap_or(false);
+                                    if enabled != current {
+                                        return Some(Action::ToggleWebSearch);
                                     }
-                                    if let Some(theme_name) = trimmed.strip_prefix("/theme ") {
-                                        let _ = self.apply_theme_selection(theme_name.trim());
-                                        return None;
-                                    }
-                                    if let Some(query) = trimmed.strip_prefix("/vault ") {
-                                        return Some(Action::ShowLocalSearch(
-                                            query.trim().to_string(),
-                                        ));
-                                    }
-                                    if let Some(value) = trimmed.strip_prefix("/web ") {
-                                        let value = value.trim().to_lowercase();
-                                        if value == "on" || value == "off" {
-                                            let enabled = value == "on";
-                                            let current = self
-                                                .config
-                                                .try_read()
-                                                .map(|config| config.web_search.enabled)
-                                                .unwrap_or(false);
-                                            if enabled != current {
-                                                return Some(Action::ToggleWebSearch);
-                                            }
-                                            return None;
-                                        }
-                                    }
-                                    return Some(Action::SendMessage(content));
+                                    return None;
                                 }
                             }
+                            return Some(Action::SendMessage(content));
                         }
                         None
                     }
@@ -812,9 +771,73 @@ impl TuiApp {
     pub(crate) fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> Option<Action> {
         use crossterm::event::{MouseButton, MouseEventKind};
 
+        if self.ui.command_review.is_some() || self.ui.terminals.close_pending.is_some() {
+            return self.terminal_mouse(mouse).flatten();
+        }
+        if self.ui.active_modal.is_none()
+            && self.ui.palette.is_none()
+            && self.ui.settings_v2.is_none()
+            && self.ui.credential_manager.is_none()
+            && self.ui.vault_profile_manager.is_none()
+            && self.ui.pending_vault_mutation.is_none()
+            && self.ui.editor_popup.is_none()
+            && self.ui.artifact_viewer.is_none()
+            && self.ui.save_file_dialog.is_none()
+            && self.ui.export_dialog.is_none()
+            && self.ui.list_popup.is_none()
+            && self.ui.delete_confirm.is_none()
+            && !self.ui.show_keybinds
+            && !self.ui.show_session_list
+        {
+            if let Some(action) = self.terminal_mouse(mouse) {
+                return action;
+            }
+            if self.ui.app_tabs.active_view() == crate::ui::app_tabs::AppView::Settings
+                && mouse.row > self.ui.last_area.map_or(0, |area| area.y)
+            {
+                return self.settings_workspace_mouse(mouse);
+            }
+        }
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                self.handle_mouse_click(mouse.column, mouse.row)
+                let pos = ratatui::layout::Position::new(mouse.column, mouse.row);
+                let bounds = if self.ui.credential_manager.is_some() {
+                    self.ui.last_area.map(|area| {
+                        crate::tui::components::centered_rect(86, 82, area)
+                            .inner(ratatui::layout::Margin::new(1, 1))
+                    })
+                } else {
+                    self.ui
+                        .chat_area
+                        .filter(|area| area.contains(pos))
+                        .or(self.ui.last_area)
+                }
+                .unwrap_or_default();
+                self.ui.text_selection.begin(pos, bounds);
+                None
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                self.ui
+                    .text_selection
+                    .drag(ratatui::layout::Position::new(mouse.column, mouse.row));
+                None
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let pos = ratatui::layout::Position::new(mouse.column, mouse.row);
+                if !self.ui.text_selection.is_active() {
+                    return None;
+                }
+                if let Some(text) = self.ui.text_selection.finish(pos) {
+                    if !text.is_empty() {
+                        let result = crate::clipboard::copy(&text);
+                        self.clipboard_notice(result);
+                    }
+                    None
+                } else if self.ui.credential_manager.is_none() {
+                    self.handle_mouse_click(mouse.column, mouse.row)
+                } else {
+                    None
+                }
             }
             MouseEventKind::Down(MouseButton::Right) => {
                 self.handle_key(crossterm::event::KeyEvent::new(
@@ -823,6 +846,10 @@ impl TuiApp {
                 ))
             }
             MouseEventKind::ScrollUp => {
+                self.ui.text_selection.cancel();
+                if self.ui.credential_manager.is_some() {
+                    return None;
+                }
                 if self.ui.editor_popup.is_some() {
                     if let Some(editor) = self.ui.editor_popup.as_mut() {
                         editor.send_scroll(false);
@@ -833,6 +860,10 @@ impl TuiApp {
                 None
             }
             MouseEventKind::ScrollDown => {
+                self.ui.text_selection.cancel();
+                if self.ui.credential_manager.is_some() {
+                    return None;
+                }
                 if self.ui.editor_popup.is_some() {
                     if let Some(editor) = self.ui.editor_popup.as_mut() {
                         editor.send_scroll(true);
@@ -844,6 +875,13 @@ impl TuiApp {
             }
             _ => None,
         }
+    }
+
+    fn clipboard_notice(&mut self, result: std::io::Result<()>) {
+        self.ui.show_toast(match result {
+            Ok(()) => "Copy sent to clipboard".to_string(),
+            Err(error) => format!("Copy failed: {error}"),
+        });
     }
 
     pub(crate) fn handle_mouse_scroll(
@@ -1238,6 +1276,9 @@ impl TuiApp {
             match mouse_action {
                 crate::ui::MouseAction::AppTabSelect(index) => {
                     self.ui.app_tabs.select(index);
+                    self.ui.terminals.focused = self.ui.app_tabs.tab(index).is_some_and(|tab| {
+                        matches!(tab.view(), crate::ui::app_tabs::AppView::Terminal { .. })
+                    });
                     self.ui.focus = crate::tui::focus::Focus::Chat;
                     return None;
                 }
@@ -1310,6 +1351,7 @@ impl TuiApp {
                         crate::ui::launcher::LauncherAction::MarkdownVault => {
                             Some(Action::OpenMarkdownVaultLauncher)
                         }
+                        crate::ui::launcher::LauncherAction::Terminal => Some(Action::OpenTerminal),
                         crate::ui::launcher::LauncherAction::Settings => {
                             Some(Action::OpenSettingsPanel)
                         }
@@ -1417,7 +1459,9 @@ impl TuiApp {
                                         self.ui.visible_providers[real_idx].0.clone();
                                     if tab.tab.provider != new_provider {
                                         tab.tab.provider = new_provider.clone();
+                                        tab.tab.endpoint = None;
                                         tab.tab.model.clear();
+                                        tab.manual_model_override = false;
                                         tab.tab.reasoning_effort = None;
                                         selected_provider = Some(new_provider);
                                     }
@@ -1427,6 +1471,7 @@ impl TuiApp {
                                 if real_idx < self.ui.current_models.len() {
                                     let model = self.ui.current_models[real_idx].id.clone();
                                     tab.tab.model = model.clone();
+                                    tab.manual_model_override = false;
                                     tab.tab.reasoning_effort = None;
                                     selected_model = Some(model);
                                 }
@@ -1504,6 +1549,32 @@ impl TuiApp {
             }
 
             if handled_selector {
+                return None;
+            }
+        }
+
+        if self.ui.palette.is_none() && self.ui.settings_v2.is_none() {
+            if let Some(index) = self.ui.tabs.get(self.ui.active_tab).and_then(|tab| {
+                tab.command_hit_areas
+                    .iter()
+                    .find_map(|(index, area)| area.contains(pos).then_some(*index))
+            }) {
+                self.open_command_review(index);
+                return None;
+            }
+            if let Some((tab, index)) = self.ui.tabs.get(self.ui.active_tab).and_then(|tab| {
+                tab.copy_hit_areas
+                    .iter()
+                    .find_map(|(index, area)| area.contains(pos).then_some((tab, *index)))
+            }) {
+                if let Some(message) = tab
+                    .messages
+                    .get(index)
+                    .filter(|message| message.role == "assistant")
+                {
+                    let result = crate::clipboard::copy(&message.content);
+                    self.clipboard_notice(result);
+                }
                 return None;
             }
         }

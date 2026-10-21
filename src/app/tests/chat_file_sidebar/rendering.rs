@@ -1,5 +1,4 @@
 use super::*;
-use crate::tui::settings_panel::{all_settings, SettingCategory, SettingsPanelState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[test]
@@ -157,25 +156,25 @@ fn chat_file_sidebar_labels_follow_optional_section_visibility() {
 #[test]
 fn chat_file_sidebar_visibility_settings_persist_across_reload() {
     with_test_app_config("chat-file-sidebar-settings", AppConfig::default(), |app| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
         for id in ["show_saved_files", "show_memories", "show_markdown_vault"] {
-            let catalog = all_settings();
-            let mut panel = SettingsPanelState::new().with_sidebar_visibility(
-                app.ui.show_saved_files,
-                app.ui.show_memories,
-                app.ui.show_markdown_vault,
-            );
-            panel.depth_stack.push(SettingCategory::Obsidian);
-            let index = panel
-                .results(&catalog)
-                .iter()
-                .position(|(_, setting)| setting.id == id)
-                .expect("sidebar visibility setting");
-            panel.select(index, &catalog);
-            app.ui.settings_v2 = Some(panel);
-
-            let action = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-
-            assert!(action.is_none());
+            app.open_settings_page(Some(id));
+            let action =
+                app.settings_workspace_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            let Some(crate::app::Action::ApplySetting {
+                id: changed_id,
+                value,
+            }) = action
+            else {
+                panic!("dedicated settings should apply the selected boolean");
+            };
+            assert_eq!(changed_id, id);
+            runtime
+                .block_on(app.apply_settings_value(&changed_id, &value))
+                .expect("apply visibility");
         }
 
         assert!(!app.ui.show_saved_files);

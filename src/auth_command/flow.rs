@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::config::key_store::ApiKeyCredentialSource;
 use crate::config::{AppConfig, KeyStore};
 use crate::llm::auth::{
-    codex::{codex_status, login_with_cli, logout_external_cli, CodexNativeLogout, CodexStatus},
+    codex::{codex_status, logout_external_cli, CodexNativeLogout, CodexStatus},
     oauth::{
         CallbackPath, CallbackTimeout, LoopbackCallbackConfig, OAuthCancellation, RedirectUri,
     },
@@ -12,7 +12,7 @@ use crate::llm::auth::{
 
 use super::adapters::{codex_native_adapter, openrouter_adapter};
 use super::errors::{map_codex_cli, map_native, map_oauth, map_openrouter};
-use super::input::{read_headless_input, PrintingBrowser};
+use super::input::{read_callback_url, read_headless_input, PrintingBrowser};
 use super::{
     AuthCommandError, AuthCommandRequest, AuthCommandResult, AuthLoginRequest, AuthLogoutRequest,
     AuthProvider, AuthStatusRequest,
@@ -37,24 +37,42 @@ async fn login(
     request: AuthLoginRequest,
     cancellation: &OAuthCancellation,
 ) -> Result<AuthCommandResult, AuthCommandError> {
-    match request.provider {
-        AuthProvider::Codex if request.native => {
-            native_codex_login(request.headless, cancellation).await
-        }
+    let result = match request.provider {
         AuthProvider::Codex => {
-            login_with_cli(request.headless, cancellation)
-                .await
-                .map_err(map_codex_cli)?;
-            Ok(AuthCommandResult::Login {
-                message: "Codex CLI credentials are ready for TCUI use.".to_owned(),
-            })
+            native_codex_login(request.headless, request.open_browser, cancellation).await
         }
-        AuthProvider::OpenRouter => openrouter_login(request.headless, cancellation).await,
+        AuthProvider::OpenRouter => {
+            openrouter_login(request.headless, request.open_browser, cancellation).await
+        }
+    }?;
+    let name = match request.provider {
+        AuthProvider::Codex => "Codex",
+        AuthProvider::OpenRouter => "OpenRouter OAuth",
+    };
+    let mut config = config(request.provider)?;
+    let preset = crate::config::app_config::provider_presets()
+        .into_iter()
+        .find(|preset| preset.name == name)
+        .ok_or(AuthCommandError::CredentialStore {
+            provider: request.provider,
+        })?;
+    if let Some(existing) = config.providers.iter_mut().find(|entry| entry.name == name) {
+        *existing = preset;
+    } else {
+        config.providers.push(preset);
     }
+    config.disabled_providers.retain(|entry| entry != name);
+    config
+        .save()
+        .map_err(|_| AuthCommandError::CredentialStore {
+            provider: request.provider,
+        })?;
+    Ok(result)
 }
 
 async fn native_codex_login(
     headless: bool,
+    open_browser: bool,
     cancellation: &OAuthCancellation,
 ) -> Result<AuthCommandResult, AuthCommandError> {
     let config = config(AuthProvider::Codex)?;
@@ -77,8 +95,9 @@ async fn native_codex_login(
         adapter
             .login_browser(
                 &config,
-                &PrintingBrowser::new("Codex native authorization URL"),
+                &PrintingBrowser::new("Codex native authorization URL", open_browser),
                 cancellation,
+                read_callback_url(cancellation),
             )
             .await
             .map_err(map_native)?;
@@ -90,6 +109,7 @@ async fn native_codex_login(
 
 async fn openrouter_login(
     headless: bool,
+    open_browser: bool,
     cancellation: &OAuthCancellation,
 ) -> Result<AuthCommandResult, AuthCommandError> {
     let config = config(AuthProvider::OpenRouter)?;
@@ -105,9 +125,19 @@ async fn openrouter_login(
             "OpenRouter authorization URL: {}",
             authorization.authorization_url()
         );
-        let mut input = read_headless_input(cancellation)
-            .await
-            .map_err(|error| map_oauth(AuthProvider::OpenRouter, error))?;
+        println!("Paste the final response URL and press Enter.");
+        let mut input = tokio::time::timeout(
+            OPENROUTER_CALLBACK_TIMEOUT,
+            read_headless_input(cancellation),
+        )
+        .await
+        .map_err(|_| {
+            map_oauth(
+                AuthProvider::OpenRouter,
+                crate::llm::auth::oauth::OAuthError::CallbackTimeout,
+            )
+        })?
+        .map_err(|error| map_oauth(AuthProvider::OpenRouter, error))?;
         authorization
             .complete_headless(&mut input)
             .map_err(map_openrouter)?
@@ -123,10 +153,13 @@ async fn openrouter_login(
             .await
             .map_err(map_openrouter)?;
         authorization
-            .open_browser(&PrintingBrowser::new("OpenRouter authorization URL"))
+            .open_browser(&PrintingBrowser::new(
+                "OpenRouter authorization URL",
+                open_browser,
+            ))
             .map_err(map_openrouter)?;
         authorization
-            .receive_code(cancellation)
+            .receive_code_with_redirect(cancellation, read_callback_url(cancellation))
             .await
             .map_err(map_openrouter)?
     };
@@ -215,8 +248,9 @@ fn status_for(provider: AuthProvider) -> Result<Option<String>, AuthCommandError
             Err(_) => Err(AuthCommandError::CredentialStore { provider }),
         },
         AuthProvider::OpenRouter => {
-            let credential = KeyStore::get_api_key_credential(&config(provider)?, "OpenRouter")
-                .map_err(|_| AuthCommandError::CredentialStore { provider })?;
+            let credential =
+                KeyStore::get_api_key_credential(&config(provider)?, "OpenRouter OAuth")
+                    .map_err(|_| AuthCommandError::CredentialStore { provider })?;
             Ok(credential.map(|credential| match credential.source() {
                 ApiKeyCredentialSource::OpenRouterPkce => {
                     "OpenRouter: authenticated source=tcui-pkce expires_at=none".to_owned()

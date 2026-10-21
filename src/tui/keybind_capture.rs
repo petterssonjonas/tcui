@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{prelude::*, widgets::*};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeybindCaptureState {
@@ -84,52 +83,6 @@ impl KeybindCaptureState {
         self.captured = None;
         self.conflicting = None;
     }
-
-    pub fn render(&self, f: &mut Frame, area: Rect) {
-        let theme = crate::theme::active_theme();
-        let popup = centered_rect(54, 26, area);
-        f.render_widget(Clear, popup);
-        f.render_widget(
-            Block::default().style(Style::default().bg(theme.panel)),
-            popup,
-        );
-        f.render_widget(
-            Paragraph::new(
-                Line::from(" Capture Key ").style(
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ),
-            Rect::new(popup.x, popup.y, popup.width, 1),
-        );
-
-        let inner = popup.inner(Margin {
-            vertical: 1,
-            horizontal: 2,
-        });
-        let status = self
-            .conflicting
-            .as_deref()
-            .or(self.captured.as_deref())
-            .unwrap_or("Waiting for input...");
-        let status_style = if self.conflicting.is_some() {
-            Style::default().fg(Color::Red)
-        } else {
-            Style::default().fg(Color::Green)
-        };
-        f.render_widget(
-            Paragraph::new(vec![
-                Line::from(format!("Press key to bind to {}", self.action_label)),
-                Line::from("Esc to cancel"),
-                Line::from("Backspace to clear"),
-                Line::from(""),
-                Line::styled(status, status_style),
-            ])
-            .wrap(Wrap { trim: true }),
-            inner,
-        );
-    }
 }
 
 pub fn key_repr(key: KeyEvent) -> String {
@@ -140,7 +93,12 @@ pub fn key_repr(key: KeyEvent) -> String {
     if key.modifiers.contains(KeyModifiers::ALT) {
         parts.push("alt".to_string());
     }
-    if key.modifiers.contains(KeyModifiers::SHIFT) && !matches!(key.code, KeyCode::Char(_)) {
+    if key.modifiers.contains(KeyModifiers::SHIFT)
+        && (!matches!(key.code, KeyCode::Char(_))
+            || key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT))
+    {
         parts.push("shift".to_string());
     }
     parts.push(match key.code {
@@ -177,25 +135,6 @@ pub fn key_repr(key: KeyEvent) -> String {
         KeyCode::Modifier(_) => "modifier".to_string(),
     });
     parts.join("+")
-}
-
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area);
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(vertical[1])[1]
 }
 
 #[cfg(test)]

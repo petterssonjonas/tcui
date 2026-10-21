@@ -98,7 +98,7 @@ impl fmt::Display for CodexCredential {
 pub(crate) enum CodexCredentialError {
     #[error("Codex CLI credentials could not be read")]
     Read,
-    #[error("Codex CLI credentials are malformed; run `codex login` or choose `--native`")]
+    #[error("Codex CLI credentials are malformed")]
     Malformed,
     #[error("Codex CLI credentials are stored in an unsafe file")]
     UnsafeFile,
@@ -134,7 +134,7 @@ pub(crate) fn resolve_credential(
         }
         return Ok(Some(CodexCredential::native(credential)));
     }
-    read_external_credential().map_err(CodexResolutionError::External)
+    Ok(None)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -143,8 +143,6 @@ pub(crate) enum CodexResolutionError {
     UnexpectedNativeCredential,
     #[error("TCUI Codex credential store is unavailable")]
     Store(#[from] KeyStoreError),
-    #[error("Codex CLI credentials are unavailable")]
-    External(#[from] CodexCredentialError),
 }
 
 fn read_external_credential_path(

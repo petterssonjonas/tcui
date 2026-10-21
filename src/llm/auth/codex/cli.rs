@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use tokio::process::{Child, Command};
 
-use super::credential::{read_external_credential, CodexCredential, CodexCredentialError};
+use super::credential::{read_external_credential, CodexCredentialError};
 use crate::llm::auth::oauth::OAuthCancellation;
 
 const CLI_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -15,31 +15,6 @@ const TERMINATION_GRACE: Duration = Duration::from_secs(2);
 const REAP_POLL_INTERVAL: Duration = Duration::from_millis(10);
 #[cfg(unix)]
 const KILL_REAP_TIMEOUT: Duration = Duration::from_secs(1);
-
-pub(crate) async fn login_with_cli(
-    headless: bool,
-    cancellation: &OAuthCancellation,
-) -> Result<CodexCredential, CodexCliError> {
-    match read_external_credential() {
-        Ok(Some(credential)) => return Ok(credential),
-        Ok(None) | Err(CodexCredentialError::Malformed) => {}
-        Err(CodexCredentialError::Read) => return Err(CodexCliError::CredentialRead),
-        Err(CodexCredentialError::UnsafeFile) => return Err(CodexCliError::UnsafeExternalFile),
-    }
-    let arguments = if headless {
-        ["login", "--device-auth"].as_slice()
-    } else {
-        ["login"].as_slice()
-    };
-    run_cli(arguments, cancellation).await?;
-    match read_external_credential() {
-        Ok(Some(credential)) => Ok(credential),
-        Ok(None) => Err(CodexCliError::PostLoginMissing),
-        Err(CodexCredentialError::Malformed) => Err(CodexCliError::PostLoginMalformed),
-        Err(CodexCredentialError::Read) => Err(CodexCliError::CredentialRead),
-        Err(CodexCredentialError::UnsafeFile) => Err(CodexCliError::UnsafeExternalFile),
-    }
-}
 
 pub(crate) async fn logout_external_cli(
     cancellation: &OAuthCancellation,
@@ -304,7 +279,7 @@ fn is_absent_io_error(error: &std::io::Error) -> bool {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CodexCliError {
     #[error(
-        "Codex CLI is unavailable. Install Codex and run `codex login`, or choose `--native`."
+        "Codex CLI is unavailable. Install Codex to explicitly log out its external credentials."
     )]
     MissingCli,
     #[error("Codex CLI could not be launched")]
@@ -317,10 +292,6 @@ pub(crate) enum CodexCliError {
     Cancelled,
     #[error("Codex CLI process could not be observed")]
     Wait,
-    #[error("Codex CLI did not create a usable credential after login")]
-    PostLoginMissing,
-    #[error("Codex CLI created malformed credentials after login")]
-    PostLoginMalformed,
     #[error("Codex CLI credential file could not be read")]
     CredentialRead,
     #[error("Codex CLI credential file is unsafe; correct its ownership and permissions first")]

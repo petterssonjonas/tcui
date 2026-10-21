@@ -50,6 +50,13 @@ impl MutationFixture {
 
     pub(super) fn config(&self) -> AppConfig {
         AppConfig {
+            providers: vec![crate::config::ProviderConfig {
+                name: "Ollama".to_string(),
+                endpoint: "http://127.0.0.1:9".to_string(),
+                env_var: String::new(),
+                backend_type: "openai".to_string(),
+                auth_type: "api_key".to_string(),
+            }],
             vaults: self.catalog.profiles.clone(),
             default_vault_id: Some(self.source_id.clone()),
             ..AppConfig::default()

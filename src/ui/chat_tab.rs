@@ -11,10 +11,14 @@ use ratatui::{
     Frame,
 };
 use ratatui_image::sliced::SignedPosition;
+use std::sync::LazyLock;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const INPUT_MARGIN_HORIZONTAL: u16 = 2;
 const INPUT_MARGIN_VERTICAL: u16 = 1;
+const USER_CONTENT_PADDING: u16 = 4;
+const COPY_CONTROL_INSET: u16 = 2;
+const RUN_CONTROL: &str = "[Run]";
 
 pub struct ChatTab<'a> {
     pub state: &'a mut crate::ui::ChatTabState,
@@ -31,6 +35,7 @@ pub struct ChatTab<'a> {
     pub providers: &'a [(String, String, String, String, String)],
     pub models: &'a [ModelInfo],
     pub reasoning_options: &'a [String],
+    pub show_cursor: bool,
 }
 
 pub struct ChatTabProps<'a> {
@@ -56,6 +61,8 @@ struct RenderedMessages {
     images: Vec<PositionedImage>,
     kitty_headings: Vec<RenderedKittyHeading>,
     answer_anchor_lines: Vec<(usize, usize)>,
+    copy_control_lines: Vec<(usize, usize)>,
+    command_control_lines: Vec<(usize, usize, u16)>,
 }
 
 struct ThinkingToggleLine {
@@ -108,10 +115,13 @@ impl<'a> ChatTab<'a> {
             providers: props.providers,
             models: props.models,
             reasoning_options: props.reasoning_options,
+            show_cursor: true,
         }
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
+        self.state.copy_hit_areas.clear();
+        self.state.command_hit_areas.clear();
         let is_empty = self.state.messages.is_empty();
         let input_height = if is_empty {
             centered_input_height(self.state, area)
@@ -170,7 +180,7 @@ impl<'a> ChatTab<'a> {
 
                 let labels: Vec<String> = visible_providers
                     .iter()
-                    .map(|(name, _, _, _, _)| name.clone())
+                    .map(|(name, _, _, _, _)| crate::ui::provider_display_name(name).to_string())
                     .collect();
                 let items: Vec<ListItem> = visible_providers
                     .iter()
@@ -406,7 +416,9 @@ impl<'a> ChatTab<'a> {
     }
 
     fn render_messages(&mut self, f: &mut Frame, area: Rect) {
-        if area.height == 0 {
+        self.state.copy_hit_areas.clear();
+        self.state.command_hit_areas.clear();
+        if area.height == 0 || area.width == 0 {
             self.state.thinking_hit_areas.clear();
             self.state.link_hit_areas.clear();
             self.state.chat_scrollbar_area = None;
@@ -416,9 +428,9 @@ impl<'a> ChatTab<'a> {
         let mut rendered = self.build_messages(area);
         let show_scrollbar = self.show_chat_scrollbar
             && rendered.lines.len() > area.height as usize
-            && area.width > 1;
+            && area.width > 2;
         let viewport = if show_scrollbar {
-            Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height)
+            Rect::new(area.x, area.y, area.width.saturating_sub(2), area.height)
         } else {
             area
         };
@@ -484,6 +496,35 @@ impl<'a> ChatTab<'a> {
                 ));
             }
         }
+        let copy_width = copy_icon().width() as u16;
+        for (message_idx, line) in rendered.copy_control_lines {
+            if line >= scroll_offset && line < scroll_offset + viewport.height as usize {
+                self.state.copy_hit_areas.push((
+                    message_idx,
+                    Rect::new(
+                        viewport
+                            .right()
+                            .saturating_sub(copy_width + copy_control_inset(viewport.width)),
+                        viewport.y + (line - scroll_offset) as u16,
+                        copy_width,
+                        1,
+                    ),
+                ));
+            }
+        }
+        for (message_idx, line, column) in rendered.command_control_lines {
+            if line >= scroll_offset && line < scroll_offset + viewport.height as usize {
+                self.state.command_hit_areas.push((
+                    message_idx,
+                    Rect::new(
+                        viewport.x + column,
+                        viewport.y + (line - scroll_offset) as u16,
+                        RUN_CONTROL.len() as u16,
+                        1,
+                    ),
+                ));
+            }
+        }
 
         let list = Paragraph::new(rendered.lines)
             .block(Block::default().borders(Borders::NONE))
@@ -493,7 +534,7 @@ impl<'a> ChatTab<'a> {
         self.render_kitty_headings(f, viewport, scroll_offset, &rendered.kitty_headings);
         self.render_images(f, viewport, scroll_offset, &rendered.images);
         if show_scrollbar {
-            let track = Rect::new(viewport.right(), viewport.y, 1, viewport.height);
+            let track = Rect::new(viewport.right() + 1, viewport.y, 1, viewport.height);
             let thumb =
                 scrollbar_thumb(track, total_lines, viewport.height as usize, scroll_offset);
             self.state.chat_scrollbar_area = Some(track);
@@ -520,11 +561,14 @@ impl<'a> ChatTab<'a> {
         let mut images = Vec::new();
         let mut kitty_headings = Vec::new();
         let mut answer_anchor_lines = Vec::new();
+        let mut copy_control_lines = Vec::new();
+        let mut command_control_lines = Vec::new();
         let content_width = area.width.saturating_sub(2) as usize;
         let assistant_box_width = area.width.max(2);
         let assistant_inner_width = assistant_box_width.saturating_sub(2) as usize;
-        let user_box_width = area.width.saturating_mul(3).max(4) / 4;
-        let user_inner_width = user_box_width.saturating_sub(4) as usize;
+        let user_box_width = (area.width.saturating_mul(3).max(4) / 4).min(area.width);
+        let user_padding = USER_CONTENT_PADDING.min(user_box_width.saturating_sub(1) / 2);
+        let user_inner_width = user_box_width.saturating_sub(user_padding * 2) as usize;
         let user_x_offset = aligned_box_inset(area.width, user_box_width, self.user_alignment);
         let thinking_box_width = area.width.saturating_mul(4) / 5;
         let thinking_box_width = thinking_box_width.max(4).min(area.width);
@@ -630,6 +674,7 @@ impl<'a> ChatTab<'a> {
                             lines.push(box_content_line(
                                 thinking_x_offset as usize,
                                 thinking_inner_width,
+                                "  ",
                                 line,
                                 Style::default().bg(Color::Black),
                             ));
@@ -693,15 +738,24 @@ impl<'a> ChatTab<'a> {
                         Alignment::Left
                     },
                 ));
+                lines.push(box_bottom_line(
+                    user_x_offset as usize,
+                    user_box_width as usize,
+                    Style::default().bg(theme.user_bubble),
+                ));
                 lines.len()
             } else if is_assistant {
-                lines.push(Line::from(Span::styled(
-                    "Assistant",
-                    Style::default()
-                        .fg(assistant_label_color(theme))
-                        .bg(theme.assistant_bubble)
-                        .add_modifier(Modifier::BOLD),
-                )));
+                if area.width as usize >= copy_icon().width() {
+                    copy_control_lines.push((idx, lines.len()));
+                }
+                let command_column = (!is_last_streaming
+                    && crate::ui::command_blocks::has_shell_blocks(&m.content))
+                .then(|| command_control_column(area.width))
+                .flatten();
+                if let Some(column) = command_column {
+                    command_control_lines.push((idx, lines.len(), column));
+                }
+                lines.push(assistant_header_line(area.width, theme, command_column));
                 lines.len()
             } else {
                 lines.len()
@@ -724,7 +778,7 @@ impl<'a> ChatTab<'a> {
                     style: heading.style,
                     alignment: alignment.as_ratatui(),
                     x_offset: if is_user {
-                        user_x_offset.saturating_add(2)
+                        user_x_offset.saturating_add(user_padding)
                     } else {
                         0
                     },
@@ -746,7 +800,7 @@ impl<'a> ChatTab<'a> {
                         source: image.source,
                     },
                     x_offset: if is_user {
-                        user_x_offset.saturating_add(2)
+                        user_x_offset.saturating_add(user_padding)
                     } else {
                         0
                     },
@@ -760,7 +814,7 @@ impl<'a> ChatTab<'a> {
             for mut target in rendered.link_targets {
                 if is_user {
                     let pad = content_pads.get(target.line).copied().unwrap_or_default();
-                    target.column += user_x_offset as usize + 2 + pad;
+                    target.column += user_x_offset as usize + user_padding as usize + pad;
                 }
                 target.line += assistant_content_start;
                 link_targets.push(target);
@@ -772,6 +826,7 @@ impl<'a> ChatTab<'a> {
                     lines.push(box_content_line(
                         user_x_offset as usize,
                         user_inner_width,
+                        &"    "[..user_padding as usize],
                         line,
                         Style::default().bg(theme.user_bubble),
                     ));
@@ -805,6 +860,8 @@ impl<'a> ChatTab<'a> {
             images,
             kitty_headings,
             answer_anchor_lines,
+            copy_control_lines,
+            command_control_lines,
         }
     }
 
@@ -975,7 +1032,7 @@ impl<'a> ChatTab<'a> {
                 thumb,
             );
         }
-        if inner.width > 0 && inner.height > 0 {
+        if self.show_cursor && inner.width > 0 && inner.height > 0 {
             f.set_cursor_position((
                 inner.x.saturating_add(layout.cursor_x),
                 inner.y.saturating_add(layout.cursor_y),
@@ -1031,7 +1088,11 @@ impl<'a> ChatTab<'a> {
         .block(
             Block::default()
                 .style(Style::default().bg(theme.panel))
-                .title(" Start a conversation ")
+                .title(if self.providers.is_empty() {
+                    " Add a provider with /connect "
+                } else {
+                    " Start a conversation "
+                })
                 .title_style(
                     Style::default()
                         .fg(theme.accent)
@@ -1064,7 +1125,7 @@ impl<'a> ChatTab<'a> {
                 thumb,
             );
         }
-        if inner.width > 0 && inner.height > 0 {
+        if self.show_cursor && inner.width > 0 && inner.height > 0 {
             f.set_cursor_position((
                 inner.x.saturating_add(layout.cursor_x),
                 inner.y.saturating_add(layout.cursor_y),
@@ -1102,7 +1163,8 @@ fn chat_messages_area(area: Rect) -> Rect {
     Rect::new(
         area.x.saturating_add(4),
         area.y,
-        area.width.saturating_sub(8),
+        // Keep one cell between transcript content and the scrollbar.
+        area.width.saturating_sub(7),
         area.height.saturating_sub(1),
     )
 }
@@ -1421,13 +1483,14 @@ fn box_top_line(
 fn box_content_line(
     inset: usize,
     width: usize,
+    padding: &'static str,
     line: Line<'static>,
     fill_style: Style,
 ) -> Line<'static> {
     let (left_pad, right_pad) = content_padding(width, &line);
     let mut spans = Vec::with_capacity(line.spans.len() + 5);
     spans.push(Span::raw(" ".repeat(inset)));
-    spans.push(Span::styled("  ", fill_style));
+    spans.push(Span::styled(padding, fill_style));
     spans.push(Span::styled(" ".repeat(left_pad), fill_style));
     let mut remaining = width.saturating_sub(left_pad + right_pad);
     for mut span in line.spans {
@@ -1452,7 +1515,7 @@ fn box_content_line(
         spans.push(span);
     }
     spans.push(Span::styled(" ".repeat(right_pad), fill_style));
-    spans.push(Span::styled("  ", fill_style));
+    spans.push(Span::styled(padding, fill_style));
     let mut line = Line::from(spans);
     line.style = Style::default();
     line
@@ -1480,6 +1543,60 @@ fn aligned_box_inset(total_width: u16, box_width: u16, alignment: TextAlignment)
         TextAlignment::Middle => remaining / 2,
         TextAlignment::Right => remaining,
     }
+}
+
+fn copy_icon() -> &'static str {
+    static ICON: LazyLock<&'static str> = LazyLock::new(|| {
+        // Terminals do not expose font coverage; allow an explicit portable fallback.
+        match std::env::var("TCUI_COPY_ICON").as_deref() {
+            Ok("ascii") => "[c]",
+            Ok("unicode") => "⧉",
+            _ => "\u{f0c5}",
+        }
+    });
+    *ICON
+}
+
+fn copy_control_inset(width: u16) -> u16 {
+    COPY_CONTROL_INSET.min(width.saturating_sub(copy_icon().width() as u16))
+}
+
+fn command_control_column(width: u16) -> Option<u16> {
+    let controls =
+        copy_icon().width() as u16 + copy_control_inset(width) + 2 + RUN_CONTROL.len() as u16;
+    (width > controls).then(|| width - controls)
+}
+
+fn assistant_header_line(
+    width: u16,
+    theme: crate::theme::ThemeSpec,
+    command_column: Option<u16>,
+) -> Line<'static> {
+    let label = "Assistant";
+    let inset = copy_control_inset(width) as usize;
+    let width = width as usize - inset;
+    let icon = copy_icon();
+    let icon_width = icon.width();
+    let label_end = command_column
+        .map(usize::from)
+        .unwrap_or_else(|| width.saturating_sub(icon_width));
+    let label_width = label.len().min(label_end.saturating_sub(1));
+    let mut spans = vec![Span::styled(
+        &label[..label_width],
+        Style::default()
+            .fg(assistant_label_color(theme))
+            .add_modifier(Modifier::BOLD),
+    )];
+    if width >= icon_width {
+        spans.push(Span::raw(" ".repeat(label_end.saturating_sub(label_width))));
+        if command_column.is_some() {
+            spans.push(Span::styled(RUN_CONTROL, Style::default().fg(theme.accent)));
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(icon, Style::default().fg(theme.muted)));
+        spans.push(Span::raw(&"  "[..inset]));
+    }
+    Line::from(spans).style(Style::default().bg(theme.assistant_bubble))
 }
 
 fn assistant_label_color(theme: crate::theme::ThemeSpec) -> Color {
@@ -1523,6 +1640,202 @@ mod tests {
     use super::*;
     use crate::ui::components::terminal_capabilities::{TerminalCapabilities, TerminalKind};
     use ratatui::{backend::TestBackend, Terminal};
+
+    fn copy_test_chat(state: &mut crate::ui::ChatTabState) -> ChatTab<'_> {
+        ChatTab::new(
+            state,
+            ChatTabProps {
+                user_alignment: TextAlignment::Left,
+                ai_alignment: TextAlignment::Left,
+                markdown_mode: MarkdownMode::Off,
+                collapse_thinking: true,
+                show_chat_scrollbar: false,
+                kitty_enhanced_text: false,
+                kitty_heading_downscale: HeadingDownscale::None,
+                image_protocol: "off",
+                terminal_capabilities: TerminalCapabilities {
+                    terminal: TerminalKind::Unknown,
+                    multiplexer: None,
+                    kitty_graphics: false,
+                    kitty_text_sizing: false,
+                    tmux_passthrough: false,
+                },
+                frame_tick: 0,
+                providers: &[],
+                models: &[],
+                reasoning_options: &[],
+            },
+        )
+    }
+
+    #[test]
+    fn short_answer_has_only_top_right_copy_control_without_obscuring_text() {
+        let mut ui = crate::ui::UI::new();
+        for (role, content) in [("user", "Question"), ("assistant", "Complete answer")] {
+            ui.tabs[0].messages.push(crate::app::message::Message::new(
+                1,
+                role.to_string(),
+                content.to_string(),
+            ));
+        }
+        let mut chat = copy_test_chat(&mut ui.tabs[0]);
+        let viewport = Rect::new(2, 1, 30, 8);
+        let rendered = chat.build_messages(viewport);
+        let header_row = rendered.copy_control_lines[0].1 as u16;
+        let mut terminal = Terminal::new(TestBackend::new(34, 10)).expect("test terminal");
+
+        terminal
+            .draw(|frame| chat.render_messages(frame, viewport))
+            .expect("render short answer");
+
+        let button = Rect::new(
+            viewport.right() - copy_icon().width() as u16 - COPY_CONTROL_INSET,
+            viewport.y + header_row,
+            copy_icon().width() as u16,
+            1,
+        );
+        assert_eq!(chat.state.copy_hit_areas, vec![(1, button)]);
+        let buffer = terminal.backend().buffer();
+        assert_eq!(
+            buffer[(button.x, button.y)].symbol(),
+            copy_icon().chars().next().expect("copy glyph").to_string()
+        );
+        assert!(terminal.backend().to_string().contains("Complete answer"));
+    }
+
+    #[test]
+    fn shell_command_control_is_visible_only_for_complete_nonstreaming_assistant_code() {
+        let mut ui = crate::ui::UI::new();
+        ui.tabs[0].messages.push(crate::app::message::Message::new(
+            1,
+            "assistant".into(),
+            "```bash\nprintf 'approved only\\n'\n```".into(),
+        ));
+        let mut chat = copy_test_chat(&mut ui.tabs[0]);
+        let area = Rect::new(0, 0, 60, 10);
+        let mut terminal = Terminal::new(TestBackend::new(60, 10)).expect("test terminal");
+        terminal
+            .draw(|frame| chat.render_messages(frame, area))
+            .expect("render commands");
+        let run = chat.state.command_hit_areas[0].1;
+        let copy = chat.state.copy_hit_areas[0].1;
+        assert_eq!(run.y, copy.y);
+        assert!(run.right() < copy.x);
+        assert_eq!(terminal.backend().buffer()[(run.x, run.y)].symbol(), "[");
+        chat.state.streaming = true;
+        terminal
+            .draw(|frame| chat.render_messages(frame, area))
+            .expect("render streaming");
+        assert!(chat.state.command_hit_areas.is_empty());
+        chat.state.streaming = false;
+        chat.state.messages[0].content = "```bash\nprintf pending".into();
+        terminal
+            .draw(|frame| chat.render_messages(frame, area))
+            .expect("render incomplete");
+        assert!(chat.state.command_hit_areas.is_empty());
+        chat.state.messages[0].role = "user".into();
+        chat.state.messages[0].content = "```sh\npwd\n```".into();
+        terminal
+            .draw(|frame| chat.render_messages(frame, area))
+            .expect("render user");
+        assert!(chat.state.command_hit_areas.is_empty());
+    }
+
+    #[test]
+    fn scrolling_clips_top_copy_control_without_adding_a_footer() {
+        let mut ui = crate::ui::UI::new();
+        ui.tabs[0].messages.push(crate::app::message::Message::new(
+            1,
+            "assistant".to_string(),
+            (0..12)
+                .map(|idx| format!("answer {idx}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ));
+        let mut chat = copy_test_chat(&mut ui.tabs[0]);
+        chat.show_chat_scrollbar = true;
+        let viewport = Rect::new(2, 1, 25, 4);
+        let mut terminal = Terminal::new(TestBackend::new(30, 6)).expect("test terminal");
+
+        terminal
+            .draw(|frame| chat.render_messages(frame, viewport))
+            .expect("render answer start");
+        let top_button = chat.state.copy_hit_areas[0].1;
+        assert_eq!(chat.state.copy_hit_areas.len(), 1);
+        assert_eq!(top_button.y, viewport.y);
+        assert_eq!(
+            top_button.right(),
+            viewport.right() - 2 - COPY_CONTROL_INSET
+        );
+        let track = chat.state.chat_scrollbar_area.expect("scrollbar track");
+        assert_eq!(track.x, viewport.right() - 1);
+        let gutter_x = track.x - 1;
+        for y in viewport.y..viewport.bottom() {
+            assert_eq!(terminal.backend().buffer()[(gutter_x, y)].symbol(), " ");
+        }
+
+        chat.state.scroll_offset = 3;
+        terminal
+            .draw(|frame| chat.render_messages(frame, viewport))
+            .expect("render answer middle");
+        assert!(chat.state.copy_hit_areas.is_empty());
+
+        chat.state.scroll_offset = usize::MAX;
+        terminal
+            .draw(|frame| chat.render_messages(frame, viewport))
+            .expect("render answer end");
+        assert!(chat.state.copy_hit_areas.is_empty());
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("answer 11"), "{screen}");
+    }
+
+    #[test]
+    fn empty_and_zero_size_views_clear_copy_hit_areas() {
+        let mut ui = crate::ui::UI::new();
+        let mut chat = copy_test_chat(&mut ui.tabs[0]);
+        let mut terminal = Terminal::new(TestBackend::new(30, 10)).expect("test terminal");
+        for area in [Rect::new(0, 0, 0, 4), Rect::new(0, 0, 20, 0)] {
+            chat.state.copy_hit_areas.push((0, Rect::new(1, 1, 3, 1)));
+            terminal
+                .draw(|frame| chat.render_messages(frame, area))
+                .expect("render zero-size messages");
+            assert!(chat.state.copy_hit_areas.is_empty());
+        }
+        chat.state.copy_hit_areas.push((0, Rect::new(1, 1, 3, 1)));
+        terminal
+            .draw(|frame| chat.render(frame, Rect::new(0, 0, 30, 10)))
+            .expect("render empty conversation");
+        assert!(chat.state.copy_hit_areas.is_empty());
+    }
+
+    #[test]
+    fn narrow_copy_controls_stay_inside_viewport_and_match_drawn_icon() {
+        let mut ui = crate::ui::UI::new();
+        ui.tabs[0].messages.push(crate::app::message::Message::new(
+            1,
+            "assistant".to_string(),
+            "answer".to_string(),
+        ));
+        let mut chat = copy_test_chat(&mut ui.tabs[0]);
+        let mut terminal = Terminal::new(TestBackend::new(20, 6)).expect("test terminal");
+        for width in 1..=12 {
+            let area = Rect::new(2, 1, width, 4);
+            terminal
+                .draw(|frame| chat.render_messages(frame, area))
+                .expect("render narrow answer");
+            if width < copy_icon().width() as u16 {
+                assert!(chat.state.copy_hit_areas.is_empty());
+                continue;
+            }
+            for (_, button) in &chat.state.copy_hit_areas {
+                assert!(button.x >= area.x && button.right() <= area.right());
+                assert_eq!(
+                    terminal.backend().buffer()[(button.x, button.y)].symbol(),
+                    copy_icon().chars().next().expect("copy glyph").to_string()
+                );
+            }
+        }
+    }
 
     #[test]
     fn skill_mentions_on_one_line_have_independent_hit_areas() {
@@ -1697,7 +2010,7 @@ mod tests {
             Span::styled("5678", Style::default().fg(Color::Green)),
         ]);
 
-        let boxed = box_content_line(1, 5, line, Style::default().bg(Color::Blue));
+        let boxed = box_content_line(1, 5, "  ", line, Style::default().bg(Color::Blue));
 
         assert_eq!(boxed.width(), 10);
         assert_eq!(boxed.to_string(), "   12345  ");
@@ -1705,7 +2018,13 @@ mod tests {
 
     #[test]
     fn boxed_content_background_stops_at_box_boundary() {
-        let boxed = box_content_line(1, 5, Line::from("12345"), Style::default().bg(Color::Blue));
+        let boxed = box_content_line(
+            1,
+            5,
+            "  ",
+            Line::from("12345"),
+            Style::default().bg(Color::Blue),
+        );
         let mut terminal = Terminal::new(TestBackend::new(20, 1)).expect("test terminal");
 
         terminal
@@ -1875,23 +2194,69 @@ mod tests {
     }
 
     #[test]
-    fn user_bubble_uses_seventy_five_percent_width_and_requested_alignment() {
-        let total_width = 60;
-        let bubble_width = total_width * 3 / 4;
+    fn user_padding_keeps_title_row_and_link_hit_areas_aligned() {
+        let mut ui = crate::ui::UI::new();
+        ui.tabs[0].messages.push(crate::app::message::Message::new(
+            1,
+            "user".to_string(),
+            "[Question](https://example.com)".to_string(),
+        ));
+        let mut chat = copy_test_chat(&mut ui.tabs[0]);
+        chat.markdown_mode = MarkdownMode::Full;
+        let area = Rect::new(2, 1, 60, 8);
+        let mut terminal = Terminal::new(TestBackend::new(64, 10)).expect("test terminal");
+        for alignment in [
+            TextAlignment::Left,
+            TextAlignment::Middle,
+            TextAlignment::Right,
+        ] {
+            chat.user_alignment = alignment;
+            let rendered = chat.build_messages(area);
+            assert!(rendered.lines[0]
+                .spans
+                .iter()
+                .any(|span| span.style.fg == Some(Color::Cyan)));
+            assert!(rendered.lines[1].to_string().trim().is_empty());
+            let content = &rendered.lines[2];
+            let inset = aligned_box_inset(area.width, 45, alignment) as usize;
+            let padding = alignment_padding_for(37, "Question".len(), alignment.as_ratatui());
+            let text_column = inset + USER_CONTENT_PADDING as usize + padding;
+            assert_eq!(content.to_string().find("Question"), Some(text_column));
+            terminal
+                .draw(|frame| chat.render_messages(frame, area))
+                .expect("render padded user link");
+            let (hit, target) = &chat.state.link_hit_areas[0];
+            assert_eq!(target, "https://example.com");
+            assert_eq!(
+                *hit,
+                Rect::new(area.x + text_column as u16, area.y + 2, 8, 1)
+            );
+            assert_eq!(terminal.backend().buffer()[(hit.x, hit.y)].symbol(), "Q");
+        }
+    }
 
-        assert_eq!(bubble_width, 45);
-        assert_eq!(
-            aligned_box_inset(total_width, bubble_width, TextAlignment::Left),
-            0
-        );
-        assert_eq!(
-            aligned_box_inset(total_width, bubble_width, TextAlignment::Middle),
-            7
-        );
-        assert_eq!(
-            aligned_box_inset(total_width, bubble_width, TextAlignment::Right),
-            15
-        );
+    #[test]
+    fn narrow_user_bubbles_preserve_wrapped_text_within_viewport() {
+        let mut ui = crate::ui::UI::new();
+        ui.tabs[0].messages.push(crate::app::message::Message::new(
+            1,
+            "user".to_string(),
+            "abcdefghijk".to_string(),
+        ));
+        let mut chat = copy_test_chat(&mut ui.tabs[0]);
+        chat.markdown_mode = MarkdownMode::Full;
+        for width in 1..=20 {
+            let rendered = chat.build_messages(Rect::new(0, 0, width, 30));
+            let content = &rendered.lines[2..rendered.lines.len() - 2];
+            assert!(content.iter().all(|line| line.width() <= width as usize));
+            assert_eq!(
+                content
+                    .iter()
+                    .map(|line| line.to_string().trim().to_string())
+                    .collect::<String>(),
+                "abcdefghijk"
+            );
+        }
     }
 
     #[test]

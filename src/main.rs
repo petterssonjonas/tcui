@@ -6,8 +6,9 @@ use color_eyre::Result;
 use crossterm::{
     cursor::SetCursorStyle,
     event::{
-        DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
@@ -20,6 +21,7 @@ use tokio::sync::RwLock;
 
 mod app;
 mod auth_command;
+mod clipboard;
 mod config;
 mod diagnostics;
 mod event;
@@ -111,7 +113,8 @@ fn setup_terminal() -> Result<TerminalType> {
         let _ = execute!(terminal.backend_mut(), SetTitle("TermChatUI"));
         let _ = execute!(terminal.backend_mut(), EnableMouseCapture);
         let _ = execute!(terminal.backend_mut(), EnableFocusChange);
-        let _ = execute!(terminal.backend_mut(), SetCursorStyle::SteadyBlock);
+        let _ = execute!(terminal.backend_mut(), EnableBracketedPaste);
+        let _ = execute!(terminal.backend_mut(), SetCursorStyle::SteadyBar);
         let _ = execute!(
             terminal.backend_mut(),
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
@@ -127,6 +130,7 @@ fn restore_terminal() {
     if is_tty {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
         let _ = execute!(io::stdout(), DisableFocusChange);
+        let _ = execute!(io::stdout(), DisableBracketedPaste);
         let _ = execute!(io::stdout(), DisableMouseCapture);
         let _ = execute!(io::stdout(), SetCursorStyle::DefaultUserShape);
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
@@ -195,6 +199,7 @@ async fn main() -> Result<()> {
         vault,
     );
     app.queue_update_check();
+    app.prompt_credential_vault_at_launch();
 
     app.ui
         .show_toast("Welcome to TCUI.\nType /help for instructions.".to_string());

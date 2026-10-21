@@ -66,13 +66,20 @@ pub(crate) fn prepare_chat_request(
     }
 
     let codex_session = match request.backend_type.trim() {
-        "anthropic" => {
+        "anthropic" | "anthropic_sdk" => {
             let has_api_key = request
                 .api_key
                 .as_deref()
                 .is_some_and(|key| !key.trim().is_empty());
             if !has_api_key {
                 return Err(eyre!("Missing Anthropic API key."));
+            }
+            if request.backend_type.trim() == "anthropic_sdk"
+                && request.endpoint.trim_end_matches('/') != "https://api.anthropic.com/v1"
+            {
+                return Err(eyre!(
+                    "Anthropic Agent SDK requires the official Anthropic endpoint."
+                ));
             }
             validate_credential_endpoint(&request)?;
             None
@@ -90,6 +97,16 @@ pub(crate) fn prepare_chat_request(
             if crate::llm::auth::canonical_provider_name(&request.provider) == "Codex" {
                 return Err(eyre!(
                     "Codex OAuth credentials must use the dedicated Codex Responses backend."
+                ));
+            }
+            if !crate::llm::local::is_local_provider(&request.provider)
+                && !request
+                    .api_key
+                    .as_deref()
+                    .is_some_and(|key| !key.trim().is_empty())
+            {
+                return Err(eyre!(
+                    "No saved provider credential. Use /connect, or /vault to unlock credentials."
                 ));
             }
             if request
@@ -112,7 +129,7 @@ pub(crate) fn prepare_chat_request(
 
 pub(crate) fn serialize_request_body(request: &ChatRequest) -> color_eyre::Result<Vec<u8>> {
     match request.backend_type.trim() {
-        "anthropic" => Ok(serde_json::to_vec(&anthropic_request(request))?),
+        "anthropic" | "anthropic_sdk" => Ok(serde_json::to_vec(&anthropic_request(request))?),
         "codex" => crate::llm::codex_responses::serialize_request_body(request),
         _ => Ok(serde_json::to_vec(&openai_request(request))?),
     }
@@ -183,7 +200,7 @@ struct AnthropicResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct AnthropicStreamEvent {
+pub(super) struct AnthropicStreamEvent {
     delta: Option<AnthropicDelta>,
     error: Option<WireError>,
 }
@@ -252,11 +269,15 @@ where
         codex_session,
     } = prepared;
     crate::diagnostics::provider_request(&request.provider, &request.endpoint, &request.model);
+    if request.backend_type.trim() == "anthropic_sdk" {
+        return crate::llm::anthropic_sdk::stream(&request, body, &mut on_event).await;
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
 
-    match request.backend_type.trim() {
+    let result = match request.backend_type.trim() {
         "anthropic" => stream_anthropic(&client, &request, body, &mut on_event).await,
         "codex" => {
             let Some(session) = codex_session else {
@@ -272,7 +293,22 @@ where
             .await
         }
         _ => stream_openai_compatible(&client, &request, body, &mut on_event).await,
-    }
+    };
+    result.map_err(|error| {
+        let message = error.to_string();
+        if request
+            .api_key
+            .as_deref()
+            .is_some_and(|key| !key.is_empty() && message.contains(key))
+        {
+            eyre!(
+                "{}",
+                crate::llm::auth::redact_known_secret(&message, request.api_key.as_deref())
+            )
+        } else {
+            error
+        }
+    })
 }
 
 async fn stream_openai_compatible<F>(
@@ -306,10 +342,19 @@ where
         }
         builder = builder.bearer_auth(api_key);
     }
-    if request.provider == "OpenRouter" {
+    if matches!(request.provider.as_str(), "OpenRouter" | "OpenRouter OAuth") {
         builder = builder
             .header("HTTP-Referer", "https://github.com/jp/TermChatUI")
             .header("X-Title", "TermChatUI");
+    }
+    if request.provider == "OpenCode Go" {
+        builder = builder.header("User-Agent", concat!("tcui/", env!("CARGO_PKG_VERSION")));
+        if let Some(message) = request.messages.first() {
+            builder = builder.header(
+                "x-opencode-session",
+                format!("tcui-conversation-{}", message.conversation_id),
+            );
+        }
     }
 
     let response = builder.send().await.inspect_err(|err| {
@@ -318,7 +363,13 @@ where
     let status = response.status();
     crate::diagnostics::provider_response(&request.provider, status);
     if !status.is_success() {
-        return provider_http_error(response, status, &request.provider).await;
+        return provider_http_error(
+            response,
+            status,
+            &request.provider,
+            request.api_key.as_deref(),
+        )
+        .await;
     }
 
     let mut output = ChatStreamOutput::default();
@@ -371,7 +422,13 @@ where
     let status = response.status();
     crate::diagnostics::provider_response(&request.provider, status);
     if !status.is_success() {
-        return provider_http_error(response, status, &request.provider).await;
+        return provider_http_error(
+            response,
+            status,
+            &request.provider,
+            request.api_key.as_deref(),
+        )
+        .await;
     }
 
     let mut output = ChatStreamOutput::default();
@@ -453,6 +510,7 @@ async fn provider_http_error<T>(
     response: reqwest::Response,
     status: reqwest::StatusCode,
     provider: &str,
+    api_key: Option<&str>,
 ) -> color_eyre::Result<T> {
     let body = response.text().await?;
     let message = serde_json::from_str::<WireResponse>(&body)
@@ -464,8 +522,9 @@ async fn provider_http_error<T>(
                 .and_then(|body| body.error.map(|error| error.message))
         })
         .unwrap_or_else(|| format!("Provider returned HTTP {status}"));
+    let message = crate::llm::auth::redact_known_secret(&message, api_key);
     crate::diagnostics::provider_error(provider, &message);
-    Err(eyre!("{}", crate::llm::auth::redact_secrets(&message)))
+    Err(eyre!("{}", message))
 }
 
 pub(super) async fn read_sse<F>(
@@ -594,7 +653,13 @@ fn anthropic_stream_events(
     data: &str,
     title_filter: &mut TitleTagFilter,
 ) -> color_eyre::Result<Vec<ChatStreamEvent>> {
-    let parsed: AnthropicStreamEvent = serde_json::from_str(data)?;
+    anthropic_events(serde_json::from_str(data)?, title_filter)
+}
+
+pub(super) fn anthropic_events(
+    parsed: AnthropicStreamEvent,
+    title_filter: &mut TitleTagFilter,
+) -> color_eyre::Result<Vec<ChatStreamEvent>> {
     if let Some(error) = parsed.error {
         return Err(eyre!(
             "{}",

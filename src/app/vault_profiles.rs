@@ -80,6 +80,13 @@ impl TuiApp {
     }
 
     pub(crate) fn request_app_tab_close(&mut self, tab_id: AppTabId) {
+        if let Some(AppView::Terminal { session_id }) =
+            self.ui.app_tabs.tab(tab_id).map(|tab| tab.view())
+        {
+            let session_id = *session_id;
+            self.request_terminal_close(session_id);
+            return;
+        }
         let _ = self.request_vault_action(PendingVaultAction::CloseTab { tab_id });
     }
 
@@ -221,7 +228,10 @@ impl TuiApp {
             .iter()
             .filter_map(|tab| match tab.view() {
                 AppView::MarkdownVault { profile_id } => Some(profile_id.clone()),
-                AppView::Chat | AppView::Launcher => None,
+                AppView::Chat
+                | AppView::Launcher
+                | AppView::Terminal { .. }
+                | AppView::Settings => None,
                 #[cfg(test)]
                 AppView::Placeholder { .. } => None,
             })

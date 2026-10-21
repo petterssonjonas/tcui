@@ -229,6 +229,7 @@ pub struct NtfyConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NotificationConfig {
+    /// Allow automatic delivery through Herdr, a supported terminal, or local DBus.
     pub desktop: bool,
     pub ntfy: NtfyConfig,
 }
@@ -265,7 +266,6 @@ pub struct AppConfig {
     #[serde(default, alias = "kitty_text_max_scale")]
     pub kitty_heading_downscale: HeadingDownscale,
     pub quit_confirmation: bool,
-    pub use_env_keys: bool,
     pub disabled_providers: Vec<String>,
     pub disabled_models: Vec<String>,
     pub key_file: Option<String>,
@@ -362,7 +362,6 @@ impl Default for AppConfig {
             kitty_enhanced_text: false,
             kitty_heading_downscale: HeadingDownscale::None,
             quit_confirmation: true,
-            use_env_keys: false,
             disabled_providers: Vec::new(),
             disabled_models: Vec::new(),
             key_file: None,
@@ -382,7 +381,7 @@ impl Default for AppConfig {
             tui: crate::config::tui::TuiConfig::default(),
             #[cfg(feature = "memory")]
             memory: crate::memory::MemoryConfig::default(),
-            providers: default_providers(),
+            providers: Vec::new(),
             mcp_servers: default_mcp_servers(),
             tab_configs: vec![TabConfig {
                 name: "Local".to_string(),
@@ -470,7 +469,7 @@ impl Default for ProviderConfig {
     }
 }
 
-fn default_providers() -> Vec<ProviderConfig> {
+pub fn provider_presets() -> Vec<ProviderConfig> {
     [
         (
             "OpenAI",
@@ -498,6 +497,20 @@ fn default_providers() -> Vec<ProviderConfig> {
             "https://openrouter.ai/api/v1",
             "OPENROUTER_API_KEY",
             "openrouter",
+            "api_key",
+        ),
+        (
+            "OpenRouter OAuth",
+            "https://openrouter.ai/api/v1",
+            "",
+            "openrouter",
+            "oauth",
+        ),
+        (
+            "Anthropic Agent SDK",
+            "https://api.anthropic.com/v1",
+            "",
+            "anthropic_sdk",
             "api_key",
         ),
         (
@@ -543,13 +556,6 @@ fn default_providers() -> Vec<ProviderConfig> {
             "api_key",
         ),
         (
-            "Gemini",
-            "https://generativelanguage.googleapis.com/v1beta/openai",
-            "GEMINI_API_KEY",
-            "gemini",
-            "oauth",
-        ),
-        (
             "Codex",
             "https://chatgpt.com/backend-api/codex",
             "CODEX_API_KEY",
@@ -571,30 +577,10 @@ fn default_providers() -> Vec<ProviderConfig> {
 }
 
 fn default_mcp_servers() -> Vec<McpServerConfig> {
-    vec![
-        McpServerConfig {
-            name: "Exa".to_string(),
-            transport: "streamable_http".to_string(),
-            url: Some("https://mcp.exa.ai/mcp".to_string()),
-            enabled: false,
-            ..McpServerConfig::default()
-        },
-        McpServerConfig {
-            name: "Tavily".to_string(),
-            transport: "streamable_http".to_string(),
-            url: Some("https://mcp.tavily.com/mcp/".to_string()),
-            enabled: false,
-            ..McpServerConfig::default()
-        },
-        McpServerConfig {
-            name: "Firecrawl".to_string(),
-            transport: "stdio".to_string(),
-            command: Some("npx".to_string()),
-            args: Some(vec!["-y".to_string(), "firecrawl-mcp".to_string()]),
-            enabled: false,
-            ..McpServerConfig::default()
-        },
-    ]
+    crate::mcp::profiles()
+        .iter()
+        .map(|profile| profile.config(false))
+        .collect()
 }
 
 #[cfg(test)]
@@ -642,49 +628,11 @@ kitty_text_max_scale = 1
     }
 
     #[test]
-    fn default_config_matches_expected_defaults() {
-        let config = AppConfig::default();
-
-        assert_eq!(config.theme, "system");
-        assert_eq!(config.default_model, "gpt-4o");
-        assert_eq!(config.default_provider, "openai");
-        assert_eq!(config.markdown_mode, MarkdownMode::Full);
-        assert!(config.quit_confirmation);
-        assert!(config.collapse_thinking);
-        assert!(!config.use_env_keys);
-        assert_eq!(config.image_protocol, "auto");
-        assert!(!config.providers.is_empty());
-    }
-
-    #[test]
-    fn provider_entries_returns_name_endpoint_env_backend_auth() {
-        let config = AppConfig::default();
-        let entries = config.provider_entries();
-
-        assert!(!entries.is_empty());
-        let openai = entries
-            .iter()
-            .find(|(name, _, _, _, _)| name == "OpenAI")
-            .expect("OpenAI provider");
-        assert_eq!(openai.1, "https://api.openai.com/v1");
-        assert_eq!(openai.2, "OPENAI_API_KEY");
-        assert_eq!(openai.3, "openai");
-        assert_eq!(openai.4, "api_key");
-    }
-
-    #[test]
-    fn codex_default_uses_the_subscription_responses_backend() {
-        let config = AppConfig::default();
-        let codex = config.provider_config("Codex").expect("find Codex");
-
-        assert_eq!(codex.endpoint, "https://chatgpt.com/backend-api/codex");
-        assert_eq!(codex.backend_type, "codex");
-        assert_eq!(codex.auth_type, "oauth");
-    }
-
-    #[test]
     fn provider_config_finds_by_name_case_insensitive() {
-        let config = AppConfig::default();
+        let config = AppConfig {
+            providers: provider_presets(),
+            ..AppConfig::default()
+        };
 
         let openai = config.provider_config("openai").expect("find openai");
         assert_eq!(openai.name, "OpenAI");

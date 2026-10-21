@@ -18,7 +18,7 @@ async fn native_device_login_reports_missing_codex_entitlement(
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");
-    let environment = TestEnvironment::new("codex-native-device-entitlement")?;
+    let _environment = TestEnvironment::new("codex-native-device-entitlement")?;
     let (base, server) = entitlement_server().await?;
     let adapter = CodexNativeAdapter::fixture(
         "https://authorize.example.test/oauth/authorize",
@@ -41,7 +41,7 @@ async fn native_device_login_reports_missing_codex_entitlement(
     ));
     assert_eq!(requests.len(), 2);
     assert!(requests[1].contains("/device/poll"));
-    assert!(!environment.root.join("data/tcui/keys.toml").exists());
+    assert!(KeyStore::get_oauth(&AppConfig::default(), "Codex")?.is_none());
     Ok(())
 }
 
@@ -97,9 +97,13 @@ async fn native_device_login_exchanges_user_code_and_persists_encrypted_credenti
     assert_eq!(stored.account_id.as_deref(), Some("device-account"));
     assert_eq!(stored.ownership, OAuthCredentialOwnership::Tcui);
     assert_eq!(stored.source, OAuthCredentialSource::NativeOAuth);
-    let raw_store = std::fs::read_to_string(environment.root.join("config/tcui/keys.toml"))?;
-    assert!(!raw_store.contains("device-access"));
-    assert!(!raw_store.contains("device-refresh"));
+    let raw_store = std::fs::read(environment.root.join("data/tcui/tcui.db"))?;
+    assert!(!raw_store
+        .windows(b"device-access".len())
+        .any(|window| window == b"device-access"));
+    assert!(!raw_store
+        .windows(b"device-refresh".len())
+        .any(|window| window == b"device-refresh"));
     Ok(())
 }
 

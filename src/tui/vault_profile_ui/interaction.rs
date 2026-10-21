@@ -3,9 +3,7 @@ use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
-use super::manager::{
-    VaultProfileManagerState, VaultProfilePhase, VaultProfileUiCommand,
-};
+use super::manager::{VaultProfileManagerState, VaultProfilePhase, VaultProfileUiCommand};
 use crate::config::vault_profiles::VaultProfileId;
 
 impl VaultProfileManagerState {

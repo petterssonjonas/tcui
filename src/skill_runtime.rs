@@ -22,6 +22,7 @@ pub(crate) struct SkillPreparation {
     pub(crate) context: String,
     pub(crate) messages: Vec<Message>,
     pub(crate) notices: Vec<String>,
+    pub(crate) search_requested: bool,
     pub(crate) vault_mutation: Option<crate::vault::mutation_plan::VaultMutationKind>,
 }
 
@@ -45,28 +46,41 @@ pub(crate) async fn prepare(
     let catalog = match SkillCatalog::discover() {
         Ok(catalog) => catalog,
         Err(error) => {
+            let search_requested = crate::search::has_search_mention(user_request);
+            let notice = format!("Skill discovery failed: {error}");
             return SkillPreparation {
-                context: String::new(),
-                messages: Vec::new(),
-                notices: vec![format!("Skill discovery failed: {error}")],
-                vault_mutation: None,
+                messages: if search_requested {
+                    vec![crate::search::unavailable_message(&notice)]
+                } else {
+                    Vec::new()
+                },
+                notices: vec![notice],
+                search_requested,
+                ..SkillPreparation::default()
             };
         }
     };
     let skills = match catalog.load_mentions(user_request) {
         Ok(skills) => skills,
         Err(error) => {
+            let search_requested = crate::search::has_search_mention(user_request);
+            let notice = format!("Skill loading failed: {error}");
             return SkillPreparation {
-                context: String::new(),
-                messages: Vec::new(),
-                notices: vec![format!("Skill loading failed: {error}")],
-                vault_mutation: None,
+                messages: if search_requested {
+                    vec![crate::search::unavailable_message(&notice)]
+                } else {
+                    Vec::new()
+                },
+                notices: vec![notice],
+                search_requested,
+                ..SkillPreparation::default()
             };
         }
     };
 
     let mut prepared = SkillPreparation::default();
     let mut vault_prepared = false;
+    let mut searched_backends = [None; 4];
     for skill in skills {
         if matches!(skill.name.as_str(), "vault" | "obsidian") {
             if vault_prepared {
@@ -74,34 +88,41 @@ pub(crate) async fn prepare(
             }
             vault_prepared = true;
         }
-        let result = match skill.name.as_str() {
-            "websearch" => prepare_local_search(config, user_request, base_request)
-                .await
-                .map(SkillOutput::Message),
-            "research" => {
+        let search_backend = crate::search::skill_backend(&skill.name, config.web_search.backend);
+        let result = if let Some(backend) = search_backend {
+            prepared.search_requested = true;
+            if skill.name == "research" {
                 prepared.context.push_str(&format!(
                     "\n\nSelected skill @research:\n{}",
                     truncate_chars(&skill.source, MAX_SKILL_CHARS)
                 ));
-                prepare_local_search(config, user_request, base_request)
-                    .await
-                    .map(SkillOutput::Message)
             }
-            "exa" | "tavily" | "firecrawl" | "gnome" => {
-                prepare_mcp(config, user_request, base_request, &skill)
-                    .await
-                    .map(SkillOutput::Message)
-            }
-            "vault" | "obsidian" => {
-                prepare_vault_skill(config, user_request, base_request, &skill).await
-            }
-            _ => {
-                prepared.context.push_str(&format!(
-                    "\n\nSelected skill @{}:\n{}",
-                    skill.name,
-                    truncate_chars(&skill.source, MAX_SKILL_CHARS)
-                ));
+            if searched_backends.contains(&Some(backend)) {
                 continue;
+            }
+            if let Some(slot) = searched_backends.iter_mut().find(|slot| slot.is_none()) {
+                *slot = Some(backend);
+            }
+            let query = crate::search::query_without_directives(user_request);
+            crate::search::search_with_backend(config, &query, backend)
+                .await
+                .map(SkillOutput::Message)
+        } else {
+            match skill.name.as_str() {
+                "gnome" => prepare_mcp(config, user_request, base_request, &skill)
+                    .await
+                    .map(SkillOutput::Message),
+                "vault" | "obsidian" => {
+                    prepare_vault_skill(config, user_request, base_request, &skill).await
+                }
+                _ => {
+                    prepared.context.push_str(&format!(
+                        "\n\nSelected skill @{}:\n{}",
+                        skill.name,
+                        truncate_chars(&skill.source, MAX_SKILL_CHARS)
+                    ));
+                    continue;
+                }
             }
         };
         match result {
@@ -117,6 +138,11 @@ pub(crate) async fn prepare(
             }
             Err(error) => {
                 let notice = format!("@{} unavailable: {error}", skill.name);
+                if search_backend.is_some() {
+                    prepared
+                        .messages
+                        .push(crate::search::unavailable_message(&notice));
+                }
                 prepared.notices.push(notice);
             }
         }
@@ -140,35 +166,6 @@ async fn prepare_vault_skill(
             .await
             .map(SkillOutput::Message)
     }
-}
-
-async fn prepare_local_search(
-    config: &AppConfig,
-    user_request: &str,
-    base_request: &ChatRequest,
-) -> Result<Message> {
-    if !config.web_search.enabled {
-        return Err(eyre!("local Web Search is disabled in Settings"));
-    }
-    let planned = planner_completion(
-        base_request,
-        "Rewrite the request as one focused web search query. Return only the query.",
-        user_request,
-    )
-    .await;
-    let query = match planned {
-        Ok(query) if !query.trim().is_empty() => query.trim().trim_matches(['"', '\'']).to_string(),
-        Ok(_) | Err(_) => user_request
-            .replace("@websearch", "")
-            .replace("@research", "")
-            .replace("@save", "")
-            .trim()
-            .to_string(),
-    };
-    let context = crate::search::maybe_search(config, &query, true)
-        .await?
-        .ok_or_else(|| eyre!("no local search results"))?;
-    Ok(crate::search::untrusted_context_message(&context))
 }
 
 async fn prepare_mcp(

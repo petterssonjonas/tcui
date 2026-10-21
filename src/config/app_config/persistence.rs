@@ -98,13 +98,12 @@ fn reload_toml(path: &Path) -> Result<AppConfig> {
     deserialize_config(value)
 }
 
-fn bootstrap_layout(config: &AppConfig) -> Result<()> {
+fn bootstrap_layout(_config: &AppConfig) -> Result<()> {
     let config_root = config_root();
     for dir in ["skills", "souls", "themes", "mcp"] {
         std::fs::create_dir_all(config_root.join(dir))?;
     }
     std::fs::create_dir_all(data_root())?;
-    crate::config::key_store::KeyStore::save_keys(config, &[])?;
     Ok(())
 }
 

@@ -52,7 +52,7 @@ impl CliEnvironment {
     }
 
     pub(super) fn key_path(&self) -> PathBuf {
-        self.root.join("data/tcui/keys.toml")
+        self.root.join("data/tcui/tcui.db")
     }
 
     pub(super) fn marker_path(&self) -> PathBuf {

@@ -5,6 +5,7 @@ mod error;
 mod revoke;
 mod store;
 
+use std::future::Future;
 use std::time::Duration;
 
 use crate::config::AppConfig;
@@ -78,8 +79,11 @@ impl CodexNativeAdapter {
         config: &AppConfig,
         browser: &impl BrowserLauncher,
         cancellation: &OAuthCancellation,
+        input: impl Future<
+            Output = Result<zeroize::Zeroizing<String>, crate::llm::auth::oauth::OAuthError>,
+        >,
     ) -> Result<super::credential::CodexCredential, CodexNativeError> {
-        browser::login(self, config, browser, cancellation).await
+        browser::login(self, config, browser, cancellation, input).await
     }
 
     pub(crate) async fn begin_device(

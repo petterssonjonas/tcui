@@ -1,252 +1,151 @@
 use super::test_support::{env_lock, TestEnv};
 use super::*;
-use std::path::PathBuf;
 
 #[test]
-fn stores_keys_encrypted_with_shared_key() {
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let env = TestEnv::new("keys-encryption");
+fn encrypted_vault_reopens_only_with_correct_password() {
+    let _guard = env_lock().lock().expect("env lock");
+    let env = TestEnv::new("vault-reopen");
     let config = env.config();
-
-    KeyStore::save_keys(&config, &[("OpenAI".to_string(), "sk-secret".to_string())])
-        .expect("save encrypted keys");
-    let raw = std::fs::read_to_string(config.key_file.as_ref().expect("key file path"))
-        .expect("read raw key file");
-    assert!(raw.contains("enc:v1:"));
-    assert!(!raw.contains("sk-secret"));
-
-    let key = KeyStore::get(&config, "OpenAI").expect("load decrypted key");
-    assert_eq!(key.as_deref(), Some("sk-secret"));
-}
-
-#[test]
-fn default_key_path_uses_xdg_data_home() {
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let env = TestEnv::new("keys-default-path");
-    let config = AppConfig::default();
-
-    KeyStore::save_keys(&config, &[("OpenAI".to_string(), "sk-secret".to_string())])
-        .expect("save encrypted keys");
-
-    let key_path = env.data_home().join("tcui").join("keys.toml");
-    let raw = std::fs::read_to_string(&key_path).expect("read raw key file");
-    assert!(raw.contains("enc:v1:"));
-    assert!(!raw.contains("sk-secret"));
-}
-
-#[test]
-fn get_loads_legacy_keys_table_without_rewriting_file() {
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let env = TestEnv::new("keys-legacy-fixture");
-    let config = env.config();
-    let encrypted = crate::storage::Storage::encrypt_shared_text("legacy-api-key")
-        .expect("encrypt legacy API key");
-    let fixture = format!("[keys]\nOpenAI = \"{encrypted}\"\n");
-    let key_path = PathBuf::from(config.key_file.as_ref().expect("key file path"));
-    std::fs::create_dir_all(key_path.parent().expect("key file parent"))
-        .expect("create key file parent");
-    std::fs::write(&key_path, &fixture).expect("write legacy key fixture");
-
-    let key = KeyStore::get(&config, "OpenAI").expect("read legacy API key");
-
-    assert_eq!(key.as_deref(), Some("legacy-api-key"));
+    assert!(!KeyStore::vault_status(&config).expect("status").initialized);
+    assert!(KeyStore::set(&config, "OpenAI", "secret-canary").is_err());
+    KeyStore::initialize_vault(&config, "test-password").expect("initialize");
+    KeyStore::set(&config, "OpenAI", "secret-canary").expect("save");
+    KeyStore::lock_vault(&config).expect("lock");
+    assert!(KeyStore::get(&config, "OpenAI").is_err());
+    assert!(KeyStore::set(&config, "OpenAI", "replacement").is_err());
+    assert!(KeyStore::remove(&config, "OpenAI").is_err());
+    assert!(KeyStore::unlock_vault(&config, "wrong-password").is_err());
+    assert!(!KeyStore::vault_status(&config).expect("status").unlocked);
+    KeyStore::unlock_vault(&config, "test-password").expect("unlock");
     assert_eq!(
-        std::fs::read_to_string(&key_path).expect("read legacy fixture after get"),
-        fixture
+        KeyStore::get(&config, "OpenAI").expect("read").as_deref(),
+        Some("secret-canary")
+    );
+    assert!(KeyStore::initialize_vault(&config, "new-password").is_err());
+    assert!(!env.data_home().join("tcui/chat.key").exists());
+    assert!(!std::path::Path::new(config.key_file.as_deref().expect("path")).exists());
+    let bytes = std::fs::read(env.database_path()).expect("database");
+    assert!(!String::from_utf8_lossy(&bytes).contains("secret-canary"));
+}
+
+#[test]
+fn plaintext_requires_explicit_selection_and_works_while_locked() {
+    let _guard = env_lock().lock().expect("env lock");
+    let env = TestEnv::new("vault-plaintext");
+    let config = env.config();
+    KeyStore::set_storage_preference(&config, CredentialStorage::Plaintext)
+        .expect("explicit plaintext");
+    KeyStore::set(&config, "OpenAI", "plaintext-canary").expect("save plaintext");
+    KeyStore::lock_vault(&config).expect("lock");
+    assert_eq!(
+        KeyStore::get(&config, "OpenAI").expect("read").as_deref(),
+        Some("plaintext-canary")
+    );
+    assert!(
+        String::from_utf8_lossy(&std::fs::read(env.database_path()).expect("database"))
+            .contains("plaintext-canary")
+    );
+    assert!(KeyStore::set_secret(
+        &config,
+        "host",
+        "Host",
+        SecretKind::Password,
+        "machine-secret"
+    )
+    .is_err());
+    KeyStore::initialize_vault(&config, "test-password").expect("initialize");
+    KeyStore::set_storage_preference(&config, CredentialStorage::Encrypted)
+        .expect("encrypt existing");
+    let bytes = std::fs::read(env.database_path()).expect("database");
+    assert!(!String::from_utf8_lossy(&bytes).contains("plaintext-canary"));
+    KeyStore::lock_vault(&config).expect("lock");
+    assert!(KeyStore::get(&config, "OpenAI").is_err());
+    assert!(KeyStore::set_storage_preference(&config, CredentialStorage::Plaintext).is_err());
+    KeyStore::unlock_vault(&config, "test-password").expect("unlock");
+    KeyStore::set_storage_preference(&config, CredentialStorage::Plaintext)
+        .expect("decrypt existing");
+    KeyStore::lock_vault(&config).expect("lock");
+    assert_eq!(
+        KeyStore::get(&config, "OpenAI").expect("read").as_deref(),
+        Some("plaintext-canary")
     );
 }
 
 #[test]
-fn get_reads_legacy_key_when_future_store_version_has_oauth_data() {
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let env = TestEnv::new("keys-future-version-legacy-read");
-    let config = env.config();
-    let encrypted = crate::storage::Storage::encrypt_shared_text("legacy-api-key")
-        .expect("encrypt legacy API key");
-    let fixture = format!(
-        "version = 99\n[keys]\nOpenAI = \"{encrypted}\"\n[oauth]\nfuture = {{ record = \"opaque\" }}\n"
+fn machine_passwords_and_ssh_keys_are_encrypted_and_managed_by_id() {
+    let _guard = env_lock().lock().expect("env lock");
+    let env = TestEnv::new("vault-machine");
+    let config = env.initialized_config();
+    KeyStore::set_secret(
+        &config,
+        "host",
+        "Production host",
+        SecretKind::Password,
+        "machine-canary",
+    )
+    .expect("password");
+    KeyStore::set_secret(
+        &config,
+        "ssh",
+        "Deploy key",
+        SecretKind::SshKey,
+        "ssh-key-canary",
+    )
+    .expect("ssh key");
+    let entries = KeyStore::list_secrets(&config).expect("list");
+    assert_eq!(entries.len(), 2);
+    assert!(entries
+        .iter()
+        .any(|entry| entry.id == "ssh" && entry.kind == SecretKind::SshKey));
+    assert_eq!(
+        KeyStore::get_secret(&config, "host")
+            .expect("read")
+            .as_deref(),
+        Some("machine-canary")
     );
-    let key_path = PathBuf::from(config.key_file.as_ref().expect("key file path"));
-    std::fs::create_dir_all(key_path.parent().expect("key file parent"))
-        .expect("create key file parent");
-    std::fs::write(&key_path, fixture).expect("write future-version key fixture");
-
-    let key = KeyStore::get(&config, "OpenAI").expect("read legacy API key");
-
-    assert_eq!(key.as_deref(), Some("legacy-api-key"));
+    KeyStore::lock_vault(&config).expect("lock");
+    assert!(KeyStore::list_secrets(&config).is_err());
+    assert!(KeyStore::remove_secret(&config, "ssh").is_err());
+    KeyStore::unlock_vault(&config, "test-only-vault-password").expect("unlock");
+    assert!(KeyStore::remove_secret(&config, "ssh").expect("remove"));
+    assert!(!KeyStore::remove_secret(&config, "ssh").expect("idempotent"));
+    KeyStore::set_secret(
+        &config,
+        "host",
+        "Replacement key",
+        SecretKind::SshKey,
+        "replacement-canary",
+    )
+    .expect("replace type");
+    assert_eq!(KeyStore::list_secrets(&config).expect("list").len(), 1);
+    let bytes = std::fs::read(env.database_path()).expect("database");
+    let raw = String::from_utf8_lossy(&bytes);
+    assert!(
+        !raw.contains("machine-canary")
+            && !raw.contains("ssh-key-canary")
+            && !raw.contains("replacement-canary")
+    );
 }
 
 #[test]
-fn oauth_api_rejects_future_store_version_without_interpreting_oauth_records() {
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let env = TestEnv::new("keys-future-version-oauth-read");
+fn empty_password_never_initializes_vault() {
+    let _guard = env_lock().lock().expect("env lock");
+    let env = TestEnv::new("vault-empty-password");
     let config = env.config();
-    let encrypted = crate::storage::Storage::encrypt_shared_text("legacy-api-key")
-        .expect("encrypt legacy API key");
-    let fixture = format!(
-        "version = 99\n[keys]\nOpenAI = \"{encrypted}\"\n[oauth]\nfuture = {{ record = \"opaque\" }}\n"
-    );
-    let key_path = PathBuf::from(config.key_file.as_ref().expect("key file path"));
-    std::fs::create_dir_all(key_path.parent().expect("key file parent"))
-        .expect("create key file parent");
-    std::fs::write(&key_path, fixture).expect("write future-version key fixture");
-
-    let error = KeyStore::get_oauth(&config, "future").expect_err("future OAuth must fail");
-
     assert!(matches!(
-        error,
-        KeyStoreError::UnsupportedVersion { version: 99 }
+        KeyStore::initialize_vault(&config, ""),
+        Err(KeyStoreError::EmptyPassword)
     ));
+    assert!(!KeyStore::vault_status(&config).expect("status").initialized);
 }
 
 #[test]
-fn save_keys_rejects_future_store_without_touching_unknown_oauth_bytes() {
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let env = TestEnv::new("keys-future-version-legacy-save");
-    let config = env.config();
-    let encrypted = crate::storage::Storage::encrypt_shared_text("legacy-api-key")
-        .expect("encrypt legacy API key");
-    let fixture = format!(
-        "version = 99\n[keys]\nOpenAI = \"{encrypted}\"\n[oauth]\nfuture = {{ record = \"opaque\" }}\n"
-    );
-    let key_path = PathBuf::from(config.key_file.as_ref().expect("key file path"));
-    std::fs::create_dir_all(key_path.parent().expect("key file parent"))
-        .expect("create key file parent");
-    std::fs::write(&key_path, &fixture).expect("write future-version key fixture");
-
-    let error = KeyStore::save_keys(
-        &config,
-        &[("OpenAI".to_string(), "replacement".to_string())],
-    )
-    .expect_err("future store must not be rewritten");
-
-    assert!(matches!(
-        error.downcast_ref::<KeyStoreError>(),
-        Some(KeyStoreError::UnsupportedVersion { version: 99 })
-    ));
-    assert_eq!(
-        std::fs::read_to_string(key_path).expect("read future-version fixture"),
-        fixture
-    );
-}
-
-#[test]
-fn get_propagates_decryption_error_for_malformed_legacy_ciphertext() {
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let env = TestEnv::new("keys-decryption-error");
-    let config = env.config();
-    let key_path = PathBuf::from(config.key_file.as_ref().expect("key file path"));
-    std::fs::create_dir_all(key_path.parent().expect("key file parent"))
-        .expect("create key file parent");
-    std::fs::write(&key_path, "[keys]\nOpenAI = \"enc:v1:not-base64\"\n")
-        .expect("write malformed key fixture");
-
-    let result = KeyStore::get(&config, "OpenAI");
-
-    assert!(result.is_err(), "malformed ciphertext must fail to decrypt");
-}
-
-#[test]
-fn save_keys_replaces_the_legacy_key_set() {
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let env = TestEnv::new("keys-replace-legacy-set");
-    let config = env.config();
-
-    KeyStore::save_keys(
-        &config,
-        &[
-            ("OpenAI".to_string(), "first-api-key".to_string()),
-            ("Groq".to_string(), "second-api-key".to_string()),
-        ],
-    )
-    .expect("save initial legacy keys");
-    KeyStore::save_keys(
-        &config,
-        &[("Mistral".to_string(), "replacement-api-key".to_string())],
-    )
-    .expect("replace legacy keys");
-
-    let removed = KeyStore::get(&config, "OpenAI").expect("read replaced legacy key");
-    let replacement = KeyStore::get(&config, "Mistral").expect("read replacement legacy key");
-
-    assert_eq!(removed, None);
-    assert_eq!(replacement.as_deref(), Some("replacement-api-key"));
-}
-
-#[cfg(unix)]
-#[test]
-fn save_keys_sets_owner_read_write_permissions() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let env = TestEnv::new("keys-permissions");
-    let config = env.config();
-
-    KeyStore::save_keys(&config, &[("OpenAI".to_string(), "sk-secret".to_string())])
-        .expect("save encrypted keys");
-
-    let mode = std::fs::metadata(config.key_file.as_ref().expect("key file path"))
-        .expect("key file metadata")
-        .permissions()
-        .mode()
-        & 0o777;
-    assert_eq!(mode, 0o600);
-}
-
-#[cfg(unix)]
-#[test]
-fn get_rejects_symlink_key_file_without_reading_its_target() {
-    use std::os::unix::fs::symlink;
-
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let env = TestEnv::new("keys-symlink-read");
-    let config = env.config();
-    let encrypted = crate::storage::Storage::encrypt_shared_text("legacy-api-key")
-        .expect("encrypt legacy API key");
-    let fixture = format!("[keys]\nOpenAI = \"{encrypted}\"\n");
-    let key_path = PathBuf::from(config.key_file.as_ref().expect("key file path"));
-    let target = key_path.with_file_name("symlink-target.toml");
-    std::fs::create_dir_all(key_path.parent().expect("key file parent"))
-        .expect("create key file parent");
-    std::fs::write(&target, &fixture).expect("write symlink target");
-    symlink(&target, &key_path).expect("create key-file symlink");
-
-    let error = KeyStore::get(&config, "OpenAI").expect_err("symlink key file must fail");
-
-    assert!(error.downcast_ref::<KeyStoreError>().is_some());
-    assert_eq!(
-        std::fs::read_to_string(target).expect("read symlink target"),
-        fixture
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn save_keys_rejects_symlink_key_file_without_clobbering_its_target() {
-    use std::os::unix::fs::symlink;
-
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let env = TestEnv::new("keys-symlink-save");
-    let config = env.config();
-    let encrypted = crate::storage::Storage::encrypt_shared_text("legacy-api-key")
-        .expect("encrypt legacy API key");
-    let fixture = format!("[keys]\nOpenAI = \"{encrypted}\"\n");
-    let key_path = PathBuf::from(config.key_file.as_ref().expect("key file path"));
-    let target = key_path.with_file_name("symlink-target.toml");
-    std::fs::create_dir_all(key_path.parent().expect("key file parent"))
-        .expect("create key file parent");
-    std::fs::write(&target, &fixture).expect("write symlink target");
-    symlink(&target, &key_path).expect("create key-file symlink");
-
-    let error = KeyStore::save_keys(
-        &config,
-        &[("OpenAI".to_string(), "replacement".to_string())],
-    )
-    .expect_err("symlink key file must fail");
-
-    assert!(error.downcast_ref::<KeyStoreError>().is_some());
-    assert_eq!(
-        std::fs::read_to_string(target).expect("read symlink target"),
-        fixture
-    );
+fn failed_unlock_clears_an_existing_unlock_key() {
+    let _guard = env_lock().lock().expect("env lock");
+    let env = TestEnv::new("vault-relock-on-failure");
+    let config = env.initialized_config();
+    KeyStore::set(&config, "OpenAI", "api-canary").expect("persist");
+    assert!(KeyStore::unlock_vault(&config, "wrong-password").is_err());
+    assert!(!KeyStore::vault_status(&config).expect("status").unlocked);
+    assert!(KeyStore::get(&config, "OpenAI").is_err());
 }

@@ -467,6 +467,9 @@ pub fn has_duplicate_ids(commands: &[Command]) -> bool {
 pub fn all_commands() -> Vec<Command> {
     let rows: Vec<(&str, &str, CommandCategory, Option<&str>, Action, bool)> = vec![
         ("open_settings", "/settings", C::System, Some("Ctrl+,"), Action::ShowSettings, true),
+        ("open_providers", "/providers", C::Provider, None, Action::OpenProviders, true),
+        ("connect_provider", "/connect", C::Provider, None, Action::OpenProviders, false),
+        ("open_credential_vault", "/vault", C::System, None, Action::OpenCredentialVault, false),
         ("open_settings_panel", "Open Settings Panel", C::System, None, Action::OpenSettingsPanel, false),
         ("toggle_settings", "Toggle Settings", C::System, Some("Ctrl+S"), Action::ToggleSettings, false),
         ("new_chat", "New Chat", C::Session, Some("Ctrl+N"), Action::NewChat, true),
@@ -482,7 +485,7 @@ pub fn all_commands() -> Vec<Command> {
         ("show_help", "/help", C::System, None, Action::ShowHelp, false),
         ("show_keybinds", "/keybinds", C::System, None, Action::ShowKeybinds, false),
         ("quit", "Quit", C::System, Some("Ctrl+Q"), Action::Quit, false),
-        ("show_local_search", "Search Vault", C::Prompt, None, Action::ShowLocalSearch(String::new()), false),
+        ("show_local_search", "/vault-search", C::Prompt, None, Action::ShowLocalSearch(String::new()), false),
         ("focus_input", "Focus Input", C::System, None, Action::FocusInput, false),
     ];
     rows.into_iter().map(|(id, title, cat, sc, act, cur)| Command {

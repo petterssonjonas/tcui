@@ -5,16 +5,15 @@ use tokio::sync::{oneshot, Mutex};
 
 use crate::config::{AppConfig, KeyStore};
 
-use super::codex::{CodexCredential, CodexCredentialSource, CodexNativeAdapter};
+use super::codex::{CodexCredential, CodexNativeAdapter};
 use super::credential::Credential;
 use super::oauth::oauth_cancellation;
-use super::policy::{canonical_provider_name, is_oauth_provider, trusted_provider_endpoint};
-use super::reader::{read_env_file, read_oauth_token};
+use super::policy::{canonical_provider_name, trusted_provider_endpoint};
 use super::{CredentialError, CredentialSource};
 
 pub(crate) struct CredentialRequest<'a> {
     provider: &'a str,
-    env_var: &'a str,
+    _env_var: &'a str,
     endpoint: &'a str,
 }
 
@@ -22,7 +21,7 @@ impl<'a> CredentialRequest<'a> {
     pub(crate) const fn new(provider: &'a str, env_var: &'a str, endpoint: &'a str) -> Self {
         Self {
             provider,
-            env_var,
+            _env_var: env_var,
             endpoint,
         }
     }
@@ -39,7 +38,9 @@ fn native_refresh_flight() -> &'static Mutex<Option<Vec<NativeRefreshWaiter>>> {
 pub(crate) async fn resolve_provider_credential(
     request: CredentialRequest<'_>,
 ) -> Result<Option<Credential>, CredentialError> {
-    resolve_with_config(request, AppConfig::load().ok(), None).await
+    // Credentials are XDG-database scoped, not config-file scoped. Reloading config.toml
+    // here races its exclusive migration/save lock during concurrent provider probes.
+    resolve_with_config(request, AppConfig::default(), None).await
 }
 
 #[cfg(test)]
@@ -48,7 +49,7 @@ pub(crate) async fn resolve_provider_credential_with_native_adapter(
     config: &AppConfig,
     adapter: &CodexNativeAdapter,
 ) -> Result<Option<Credential>, CredentialError> {
-    resolve_with_config(request, Some(config.clone()), Some(adapter)).await
+    resolve_with_config(request, config.clone(), Some(adapter)).await
 }
 
 #[cfg(test)]
@@ -56,12 +57,12 @@ pub(crate) async fn resolve_provider_credential_with_config(
     request: CredentialRequest<'_>,
     config: &AppConfig,
 ) -> Result<Option<Credential>, CredentialError> {
-    resolve_with_config(request, Some(config.clone()), None).await
+    resolve_with_config(request, config.clone(), None).await
 }
 
 async fn resolve_with_config(
     request: CredentialRequest<'_>,
-    config: Option<AppConfig>,
+    config: AppConfig,
     native_adapter: Option<&CodexNativeAdapter>,
 ) -> Result<Option<Credential>, CredentialError> {
     if !trusted_provider_endpoint(request.provider, request.endpoint) {
@@ -70,70 +71,46 @@ async fn resolve_with_config(
 
     let provider = canonical_provider_name(request.provider);
     if provider == "Codex" {
-        let config = config.ok_or(CredentialError::CodexConfiguration)?;
         return resolve_codex(&config, native_adapter)
             .await
             .map(|credential| credential.map(Credential::codex));
     }
 
-    if let Some(key) = std::env::var(request.env_var)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    {
-        return Ok(Some(Credential::api_key(
-            provider,
-            CredentialSource::Environment,
-            key,
-        )));
+    // Connections are explicit. Never discover credentials in the environment or other apps.
+    let stored_name = if provider == "OpenRouter OAuth" {
+        "OpenRouter OAuth"
+    } else {
+        request.provider
+    };
+    if provider == "OpenRouter OAuth" {
+        return KeyStore::get_api_key_credential(&config, stored_name)
+            .map_err(|_| CredentialError::CredentialStore)
+            .map(|credential| {
+                credential.map(|credential| {
+                    Credential::api_key(
+                        provider,
+                        CredentialSource::TcuiStoredApiKey,
+                        credential.api_key().to_owned(),
+                    )
+                })
+            });
     }
-    if let Some(key) = read_env_file(request.env_var) {
-        return Ok(Some(Credential::api_key(
-            provider,
-            CredentialSource::DotEnv,
-            key,
-        )));
-    }
-
-    if !is_oauth_provider(request.provider) {
-        if let Some(config) = config.as_ref() {
-            if let Some(key) = KeyStore::get(config, &provider)
-                .ok()
-                .flatten()
-                .filter(|value| !value.trim().is_empty())
-            {
-                return Ok(Some(Credential::api_key(
-                    provider,
-                    CredentialSource::LegacyKeyStore,
-                    key,
-                )));
-            }
-            if let Some(credential) = KeyStore::get_api_key_credential(config, &provider)
-                .ok()
-                .flatten()
-            {
-                return Ok(Some(Credential::api_key(
-                    provider,
-                    CredentialSource::TcuiStoredApiKey,
-                    credential.api_key().to_owned(),
-                )));
-            }
-        }
-    }
-
-    Ok(read_oauth_token(request.provider)
-        .map(|token| Credential::api_key(provider, CredentialSource::PassiveExternalToken, token)))
+    let key = KeyStore::get(&config, stored_name)
+        .map_err(|_| CredentialError::CredentialStore)?
+        .filter(|value| !value.trim().is_empty());
+    Ok(key.map(|key| Credential::api_key(provider, CredentialSource::TcuiStoredApiKey, key)))
 }
 
 async fn resolve_codex(
     config: &AppConfig,
     native_adapter: Option<&CodexNativeAdapter>,
 ) -> Result<Option<CodexCredential>, CredentialError> {
-    let credential = super::codex::resolve_credential(config)
-        .map_err(|_| CredentialError::CodexCredentialUnavailable)?;
+    let credential =
+        super::codex::resolve_credential(config).map_err(|_| CredentialError::CredentialStore)?;
     let Some(credential) = credential else {
         return Ok(None);
     };
-    if credential.source() == CodexCredentialSource::ExternalCli || !is_expired(&credential) {
+    if !is_expired(&credential) {
         return Ok(Some(credential));
     }
 
@@ -191,9 +168,9 @@ async fn refresh_after_recheck(
     native_adapter: Option<&CodexNativeAdapter>,
 ) -> NativeRefreshResult {
     let credential = super::codex::resolve_credential(config)
-        .map_err(|_| CredentialError::CodexCredentialUnavailable)?
+        .map_err(|_| CredentialError::CredentialStore)?
         .ok_or(CredentialError::CodexCredentialUnavailable)?;
-    if credential.source() == CodexCredentialSource::ExternalCli || !is_expired(&credential) {
+    if !is_expired(&credential) {
         return Ok(credential);
     }
 

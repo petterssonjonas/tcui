@@ -1,0 +1,13 @@
+flowchart TD
+User["User"] --> Input["Type a message in TCUI"]
+Input --> Context["Prepare conversation context<br/>and assistant instructions"]
+Context --> Request["Send request to AI"]
+Request --> Model["AI model generates a response"]
+Model --> Response["Receive response"]
+Response --> Render["Render text, Markdown,<br/>and code in the terminal"]
+Render --> User
+Response --> Tags["Process TCUI directives"]
+Tags --> Title["Set chat title"]
+Tags --> Memory["Capture durable preferences<br/>when appropriate"]
+Render --> History["Update conversation history"]
+History --> Context

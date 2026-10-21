@@ -8,6 +8,7 @@ mod artifacts;
 mod chat_files;
 mod connection;
 mod conversations;
+pub(crate) mod credential_manager;
 mod export;
 pub mod generated_file;
 mod input;
@@ -22,6 +23,7 @@ pub mod submission;
 mod submission_runtime;
 pub mod tab;
 mod terminal;
+mod terminal_workspace;
 mod update;
 pub(crate) mod vault_mutation_execute;
 mod vault_profiles;
@@ -170,13 +172,21 @@ impl TuiApp {
         }
 
         if std::io::stdin().is_terminal() {
+            let model_action_tx = action_tx.clone();
             tokio::task::spawn_blocking(move || {
                 let Ok(runtime_storage) = crate::storage::Storage::new() else {
                     return;
                 };
                 let rt = tokio::runtime::Handle::current();
                 rt.block_on(async {
-                    crate::llm::model_fetcher::refresh_all_models(&runtime_storage).await;
+                    crate::llm::model_fetcher::refresh_all_models(
+                        &runtime_storage,
+                        |provider, models| {
+                            let _ =
+                                model_action_tx.send(Action::SetProviderModels(provider, models));
+                        },
+                    )
+                    .await;
                 });
             });
         }
@@ -243,22 +253,21 @@ impl TuiApp {
     }
 
     pub(crate) fn load_system_prompt() -> String {
-        let paths = [
-            std::path::PathBuf::from("assets/TCUI.md"),
-            std::path::PathBuf::from("/home/jp/Code/TermChatUI/assets/TCUI.md"),
-        ];
-        for path in &paths {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                return content;
-            }
-        }
-        // Default prompt if file not found
-        "You are TCUI, a helpful terminal assistant.".to_string()
+        std::fs::read_to_string("assets/TCUI.md")
+            .unwrap_or_else(|_| include_str!("../assets/TCUI.md").to_owned())
     }
 
     pub(crate) fn refresh_visible_selectors(&mut self) {
+        let Ok(config) = self.config.try_read() else {
+            return;
+        };
         self.ui.visible_providers =
             Self::filter_visible_providers(&self.ui.db_providers, &self.ui.disabled_providers);
+        self.ui.visible_providers.retain(|(name, _, _, _, _)| {
+            crate::llm::local::is_local_provider(name)
+                || crate::config::KeyStore::has_credential(&config, name).unwrap_or(false)
+        });
+        drop(config);
         let Some(tab) = self.ui.tabs.get(self.ui.active_tab) else {
             self.ui.current_models.clear();
             self.ui.current_reasoning_options.clear();
@@ -267,6 +276,7 @@ impl TuiApp {
         let mut provider = tab.tab.provider.clone();
         let mut model = tab.tab.model.clone();
         let mut reasoning_effort = tab.tab.reasoning_effort.clone();
+        let mut manual_model_override = tab.manual_model_override;
         if !self
             .ui
             .visible_providers
@@ -276,16 +286,26 @@ impl TuiApp {
             if let Some((next_provider, _, _, _, _)) = self.ui.visible_providers.first() {
                 provider = next_provider.clone();
                 model.clear();
+            } else {
+                provider.clear();
+                model.clear();
             }
+            manual_model_override = false;
         }
         self.ui.current_models = self.visible_models_for_provider(&provider);
         if model.trim().is_empty()
-            || (!self.ui.current_models.is_empty()
+            || (!manual_model_override
+                && (!self.ui.current_models.is_empty()
+                    || crate::llm::auth::canonical_provider_name(&provider) == "Codex")
                 && !self.ui.current_models.iter().any(|entry| entry.id == model))
         {
-            if let Some(first_model) = self.ui.current_models.first() {
-                model = first_model.id.clone();
-            }
+            model = self
+                .ui
+                .current_models
+                .first()
+                .map(|entry| entry.id.clone())
+                .unwrap_or_default();
+            reasoning_effort = None;
         }
         let selected_model = self
             .ui
@@ -319,8 +339,12 @@ impl TuiApp {
                 .or_else(|| self.ui.current_reasoning_options.first().cloned());
         }
         if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
+            if tab.tab.provider != provider {
+                tab.tab.endpoint = None;
+            }
             tab.tab.provider = provider;
             tab.tab.model = model;
+            tab.manual_model_override = manual_model_override;
             tab.tab.reasoning_effort = reasoning_effort;
         }
     }
@@ -333,7 +357,7 @@ impl TuiApp {
         }
         if self.storage.created_default_key() {
             self.ui.show_toast(format!(
-                "Back up {}; encrypted chats, memories, and saved provider keys cannot be recovered without it.",
+                "Back up {}; encrypted chats and memories cannot be recovered without it.",
                 Storage::chat_key_path().display()
             ));
         }
@@ -483,7 +507,16 @@ impl TuiApp {
 
         let filter = trimmed.trim_start_matches('/').to_ascii_lowercase();
         let commands = [
-            ("/settings", "Open the Settings panel"),
+            ("/settings", "Open the Settings tab"),
+            ("/terminal", "Open an interactive terminal"),
+            ("/providers", "Manage your added provider connections"),
+            ("/connect", "Add or reconnect a provider"),
+            (
+                "/vault",
+                "Unlock and manage stored credentials and machine secrets",
+            ),
+            ("/vault-search ", "Search the Markdown Vault"),
+            ("/model ", "Enter a provider model ID manually"),
             ("/help", "Show the help document"),
             ("/keybinds", "Show keyboard shortcuts"),
             ("/theme ", "Select and apply a theme"),
@@ -491,7 +524,6 @@ impl TuiApp {
             ("/mcp", "Show MCP servers"),
             ("/remindme ", "Schedule, list, or forget reminders"),
             ("/schedule-command ", "Schedule, list, or forget reminders"),
-            ("/vault ", "Search the configured vault"),
             ("/web", "Toggle local web search"),
             ("/quit", "Quit the app"),
         ];

@@ -5,6 +5,7 @@ use std::sync::Mutex;
 mod chat_file_sidebar;
 mod insert_to_chat;
 mod markdown_vault_workspace_ui;
+mod model_catalog;
 mod vault_profile_picker_mouse;
 
 fn env_lock() -> &'static Mutex<()> {
@@ -20,7 +21,18 @@ fn unique_temp_dir(label: &str) -> std::path::PathBuf {
 }
 
 pub(super) fn with_test_app(label: &str, test: impl FnOnce(&mut TuiApp)) {
-    with_test_app_config(label, AppConfig::default(), test);
+    let mut config = AppConfig {
+        providers: crate::config::app_config::provider_presets(),
+        ..AppConfig::default()
+    };
+    config.providers.push(crate::config::ProviderConfig {
+        name: "Ollama".into(),
+        endpoint: "http://127.0.0.1:9".into(),
+        env_var: String::new(),
+        backend_type: "openai".into(),
+        auth_type: "api_key".into(),
+    });
+    with_test_app_config(label, config, test);
 }
 
 pub(super) fn with_test_app_config(label: &str, config: AppConfig, test: impl FnOnce(&mut TuiApp)) {
@@ -34,6 +46,17 @@ pub(super) fn with_test_app_config(label: &str, config: AppConfig, test: impl Fn
     std::env::set_var("XDG_CONFIG_HOME", &config_home);
 
     let storage = Storage::new().expect("create storage");
+    if !config.providers.is_empty() {
+        crate::config::KeyStore::set_storage_preference(
+            &config,
+            crate::config::key_store::CredentialStorage::Plaintext,
+        )
+        .expect("select fixture credential storage");
+        for provider in &config.providers {
+            crate::config::KeyStore::set(&config, &provider.name, "fixture-api-key")
+                .expect("save fixture provider credential");
+        }
+    }
     let mut app = TuiApp::new(
         storage,
         Arc::new(tokio::sync::RwLock::new(config)),
@@ -352,10 +375,10 @@ fn mouse_wheel_moves_open_list_popup_before_settings() {
 }
 
 #[test]
-fn slash_routes_keep_vault_and_remove_local() {
+fn slash_routes_keep_vault_search_and_remove_local() {
     with_test_app("slash-routes", |app| {
         // Given
-        app.ui.tabs[0].input_content = "/vault release notes".to_string();
+        app.ui.tabs[0].input_content = "/vault-search release notes".to_string();
 
         // When
         let vault_action = app.handle_key(crossterm::event::KeyEvent::new(
@@ -430,6 +453,13 @@ fn settings_panel_search_accepts_space_key() {
 fn settings_panel_tab_toggles_descriptions_without_changing_search() {
     with_test_app("settings-description-toggle", |app| {
         app.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
+        let area = Rect::new(0, 0, 100, 40);
+        let before = app
+            .ui
+            .settings_v2
+            .as_ref()
+            .expect("settings panel")
+            .popup_area(area);
 
         let action = app.handle_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Tab,
@@ -438,7 +468,7 @@ fn settings_panel_tab_toggles_descriptions_without_changing_search() {
 
         assert!(action.is_none());
         let panel = app.ui.settings_v2.as_ref().expect("settings panel");
-        assert!(panel.descriptions_visible());
+        assert!(panel.popup_area(area).width > before.width);
         assert_eq!(panel.query(), "");
     });
 }
@@ -649,12 +679,19 @@ default_model = "deepseek-v4-flash"
     .expect("write config");
 
     let storage = Storage::new().expect("create storage");
+    let mut config = AppConfig::load().expect("load config");
+    config.providers = crate::config::app_config::provider_presets();
+    crate::config::KeyStore::set_storage_preference(
+        &config,
+        crate::config::key_store::CredentialStorage::Plaintext,
+    )
+    .expect("select fixture credential storage");
+    crate::config::KeyStore::set(&config, "OpenCode Go", "fixture-api-key")
+        .expect("save configured provider credential");
 
     let mut app = TuiApp::new(
         storage,
-        Arc::new(tokio::sync::RwLock::new(
-            AppConfig::load().expect("load config"),
-        )),
+        Arc::new(tokio::sync::RwLock::new(config)),
         Arc::new(LlmClient::new()),
         None,
     );
@@ -662,13 +699,12 @@ default_model = "deepseek-v4-flash"
     assert_eq!(app.ui.tabs[0].tab.provider, "OpenCode Go");
     assert_eq!(app.ui.tabs[0].tab.model, "deepseek-v4-flash");
     app.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
-    assert!(matches!(
-        app.handle_key(crossterm::event::KeyEvent::new(
+    assert!(app
+        .handle_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Esc,
             crossterm::event::KeyModifiers::NONE,
-        )),
-        None
-    ));
+        ))
+        .is_none());
     assert!(app.ui.settings_v2.is_none());
 
     std::fs::remove_dir_all(&root).expect("cleanup temp dir");
@@ -678,7 +714,10 @@ default_model = "deepseek-v4-flash"
 
 #[test]
 fn startup_uses_migrated_codex_provider_from_storage() {
-    let mut config = AppConfig::default();
+    let mut config = AppConfig {
+        providers: crate::config::app_config::provider_presets(),
+        ..AppConfig::default()
+    };
     let codex = config
         .providers
         .iter_mut()

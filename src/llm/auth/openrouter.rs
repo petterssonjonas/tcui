@@ -114,8 +114,12 @@ impl OpenRouterAdapter {
     }
 
     pub(crate) fn logout(config: &AppConfig) -> Result<bool, OpenRouterError> {
-        KeyStore::remove_api_key(config, "OpenRouter", ApiKeyCredentialSource::OpenRouterPkce)
-            .map_err(|_| OpenRouterError::CredentialStore)
+        KeyStore::remove_api_key(
+            config,
+            "OpenRouter OAuth",
+            ApiKeyCredentialSource::OpenRouterPkce,
+        )
+        .map_err(|_| OpenRouterError::CredentialStore)
     }
 }
 
@@ -125,7 +129,7 @@ pub(super) fn persist_exchanged_key(
     cancellation: &OAuthCancellation,
 ) -> Result<(), OpenRouterError> {
     let credential = ApiKeyCredential::new(
-        "OpenRouter",
+        "OpenRouter OAuth",
         key,
         ApiKeyCredentialOwnership::Tcui,
         ApiKeyCredentialSource::OpenRouterPkce,

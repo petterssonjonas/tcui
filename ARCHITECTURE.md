@@ -1,6 +1,7 @@
 # TermChatUI Architecture
 
 > Generated from GitNexus knowledge graph (637 symbols, 1212 relationships, 33 execution flows).
+> The graph-derived inventory is historical; implementation notes below are maintained separately.
 
 ## Overview
 
@@ -54,7 +55,9 @@ All rendering is pure and stateless per frame. The `UI` struct (`src/ui/mod.rs`)
 - `sidebar.rs` — Conversation list, New Chat button, Settings button
 - `chat_tab.rs` — Message list, input box, provider/model selector
 - `status_bar.rs` — Connection status, MCP server indicators
-- `settings_tab.rs` — Settings popup (General, Keybindings, API Keys tabs)
+- `settings_workspace.rs` — Categorized live settings, validation, field editing, and keyboard binding capture; `tui/settings_panel.rs` is the search-only navigator.
+- `terminal_workspace.rs` — Persistent PTY sessions, terminal tab/split presentation, focus, and draggable divider geometry.
+- `command_blocks.rs` / `command_review.rs` — Closed shell-fence extraction and explicit selected-command review; no execution during rendering.
 - `session_list.rs` — Session/conversation switcher
 - `obsidian_tab.rs` — Obsidian vault file tree and preview
 
@@ -67,10 +70,19 @@ All rendering is pure and stateless per frame. The `UI` struct (`src/ui/mod.rs`)
 
 **Components:**
 - `chat_message.rs` — Individual message bubble rendering
-- `markdown.rs` — Markdown rendering with syntax highlighting
+- `markdown.rs` / `markdown_model.rs` — Shared Markdown rendering and block parsing.
+- `markdown_rich.rs` — Boxed tables and bounded, cached `merman-core` / `merman-ascii` flowchart rendering.
+- `markdown_flowchart.rs` — Bounded, width-aware ranked recovery layout with multiple columns, continuous directional edges, and inline labels; narrow or grouped diagrams retain stacked recovery with nested group frames.
+- `markdown_charts.rs` — Mermaid XY/bar/line and pie semantic models rendered through native Ratatui charts/canvas, with bounded parsing, series, samples, and cells.
+- `markdown_code.rs` — Lossless preformatted wrapping, display-width-aware tab expansion, and recognizable text-frame normalization/reflow. Copying remains source-based.
 - `diff_view.rs` — Side-by-side diff display
 - `image_block.rs` — Image display in chat
 - `collapsible.rs` — Collapsible sections (e.g., thinking blocks)
+
+`notifications.rs` selects Herdr, a reachable local notification service, or a
+known direct-terminal OSC protocol. SSH never targets server D-Bus. Helpers
+have captured, bounded output and deadlines; unavailable routes disable desktop
+delivery. Detached reminders preserve only the explicit SSH/Herdr routing context.
 
 ### 3. Storage (`src/storage/`)
 
@@ -79,17 +91,18 @@ SQLite persistence via `rusqlite` (bundled). The `Storage` struct manages:
 - `messages` — Chat messages with metadata (thinking, tool calls, images, diffs)
 - `conversations` — Conversation groups per tab
 - `tabs` — Tab configuration (provider, model, endpoint, API key refs)
-- `settings` — Key-value app settings (use_env_keys, api_key_*, custom_endpoint, etc.)
+- `settings` — Non-secret application preferences
 - `mcp_servers` — MCP server configurations
 - `file_backups` — Backup entries for file modifications
-- `key_metadata` — Encryption salt for key storage
+- `tcui_credential_vault` — Password derivation metadata, authenticated verifier, and provider storage preference
+- `tcui_credentials` — Explicit provider/search credentials and encrypted machine passwords/SSH keys
 
 Database path: `~/.local/share/tcui/tcui.db` (Linux) or platform equivalent.
 
 ### 4. Config (`src/config/`)
 
 - `app_config.rs` — `AppConfig` (TOML serialized), default provider/model, vault path, tab configs. Stored at `~/.config/tcui/config.toml`.
-- `key_store.rs` — `KeyStore` with `KeyEntry` variants: Keyring, Encrypted, Env
+- `key_store.rs` — Explicit SQLite credential storage, password-vault lifecycle, API/OAuth records, and opt-in legacy import. Encrypted records use Argon2id and AES-256-GCM; provider plaintext storage is an explicit global choice. Machine secrets always remain encrypted.
 - `soul.rs` — Soul/agent personality configuration loading
 
 ### 5. LLM (`src/llm/`)
@@ -98,6 +111,13 @@ Database path: `~/.local/share/tcui/tcui.db` (Linux) or platform equivalent.
 - `provider.rs` — `Provider` enum (OpenAI, Anthropic, Gemini, Ollama, Custom) with endpoint URLs
 - `stream.rs` — Streaming response handling
 - `tools.rs` — LLM tool/function call definitions
+- `auth/tui.rs` — Cancellable native OpenAI/Codex and OpenRouter PKCE login flows. Authorization URLs are displayed without host-browser launch; masked response input and loopback callbacks share validation, cancellation, and deadlines.
+- `anthropic_sdk.rs` — Official Claude CLI subprocess transport using a saved Console API key, isolated configuration, and `--bare`.
+- `app/credential_manager.rs` — `/providers`, `/connect`, and `/vault` masked input and lifecycle UI. Provider selectors contain saved connections rather than automatically seeded presets.
+
+Provider authentication does not read environment keys, `.env`, or another
+application's login files. Credential vault access is independent of Markdown
+Vault; `/vault-search` retains Markdown search.
 
 Supported endpoints:
 | Provider | Endpoint |
@@ -110,9 +130,19 @@ Supported endpoints:
 ### 6. MCP (`src/mcp/`)
 
 Model Context Protocol integration for external tool servers:
-- `client.rs` — MCP client connection management
-- `registry.rs` — Server registration and lookup
-- `transport.rs` — stdio and HTTP transports
+- `client.rs` — Bounded discovery/calls, credential redaction before result truncation, deadlines, and session cleanup.
+- `registry.rs` — Disabled-by-default presets and lossless merging of configured/custom server rows.
+- `transport.rs` — Explicit stdio commands or native streamable HTTP, KeyStore-only service credentials, official-origin binding, and disabled HTTP redirects.
+- `search.rs` — Exa, Tavily, and Firecrawl adapters discover and call only their supported read-only search tools; no model-selected crawl or execution tools.
+
+`search.rs` at the source root dispatches the configured backend and bounds
+untrusted request-only evidence. `search/local.rs` queries DuckDuckGo Lite
+directly or a configured JSON-enabled SearXNG endpoint. Automatic search is
+off by default; explicit search skills bypass that toggle, share a search for
+the same backend, and suppress duplicate automatic searches. Failures provide
+unavailable evidence rather than silently falling back. The Web search settings
+category and credential manager own backend selection, result limits, service
+keys, and profile enablement; no environment API-key discovery occurs.
 
 ### 7. Obsidian (`src/obsidian/`)
 
@@ -141,17 +171,34 @@ main (src/main.rs)
 
 This is the primary cross-community flow spanning **App → UI**.
 
-### 2. Settings Load/Save → Database
+### 2. Live Settings → Atomic Configuration
 
-```
-dispatch (src/app.rs)
-  → load_settings_popup_state
-      → storage.get_all_settings
-          → Storage::new → db_path
-              → ~/.local/share/tcui/tcui.db
+```mermaid
+flowchart LR
+    Search["Ctrl+P search"] --> Page["Settings tab"]
+    Page --> Validate["Validate edited value"]
+    Validate --> Save["Atomic config.toml save"]
+    Save --> Publish["Publish live configuration"]
+    Publish --> Refresh["Refresh affected UI and defaults"]
 ```
 
-This is the longest traced process (5 steps). Settings are read from the `settings` table on popup open and written back on close.
+`app/settings.rs` holds the live configuration lock through validation and save.
+Failed writes leave the previous configuration active and preserve the editing
+draft. Credentials and vault profiles use their dedicated managers. Runtime
+consumers read updated configuration; defaults apply to new conversations and
+terminal sessions, and recovery retention applies at the next recovery pass.
+
+`app/terminal_workspace.rs` owns the command approval boundary. Run consumes an
+explicit review and starts a clean, interpreter-matched PTY only after approval;
+existing terminals accept explicit paste without submission. The shared
+`TerminalEditorState` transport waits for a random prompt marker before approved
+execution. It reserves input capacity, writes the exact approved text to an
+exclusive owner-only temporary file, and submits one quoted source invocation.
+Commands are never queued as terminal typeahead: interactive programs retain
+TTY input while the shell reads code from the file. Sourcing preserves directory
+and variable changes. Files are removed on normal session teardown; forced
+process termination can leave them behind. The transport bounds input/output and
+scrollback, suppresses host OSC side effects, and tears down PTY jobs on confirmed close.
 
 ### 3. Chat Render Pipeline
 
@@ -183,18 +230,22 @@ handle_key → Enter
               → UI::add_chat_to_active_tab(title)
 ```
 
-### 5. Settings API Keys → Environment Scan
+### 5. Explicit Connection → Credential Store
 
-```
-handle_key → Space on "Grab keys from env" toggle
-  → settings.use_env_keys = true
-  → SettingsPopup::grab_keys_from_env
-      → std::env::var(OPENAI_API_KEY, ANTHROPIC_API_KEY, ...)
-      → read .env and ~/.env
-      → storage.set_setting("api_key_<provider>", key)
-```
+`/providers` and `/connect` open the credential manager. The user selects a
+preset or custom endpoint, chooses encrypted or plaintext provider storage,
+and supplies an API key or completes OAuth. The manager saves credentials
+through `KeyStore`, persists provider metadata, and refreshes model selectors.
 
-When the toggle is activated, the app scans environment variables and `.env` files, autofilling the saved keys list and persisting to SQLite.
+OpenAI OAuth discovery fetches the authenticated subscription catalog using a
+pinned upstream protocol version, not TCUI's version or external Codex files.
+Successful refreshes replace stale selections while preserving session-local
+manual overrides; failures retain the last saved catalog. Credential resolution
+reads the XDG-scoped vault without taking the unrelated configuration-file lock.
+
+At launch, an initialized credential vault requests its password. Cancelling
+leaves encrypted provider records unavailable; `/vault` allows a later unlock.
+No environment or external-login scan occurs.
 
 ---
 

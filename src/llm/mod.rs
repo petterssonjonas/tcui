@@ -1,3 +1,4 @@
+pub(crate) mod anthropic_sdk;
 pub(crate) mod auth;
 pub(crate) mod chat;
 pub mod client;

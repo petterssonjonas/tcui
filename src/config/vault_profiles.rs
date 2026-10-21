@@ -57,7 +57,7 @@ impl FromStr for VaultProfileId {
         }
 
         let mut decoded = [0_u8; VAULT_PROFILE_ID_BYTES];
-        for (index, pair) in raw.as_bytes().chunks_exact(2).enumerate() {
+        for (index, pair) in raw.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             let high = decode_hex_nibble(pair[0]);
             let low = decode_hex_nibble(pair[1]);
             let (Some(high), Some(low)) = (high, low) else {

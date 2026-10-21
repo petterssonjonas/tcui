@@ -9,6 +9,7 @@ pub(super) fn schedule(id: &str, schedule: &ReminderSchedule) -> Result<String, 
         .arg("--collect")
         .arg("--unit")
         .arg(&unit);
+    set_notification_environment(&mut command, |key| std::env::var_os(key));
     match schedule {
         ReminderSchedule::After(duration) => {
             command
@@ -54,6 +55,28 @@ pub(super) fn schedule(id: &str, schedule: &ReminderSchedule) -> Result<String, 
     }
 }
 
+fn set_notification_environment(
+    command: &mut std::process::Command,
+    get: impl Fn(&str) -> Option<std::ffi::OsString>,
+) {
+    // Timers run outside the originating terminal. Preserve only routing context:
+    // otherwise an SSH reminder could notify the server's unrelated desktop.
+    // Empty overrides also prevent stale user-manager context leaking into timers.
+    for key in [
+        "SSH_CONNECTION",
+        "SSH_CLIENT",
+        "SSH_TTY",
+        "HERDR_ENV",
+        "HERDR_PANE_ID",
+        "HERDR_BIN_PATH",
+        "HERDR_SOCKET_PATH",
+    ] {
+        let mut argument = std::ffi::OsString::from(format!("--setenv={key}="));
+        argument.push(get(key).unwrap_or_default());
+        command.arg(argument);
+    }
+}
+
 fn systemd_run_program() -> std::ffi::OsString {
     std::env::var_os("TCUI_REMINDER_SYSTEMD_RUN")
         .unwrap_or_else(|| std::ffi::OsString::from("systemd-run"))
@@ -95,6 +118,33 @@ mod tests {
     use crate::reminders::ReminderSchedule;
     use chrono::{Local, NaiveTime};
     use std::sync::Mutex;
+
+    #[test]
+    fn timer_notification_origin_is_whitelisted_and_missing_values_are_cleared() {
+        let mut command = std::process::Command::new("fixture-systemd-run");
+        super::set_notification_environment(&mut command, |key| match key {
+            "SSH_CONNECTION" => Some("fixture ssh origin".into()),
+            "HERDR_BIN_PATH" => Some("/fixture/herdr $(not-a-shell);%n".into()),
+            "SECRET_TOKEN" => panic!("unrelated environment must not be queried"),
+            _ => None,
+        });
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "--setenv=SSH_CONNECTION=fixture ssh origin",
+                "--setenv=SSH_CLIENT=",
+                "--setenv=SSH_TTY=",
+                "--setenv=HERDR_ENV=",
+                "--setenv=HERDR_PANE_ID=",
+                "--setenv=HERDR_BIN_PATH=/fixture/herdr $(not-a-shell);%n",
+                "--setenv=HERDR_SOCKET_PATH=",
+            ]
+        );
+    }
 
     fn env_lock() -> &'static Mutex<()> {
         crate::test_support::env_lock()

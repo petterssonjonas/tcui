@@ -635,9 +635,9 @@ std::thread_local! {
 fn maybe_fail(point: FailurePoint) -> Result<(), VaultWriteError> {
     FAILURE_POINT.with(|configured| {
         let mut configured = configured.borrow_mut();
-        let fails = configured
-            .as_ref()
-            .is_some_and(|configured| std::mem::discriminant(configured) == std::mem::discriminant(&point));
+        let fails = configured.as_ref().is_some_and(|configured| {
+            std::mem::discriminant(configured) == std::mem::discriminant(&point)
+        });
         if fails {
             *configured = None;
             return Err(VaultWriteError::InjectedFailure {

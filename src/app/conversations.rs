@@ -153,6 +153,8 @@ impl TuiApp {
     pub(crate) fn new_conversation(&mut self, tab_id: usize) -> color_eyre::Result<()> {
         let conv_id = self.storage.create_conversation(tab_id as i64)?;
         self.refresh_tab_conversations(tab_id)?;
-        self.load_conversation_into_tab(tab_id, conv_id)
+        self.load_conversation_into_tab(tab_id, conv_id)?;
+        self.apply_default_chat_selection(tab_id);
+        Ok(())
     }
 }

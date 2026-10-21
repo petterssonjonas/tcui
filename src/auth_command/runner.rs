@@ -19,12 +19,14 @@ const SIGNAL_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const SIGNAL_READY_ENV: &str = "TCUI_AUTH_TEST_SIGNAL_READY";
 
 pub(crate) async fn run(arguments: AuthCommandArgs) -> Result<()> {
+    let plaintext = arguments.plaintext;
+    let vault_password_stdin = arguments.vault_password_stdin;
     let result = match AuthCommandRequest::try_from(arguments) {
         Ok(request) => {
             if let Some(disclosure) = request.disclosure() {
                 println!("{disclosure}");
             }
-            execute(request).await
+            execute(request, plaintext, vault_password_stdin).await
         }
         Err(error) => Err(error),
     };
@@ -42,8 +44,11 @@ pub(crate) async fn run(arguments: AuthCommandArgs) -> Result<()> {
 
 async fn execute(
     request: AuthCommandRequest,
+    plaintext: bool,
+    vault_password_stdin: bool,
 ) -> std::result::Result<AuthCommandResult, AuthCommandError> {
     let provider = request_provider(&request);
+    let needs_store = !matches!(&request, AuthCommandRequest::Logout(logout) if logout.external);
 
     // Eagerly register the SIGINT handler BEFORE creating the flow future.
     //
@@ -66,7 +71,12 @@ async fn execute(
     }
 
     let (cancellation, handle) = oauth_cancellation();
-    let flow = super::flow::execute(request, &cancellation);
+    let flow = async {
+        if needs_store {
+            prepare_store(provider, plaintext, vault_password_stdin).await?;
+        }
+        super::flow::execute(request, &cancellation).await
+    };
     tokio::pin!(flow);
 
     #[cfg(unix)]
@@ -116,6 +126,61 @@ const fn request_provider(request: &AuthCommandRequest) -> AuthProvider {
             Some(provider) => provider,
             None => AuthProvider::Codex,
         },
+    }
+}
+async fn prepare_store(
+    provider: AuthProvider,
+    plaintext: bool,
+    password_stdin: bool,
+) -> std::result::Result<(), AuthCommandError> {
+    use crate::config::key_store::CredentialStorage;
+    use crate::config::{AppConfig, KeyStore};
+    use tokio::io::AsyncReadExt;
+
+    let unavailable = || AuthCommandError::CredentialStore { provider };
+    let config = AppConfig::load().map_err(|_| unavailable())?;
+    if plaintext {
+        KeyStore::set_storage_preference(&config, CredentialStorage::Plaintext)
+            .map_err(|_| unavailable())?;
+        return Ok(());
+    }
+    let status = KeyStore::vault_status(&config).map_err(|_| unavailable())?;
+    if password_stdin {
+        use std::io::IsTerminal;
+        // This flag is deliberately pipe-only: terminal input would echo the password.
+        if std::io::stdin().is_terminal() {
+            return Err(unavailable());
+        }
+        let mut input = tokio::io::stdin();
+        let mut password = zeroize::Zeroizing::new(Vec::new());
+        loop {
+            let byte = input.read_u8().await.map_err(|_| unavailable())?;
+            if byte == b'\n' {
+                break;
+            }
+            if password.len() >= 4096 {
+                return Err(unavailable());
+            }
+            password.push(byte);
+        }
+        if password.last() == Some(&b'\r') {
+            password.pop();
+        }
+        let password = std::str::from_utf8(&password).map_err(|_| unavailable())?;
+        if status.initialized {
+            KeyStore::unlock_vault(&config, password)
+        } else {
+            KeyStore::initialize_vault(&config, password)
+        }
+        .map_err(|_| unavailable())?;
+        KeyStore::set_storage_preference(&config, CredentialStorage::Encrypted)
+            .map_err(|_| unavailable())?;
+        return Ok(());
+    }
+    if status.storage == CredentialStorage::Plaintext || status.unlocked {
+        Ok(())
+    } else {
+        Err(unavailable())
     }
 }
 

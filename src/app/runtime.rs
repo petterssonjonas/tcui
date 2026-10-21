@@ -15,7 +15,10 @@ impl TuiApp {
     }
 
     pub(crate) fn quit_action(&self) -> Action {
-        if self.quit_requires_confirmation() || self.has_pending_documents() {
+        if self.quit_requires_confirmation()
+            || self.has_pending_documents()
+            || self.ui.terminals.has_running()
+        {
             Action::ShowQuitConfirm
         } else {
             Action::Quit
@@ -43,6 +46,8 @@ impl TuiApp {
 
             tokio::select! {
                 _ = tick.tick() => {
+                    self.poll_credential_login().await;
+                    self.poll_terminals();
                     for notice in self.ui.markdown_vault_workspaces.reconcile_tick() {
                         self.ui.show_toast(notice);
                     }
@@ -88,6 +93,31 @@ impl TuiApp {
                         Some(Ok(crossterm::event::Event::FocusLost)) => {
                             self.terminal_has_focus.store(false, Ordering::Relaxed);
                         }
+                        Some(Ok(crossterm::event::Event::Paste(text))) => {
+                            if let Some(manager) = self.ui.credential_manager.as_mut() {
+                                manager.paste(&text);
+                            } else if self.ui.command_review.is_some() || self.ui.terminals.close_pending.is_some()
+                                || self.ui.active_modal.is_some() || self.ui.editor_popup.is_some()
+                                || self.ui.artifact_viewer.is_some() || self.ui.save_file_dialog.is_some()
+                                || self.ui.export_dialog.is_some() || self.ui.vault_profile_manager.is_some()
+                                || self.ui.pending_vault_mutation.is_some() || self.ui.list_popup.is_some()
+                                || self.ui.delete_confirm.is_some() || self.ui.show_keybinds || self.ui.show_session_list
+                            {
+                                // Modal input must never reach a hidden PTY or chat composer.
+                            } else if let Some(settings) = self.ui.settings_v2.as_mut() {
+                                for character in text.chars().filter(|character| !character.is_control()) {
+                                    settings.insert_char(character);
+                                }
+                            } else if let Some(palette) = self.ui.palette.as_mut() {
+                                for character in text.chars().filter(|character| !character.is_control()) {
+                                    palette.insert_char(character);
+                                }
+                            } else if self.ui.app_tabs.active_view() == crate::ui::app_tabs::AppView::Settings {
+                                self.ui.settings_workspace.paste(&text);
+                            } else if !self.terminal_paste(&text) && self.ui.app_tabs.active_view().is_chat() {
+                                self.insert_input_text(&text);
+                            }
+                        }
                         Some(Ok(crossterm::event::Event::Resize(_, _))) => {}
                         _ => {}
                     }
@@ -102,11 +132,28 @@ impl TuiApp {
                 }
             }
         }
+        self.shutdown_terminals();
         Ok(())
     }
 
     pub async fn dispatch(&mut self, action: Action) -> color_eyre::Result<()> {
         match action {
+            Action::OpenProviders => {
+                self.open_credential_manager(false);
+                Ok(())
+            }
+            Action::OpenCredentialVault => {
+                self.open_credential_manager(true);
+                Ok(())
+            }
+            Action::OpenSearchCredentials => {
+                self.open_search_credentials();
+                Ok(())
+            }
+            Action::SetManualModel(model) => {
+                self.open_manual_model(&model);
+                Ok(())
+            }
             Action::Quit => Ok(()),
             Action::ConfirmQuit => {
                 self.discard_pending_documents();
@@ -126,7 +173,7 @@ impl TuiApp {
                     );
                     self.ctrl_c_count = 1;
                     self.last_ctrl_c = Some(std::time::Instant::now());
-                } else if self.quit_requires_confirmation() {
+                } else if self.quit_requires_confirmation() || self.ui.terminals.has_running() {
                     self.ui.active_modal = Some(crate::ui::Modal::QuitConfirm);
                     self.ctrl_c_count = 1;
                     self.last_ctrl_c = Some(std::time::Instant::now());
@@ -208,21 +255,37 @@ impl TuiApp {
                 self.refresh_artifact_sidebar_catalogs();
                 Ok(())
             }
-            Action::ShowSettings => {
+            Action::ShowSettings | Action::OpenSettingsPanel => {
+                self.ui.settings_v2 = None;
                 self.ui.palette = None;
-                self.ui.settings_v2 = Some(self.sidebar_settings_panel());
+                self.open_settings_page(None);
+                Ok(())
+            }
+            Action::OpenSettingsPage(id) => {
+                self.ui.settings_v2 = None;
+                self.ui.palette = None;
+                self.open_settings_page(Some(&id));
+                Ok(())
+            }
+            Action::ApplySetting { id, value } => {
+                if let Err(error) = self.apply_settings_value(&id, &value).await {
+                    self.ui
+                        .show_toast(format!("Setting was not saved: {error}"));
+                }
                 Ok(())
             }
             Action::CloseSettings => {
                 self.ui.settings_v2 = None;
+                self.ui.app_tabs.select(0);
                 Ok(())
             }
             Action::ToggleSettings => {
                 self.ui.palette = None;
-                if self.ui.settings_v2.is_some() {
-                    self.ui.settings_v2 = None;
+                self.ui.settings_v2 = None;
+                if self.ui.app_tabs.active_view() == crate::ui::app_tabs::AppView::Settings {
+                    self.ui.app_tabs.select(0);
                 } else {
-                    self.ui.settings_v2 = Some(self.sidebar_settings_panel());
+                    self.open_settings_page(None);
                 }
                 Ok(())
             }
@@ -426,7 +489,9 @@ impl TuiApp {
             Action::UpdateTabProvider(tab_id, provider) => {
                 if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
                     tab.tab.provider = provider.clone();
+                    tab.tab.endpoint = None;
                     tab.tab.model.clear();
+                    tab.manual_model_override = false;
                     tab.tab.reasoning_effort = None;
                 }
                 self.refresh_visible_selectors();
@@ -439,6 +504,7 @@ impl TuiApp {
             Action::UpdateTabModel(tab_id, model) => {
                 if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
                     tab.tab.model = model.clone();
+                    tab.manual_model_override = false;
                     tab.tab.reasoning_effort = None;
                 }
                 self.refresh_visible_selectors();
@@ -448,20 +514,10 @@ impl TuiApp {
                     .push_message(format!("Model: {model}"), self.ui.frame_tick);
                 Ok(())
             }
-            Action::SetProviderModels(provider, _models) => {
-                if self
-                    .ui
-                    .tabs
-                    .get(self.ui.active_tab)
-                    .map(|tab| tab.tab.provider == provider)
-                    .unwrap_or(false)
-                {
-                    self.refresh_visible_selectors();
-                }
-
+            Action::SetProviderModels(provider, models) => {
+                self.apply_refreshed_provider_models(&provider, &models);
                 Ok(())
             }
-            Action::SaveApiKey(_provider, _key) => Ok(()),
             Action::MouseClick(action) => self.dispatch_mouse_click(action).await,
             Action::SaveGeneratedFile => self.save_generated_file(),
             Action::SaveExportDialog => self.save_export_dialog(),
@@ -479,13 +535,16 @@ impl TuiApp {
                 Ok(())
             }
             Action::RefreshModels => {
-                let storage = crate::storage::Storage::new()?;
-                tokio::task::spawn_blocking(move || {
-                    let rt = tokio::runtime::Handle::current();
-                    rt.block_on(async {
-                        crate::llm::model_fetcher::refresh_all_models(&storage).await;
-                    });
-                });
+                for (provider, _, _, _, _) in &self.ui.db_providers {
+                    if self
+                        .ui
+                        .visible_providers
+                        .iter()
+                        .any(|entry| entry.0 == *provider)
+                    {
+                        self.refresh_models_for_provider(provider.clone());
+                    }
+                }
                 Ok(())
             }
             Action::OpenCommandPalette => {
@@ -493,10 +552,16 @@ impl TuiApp {
                 self.ui.settings_v2 = Some(self.sidebar_settings_panel());
                 Ok(())
             }
-            Action::OpenSettingsPanel => {
-                let _focus = crate::tui::focus::Focus::SettingsPanel;
-                self.ui.palette = None;
-                self.ui.settings_v2 = Some(self.sidebar_settings_panel());
+            Action::OpenTerminal => {
+                self.open_terminal().await;
+                Ok(())
+            }
+            Action::ApproveCommandReview => {
+                self.approve_command_review().await;
+                Ok(())
+            }
+            Action::TransferCommandReview => {
+                self.transfer_command_review();
                 Ok(())
             }
             Action::OpenMarkdownVaultLauncher => {
@@ -580,13 +645,6 @@ impl TuiApp {
             .unwrap_or_default();
         let messages = prepared_turn.expand_messages(&tab_state.messages, conversation_id);
         let tab_endpoint = tab_state.tab.endpoint.clone();
-        if model.trim().is_empty() {
-            self.transition_submission(
-                app_tab_id,
-                crate::app::submission::SubmissionState::return_to_draft,
-            )?;
-            return Err(color_eyre::eyre::eyre!("Choose a model before sending."));
-        }
         let config_snapshot = self.config.read().await.clone();
         if let Some(response) =
             crate::reminders::maybe_handle_request(&config_snapshot, &canonical_content)
@@ -655,6 +713,32 @@ impl TuiApp {
             self.discard_pending_documents();
             return Ok(());
         }
+        if provider.is_empty()
+            || !self
+                .ui
+                .visible_providers
+                .iter()
+                .any(|entry| entry.0 == provider)
+        {
+            self.transition_submission(
+                app_tab_id,
+                crate::app::submission::SubmissionState::return_to_draft,
+            )?;
+            self.replace_input_content(content);
+            self.open_credential_manager(false);
+            self.ui
+                .show_toast("Add a provider with /connect before sending.".into());
+            return Ok(());
+        }
+        if model.trim().is_empty() {
+            self.transition_submission(
+                app_tab_id,
+                crate::app::submission::SubmissionState::return_to_draft,
+            )?;
+            self.ui
+                .show_toast("Choose a model, or enter its ID with /model <id>.".into());
+            return Err(color_eyre::eyre::eyre!("Choose a model before sending."));
+        }
         let endpoint = if is_local_provider {
             Some(config_snapshot.local_inference.chat_endpoint())
         } else {
@@ -674,12 +758,9 @@ impl TuiApp {
                 .unwrap_or_else(|| "openai".to_string())
         };
         let local_api_key = if is_local_provider {
-            config_snapshot
-                .local_inference
-                .api_token_env
-                .as_deref()
-                .and_then(|env_var| std::env::var(env_var).ok())
-                .filter(|value| !value.trim().is_empty())
+            crate::config::KeyStore::get(&config_snapshot, crate::config::LOCAL_PROVIDER_NAME)
+                .ok()
+                .flatten()
         } else {
             None
         };
@@ -1208,6 +1289,10 @@ impl TuiApp {
                 Ok(())
             }
             MouseClickAction::OpenProviderDropdown => {
+                if self.ui.visible_providers.is_empty() {
+                    self.open_credential_manager(false);
+                    return Ok(());
+                }
                 if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
                     tab.provider_dropdown_open = !tab.provider_dropdown_open;
                     tab.model_dropdown_open = false;
@@ -1233,17 +1318,10 @@ impl TuiApp {
             return Ok(());
         };
         settings.select(index, &catalog);
-        let selected_id = settings
-            .selected_setting(&catalog)
-            .map(|setting| setting.id);
         match settings.enter(&catalog) {
-            crate::tui::settings_panel::EnterResult::OpenKeybind {
-                action_id,
-                action_label,
-            } => {
-                self.ui.keybind_capture = Some(
-                    crate::tui::keybind_capture::KeybindCaptureState::new(action_id, action_label),
-                );
+            crate::tui::settings_panel::EnterResult::NavigateSetting(id) => {
+                self.ui.settings_v2 = None;
+                self.open_settings_page(Some(id));
             }
             crate::tui::settings_panel::EnterResult::RunCommand(id) => {
                 if let Some(action) = crate::tui::settings_panel::command_action(id) {
@@ -1251,35 +1329,7 @@ impl TuiApp {
                     self.action_tx.send(action).ok();
                 }
             }
-            crate::tui::settings_panel::EnterResult::SelectTheme(theme) => {
-                self.apply_theme_selection(theme)?;
-            }
-            crate::tui::settings_panel::EnterResult::SelectToastPosition(position) => {
-                self.apply_toast_position_selection(position)?;
-            }
-            crate::tui::settings_panel::EnterResult::ToggledBool => match selected_id {
-                Some("web_search") => {
-                    self.toggle_web_search().await?;
-                    let state = if self.ui.web_search_enabled {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    };
-                    self.ui
-                        .toast_stack
-                        .push_message(format!("Web Search {state}"), self.ui.frame_tick);
-                }
-                Some("collapse_thinking") => {
-                    self.toggle_collapse_thinking()?;
-                }
-                Some(id @ ("show_saved_files" | "show_memories" | "show_markdown_vault")) => {
-                    self.toggle_sidebar_visibility(id)?;
-                }
-                _ => {}
-            },
-            crate::tui::settings_panel::EnterResult::Nothing
-            | crate::tui::settings_panel::EnterResult::EnteredSubsection
-            | crate::tui::settings_panel::EnterResult::RequestConfirm => {}
+            crate::tui::settings_panel::EnterResult::Nothing => {}
         }
         Ok(())
     }

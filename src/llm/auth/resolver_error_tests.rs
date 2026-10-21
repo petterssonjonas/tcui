@@ -3,7 +3,7 @@
     reason = "Resolver fixtures isolate process-global HOME and XDG paths across async checks."
 )]
 
-use super::{CredentialError, CredentialRequest};
+use super::CredentialRequest;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -76,7 +76,7 @@ impl Drop for TestEnvironment {
 }
 
 #[tokio::test]
-async fn resolver_rejects_a_corrupt_native_store_without_falling_back_to_external_codex() {
+async fn resolver_ignores_a_corrupt_legacy_store_and_external_codex_login() {
     // Given
     let _guard = crate::test_support::env_lock()
         .lock()
@@ -99,10 +99,9 @@ async fn resolver_rejects_a_corrupt_native_store_without_falling_back_to_externa
     let result = super::resolver::resolve_provider_credential_with_config(request, &config).await;
 
     // Then
-    assert!(matches!(
-        result,
-        Err(CredentialError::CodexCredentialUnavailable)
-    ));
+    assert!(result
+        .expect("legacy files are not runtime credential stores")
+        .is_none());
 }
 
 #[tokio::test]

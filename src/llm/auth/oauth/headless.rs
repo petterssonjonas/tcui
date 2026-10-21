@@ -56,7 +56,7 @@ pub(crate) fn complete_headless_authorization_without_state(
     }
 }
 
-fn parse_redirect_url(
+pub(super) fn parse_redirect_url(
     value: &str,
     expected_redirect_uri: &RedirectUri,
     state: &State,
@@ -67,6 +67,8 @@ fn parse_redirect_url(
         || redirect.host_str() != expected.host_str()
         || redirect.port_or_known_default() != expected.port_or_known_default()
         || redirect.path() != expected.path()
+        || !redirect.username().is_empty()
+        || redirect.password().is_some()
         || redirect.fragment().is_some()
     {
         return Err(OAuthError::CallbackPath);
@@ -79,7 +81,7 @@ fn parse_redirect_url(
     parse_authorization_response("GET", &target, &path, state)
 }
 
-fn parse_redirect_url_without_state(
+pub(super) fn parse_redirect_url_without_state(
     value: &str,
     expected_redirect_uri: &RedirectUri,
 ) -> Result<AuthorizationCode, OAuthError> {
@@ -89,6 +91,8 @@ fn parse_redirect_url_without_state(
         || redirect.host_str() != expected.host_str()
         || redirect.port_or_known_default() != expected.port_or_known_default()
         || redirect.path() != expected.path()
+        || !redirect.username().is_empty()
+        || redirect.password().is_some()
         || redirect.fragment().is_some()
     {
         return Err(OAuthError::CallbackPath);

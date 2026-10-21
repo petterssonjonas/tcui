@@ -17,6 +17,7 @@ mod sse;
 mod transport;
 
 use request::{build_request_body, codex_headers, validate_reasoning_effort};
+pub(crate) use request::{codex_api_base, codex_client_headers, CODEX_CLIENT_VERSION};
 use sse::codex_stream_event;
 use transport::{http_error, read_sse, CodexTransportError, TransportLimits};
 
@@ -90,7 +91,7 @@ async fn stream_prepared_with_one_refresh<F, Fut, H>(
     client: &reqwest::Client,
     request: &ChatRequest,
     body: Bytes,
-    session: CodexSession,
+    mut session: CodexSession,
     refresh: F,
     on_event: &mut H,
 ) -> color_eyre::Result<ChatStreamOutput>
@@ -101,15 +102,15 @@ where
 {
     let response = send_serialized_request(client, request, body.clone(), &session).await?;
     let response = if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-        let refreshed = refresh().await?;
-        send_serialized_request(client, request, body, &refreshed).await?
+        session = refresh().await?;
+        send_serialized_request(client, request, body, &session).await?
     } else {
         response
     };
 
     crate::diagnostics::provider_response(&request.provider, response.status());
     if !response.status().is_success() {
-        return codex_http_error(response, &request.provider).await;
+        return codex_http_error(response, &request.provider, &session.access_token).await;
     }
 
     let mut output = ChatStreamOutput::default();
@@ -118,7 +119,10 @@ where
     read_sse(response, TransportLimits::PRODUCTION, |data| {
         let chunk = codex_stream_event(data, &mut title_filter).map_err(|error| {
             CodexTransportError::Event {
-                message: crate::llm::auth::redact_secrets(&error.to_string()),
+                message: crate::llm::auth::redact_known_secret(
+                    &error.to_string(),
+                    Some(&session.access_token),
+                ),
             }
         })?;
         if let Some(total_tokens) = chunk.total_tokens {
@@ -157,7 +161,13 @@ async fn send_serialized_request(
     session: &CodexSession,
 ) -> color_eyre::Result<reqwest::Response> {
     validate_reasoning_effort(request)?;
-    let url = format!("{}/responses", request.endpoint.trim_end_matches('/'));
+    let endpoint =
+        if request.endpoint.trim_end_matches('/') == "https://chatgpt.com/backend-api/codex" {
+            codex_api_base()?
+        } else {
+            request.endpoint.trim_end_matches('/').to_string()
+        };
+    let url = format!("{endpoint}/responses");
     crate::diagnostics::provider_request(&request.provider, &url, &request.model);
     client
         .post(url)
@@ -177,8 +187,9 @@ async fn send_serialized_request(
 }
 
 fn load_session(config: &AppConfig) -> color_eyre::Result<CodexSession> {
-    let credential = resolve_credential(config)?
-        .ok_or_else(|| eyre!("No Codex OAuth credential is available. Run `codex login`."))?;
+    let credential = resolve_credential(config)
+        .map_err(|_| eyre!("Cannot open the saved OpenAI OAuth credential. Use /vault to unlock, then /connect."))?
+        .ok_or_else(|| eyre!("No saved OpenAI OAuth connection. Use /connect, or `tcui auth login codex`."))?;
     let account_id = credential
         .account_id()
         .filter(|account_id| !account_id.trim().is_empty())
@@ -203,10 +214,16 @@ async fn refresh_session(
     load_session(config)
 }
 
-async fn codex_http_error<T>(response: reqwest::Response, provider: &str) -> color_eyre::Result<T> {
-    Err(http_error(response, provider, TransportLimits::PRODUCTION)
-        .await
-        .into())
+async fn codex_http_error<T>(
+    response: reqwest::Response,
+    provider: &str,
+    token: &str,
+) -> color_eyre::Result<T> {
+    Err(
+        http_error(response, provider, TransportLimits::PRODUCTION, Some(token))
+            .await
+            .into(),
+    )
 }
 
 #[cfg(test)]

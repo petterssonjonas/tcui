@@ -166,6 +166,7 @@ async fn bounded_http_errors_are_typed_redacted_and_limited(
         oversized_response,
         "Codex",
         limits(128, 128, 64, Duration::from_secs(1)),
+        None,
     )
     .await;
     assert!(matches!(
@@ -173,7 +174,7 @@ async fn bounded_http_errors_are_typed_redacted_and_limited(
         transport::CodexTransportError::ErrorBodyTooLarge
     ));
 
-    const CANARY: &str = "eyJ.tcui-secret-canary";
+    const CANARY: &str = "opaque-token-without-recognizable-prefix";
     for (status, expected) in [
         ("400 Bad Request", transport::CodexHttpStatus::BadRequest),
         ("403 Forbidden", transport::CodexHttpStatus::Forbidden),
@@ -186,12 +187,13 @@ async fn bounded_http_errors_are_typed_redacted_and_limited(
             transport::CodexHttpStatus::InternalServerError,
         ),
     ] {
-        let body = format!(r#"{{"error":{{"message":"access_token={CANARY}"}}}}"#);
+        let body = format!(r#"{{"error":{{"message":"rejected {CANARY}"}}}}"#);
         let response = response_with(status, body.as_bytes()).await?;
         let error = transport::http_error(
             response,
             "Codex",
             limits(256, 256, 256, Duration::from_secs(1)),
+            Some(CANARY),
         )
         .await;
         match error {

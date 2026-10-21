@@ -220,7 +220,6 @@ fn inserted_document_expansion_canonical_text_is_visible_to_normal_request_parse
         .expect("discover skills")
         .load_mentions(prepared.content())
         .expect("load mentions");
-    let searches = crate::search::should_auto_search(prepared.content());
     let reminder = crate::reminders::maybe_handle_request(
         &crate::config::AppConfig::default(),
         prepared.content(),
@@ -228,7 +227,6 @@ fn inserted_document_expansion_canonical_text_is_visible_to_normal_request_parse
 
     // Then
     assert!(skills.iter().any(|skill| skill.name == "save"));
-    assert!(searches);
     assert!(reminder.is_some());
 }
 

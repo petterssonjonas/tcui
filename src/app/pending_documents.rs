@@ -129,7 +129,11 @@ impl TuiApp {
         self.ui.active_modal = None;
         match action {
             PendingDocumentDiscardAction::Quit => {
-                self.action_tx.send(Action::Quit).ok();
+                if self.ui.terminals.has_running() {
+                    self.ui.active_modal = Some(crate::ui::Modal::QuitConfirm);
+                } else {
+                    self.action_tx.send(Action::Quit).ok();
+                }
                 Ok(())
             }
             PendingDocumentDiscardAction::LoadConversation(conversation_id) => {

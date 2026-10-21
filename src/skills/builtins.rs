@@ -9,7 +9,7 @@ const VAULT_SKILL_SOURCE: &str = include_str!("../../skills/vault/SKILL.md");
 pub(crate) const BUILTINS: &[Builtin] = &[
     Builtin {
         name: "websearch",
-        description: "Run a focused local web search and integrate sourced results.",
+        description: "Search the web using the configured source and cite results.",
         source: include_str!("../../skills/websearch/SKILL.md"),
     },
     Builtin {
@@ -19,17 +19,17 @@ pub(crate) const BUILTINS: &[Builtin] = &[
     },
     Builtin {
         name: "exa",
-        description: "Research the web with the live Exa MCP tools.",
+        description: "Search the web through Exa MCP and cite returned sources.",
         source: include_str!("../../skills/exa/SKILL.md"),
     },
     Builtin {
         name: "tavily",
-        description: "Research the web with the live Tavily MCP tools.",
+        description: "Search the web through Tavily MCP and cite returned sources.",
         source: include_str!("../../skills/tavily/SKILL.md"),
     },
     Builtin {
         name: "firecrawl",
-        description: "Search or extract web content with the live Firecrawl MCP tools.",
+        description: "Search the web through Firecrawl MCP and cite returned sources.",
         source: include_str!("../../skills/firecrawl/SKILL.md"),
     },
     Builtin {

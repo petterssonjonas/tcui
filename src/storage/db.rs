@@ -102,7 +102,6 @@ impl Storage {
             chat_store,
             created_default_key,
         };
-        storage.seed_providers()?;
         if let Ok(config) = crate::config::AppConfig::load() {
             let _ = storage.sync_providers(&config.providers);
         }
@@ -115,18 +114,6 @@ impl Storage {
 
     pub fn chat_key_path() -> std::path::PathBuf {
         TcuiDataPaths::discover().chat_key
-    }
-
-    fn seed_providers(&self) -> Result<()> {
-        for (name, endpoint, env_var, backend_type, auth_type) in
-            crate::config::AppConfig::default().provider_entries()
-        {
-            self.conn.execute(
-                "INSERT OR IGNORE INTO providers (name, endpoint, env_var, backend_type, auth_type) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![name, endpoint, env_var, backend_type, auth_type],
-            )?;
-        }
-        Ok(())
     }
 
     pub fn save_message(&self, msg: &Message) -> Result<i64> {
@@ -320,6 +307,7 @@ impl Storage {
     }
 
     pub fn get_models(&self, provider: &str) -> Result<Vec<ModelRow>> {
+        // Codex discovery order is backend priority; other catalogs stay alphabetical.
         let mut stmt = self.conn.prepare(
             "SELECT
                 model_id,
@@ -330,7 +318,7 @@ impl Storage {
                 supported_reasoning_efforts
              FROM models
              WHERE provider = ?1
-             ORDER BY model_id",
+             ORDER BY CASE WHEN provider = 'Codex' THEN rowid END, model_id",
         )?;
         let rows = stmt.query_map([provider], |row| {
             let encoded_efforts = row.get::<_, String>(5)?;
@@ -834,7 +822,9 @@ mod tests {
             chat_store: ChatStore::new(paths, shared_key),
             created_default_key: false,
         };
-        storage.seed_providers().expect("seed providers");
+        storage
+            .sync_providers(&crate::config::app_config::provider_presets())
+            .expect("configure provider fixtures");
         (storage, root)
     }
 
