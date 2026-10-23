@@ -13,6 +13,7 @@ pub mod chat_tab;
 pub mod command_blocks;
 pub mod command_review;
 pub mod components;
+pub(crate) mod ephemeral;
 pub mod launcher;
 pub mod markdown_vault;
 pub mod markdown_vault_workspace;
@@ -30,6 +31,9 @@ pub mod top_bar;
 
 #[cfg(test)]
 mod toast_tests;
+
+#[cfg(test)]
+pub(crate) mod ephemeral_tests;
 
 #[cfg(test)]
 #[path = "markdown_vault_workspace_tests.rs"]
@@ -100,7 +104,6 @@ pub enum Action {
     UpdateModel(String),
     UpdateStatus(String),
     ShowToast(String),
-    SetTitle(String),
     SwitchTab(usize),
     AddTab(crate::app::tab::Tab),
     RemoveTab(usize),
@@ -114,6 +117,7 @@ pub struct UI {
     pub text_selection: text_selection::TextSelection,
     pub tabs: Vec<ChatTabState>,
     pub active_tab: usize,
+    pub(crate) ephemeral: Option<ephemeral::EphemeralPane>,
     pub app_tabs: app_tabs::AppTabs,
     pub markdown_vault_workspaces: markdown_vault_workspace::MarkdownVaultWorkspaceRegistry,
     pub terminals: terminal_workspace::TerminalWorkspace,
@@ -241,7 +245,7 @@ pub struct ChatTabState {
     pub thinking_hit_areas: Vec<(usize, Rect)>,
     pub link_hit_areas: Vec<(Rect, String)>,
     pub copy_hit_areas: Vec<(usize, Rect)>,
-    pub command_hit_areas: Vec<(usize, Rect)>,
+    pub command_hit_areas: Vec<(usize, usize, crate::ui::chat_tab::CommandBlockAction, Rect)>,
     pub thinking_fold_overrides: HashSet<usize>,
     pub scroll_to_message: Option<usize>,
     pub answer_anchor_lines: Vec<(usize, usize)>,
@@ -335,6 +339,7 @@ impl UI {
                 sidebar_state: sidebar::SidebarState::default(),
             }],
             active_tab: 0,
+            ephemeral: None,
             app_tabs: app_tabs::AppTabs::default(),
             terminals: terminal_workspace::TerminalWorkspace::default(),
             command_review: None,
@@ -410,6 +415,10 @@ impl UI {
         self.modal_areas = None;
         self.status_bar_areas = None;
         self.chat_area = None;
+        if let Some(pane) = self.ephemeral.as_mut() {
+            pane.area = None;
+            pane.close_area = None;
+        }
         self.mouse_hit_areas.clear();
         self.terminals.clear_areas();
         self.terminals.show_helpers = self.tui_config.helper_enabled;
@@ -432,8 +441,13 @@ impl UI {
             && !self.tabs.get(self.active_tab).is_some_and(|tab| {
                 tab.provider_dropdown_open || tab.model_dropdown_open || tab.reasoning_dropdown_open
             });
-        for tab in &mut self.tabs {
-            tab.command_hit_areas.clear();
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            tab.clear_hit_areas();
+            if index != self.active_tab {
+                tab.provider_dropdown_open = false;
+                tab.model_dropdown_open = false;
+                tab.reasoning_dropdown_open = false;
+            }
         }
         self.artifact_sidebar_state.clear_hit_areas();
         let active_app_tab_id = self.app_tabs.active_id();
@@ -576,12 +590,27 @@ impl UI {
             ])
             .split(area);
 
-        let panels = self.panel_state.clamped_for_area(main_layout[1]);
+        let mut panels = self.panel_state.clamped_for_area(main_layout[1]);
+        let ephemeral_open = self.ephemeral.is_some();
+        if ephemeral_open {
+            panels.right = crate::tui::shell::PanelMode::Wide;
+            if main_layout[1].width < panels.left_width().saturating_add(64) {
+                panels.left = crate::tui::shell::PanelMode::Closed;
+            }
+            panels.right_wide_width = self.panel_state.right_wide_width.min(
+                main_layout[1]
+                    .width
+                    .saturating_sub(panels.left_width())
+                    .saturating_sub(24),
+            );
+        }
 
         let left_actual_width = panels.left_width();
         let artifact_actual_width = panels.right_width();
-        let left_overlays_chat = panels.left == crate::tui::shell::PanelMode::Wide;
-        let right_overlays_chat = panels.right == crate::tui::shell::PanelMode::Wide;
+        let left_overlays_chat =
+            !ephemeral_open && panels.left == crate::tui::shell::PanelMode::Wide;
+        let right_overlays_chat =
+            !ephemeral_open && panels.right == crate::tui::shell::PanelMode::Wide;
         let left_width = if left_overlays_chat {
             0
         } else {
@@ -642,6 +671,7 @@ impl UI {
             memories: self.show_memories,
             markdown_vault: self.show_markdown_vault,
         };
+        let main_chat_index = self.main_chat_index();
 
         // Sidebar
         if self.sidebar_open && !left_overlays_chat {
@@ -650,7 +680,7 @@ impl UI {
                 left_sidebar_area,
             );
             let focused = self.focus == crate::tui::focus::Focus::LeftSidebar;
-            let active_tab = &mut self.tabs[self.active_tab];
+            let active_tab = &mut self.tabs[main_chat_index];
             let mut sidebar = Sidebar::new(
                 &active_tab.conversations,
                 active_tab.active_conversation,
@@ -667,7 +697,7 @@ impl UI {
 
         let left_handle_rects = panels.handle_left_rects(main_layout[1]);
         if let Some(tab_state) = self.tabs.get_mut(self.active_tab) {
-            if artifact_actual_width > 0 && !right_overlays_chat {
+            if !ephemeral_open && artifact_actual_width > 0 && !right_overlays_chat {
                 f.render_widget(
                     Block::default().style(Style::default().fg(theme.foreground).bg(theme.sidebar)),
                     right_sidebar_area,
@@ -720,40 +750,17 @@ impl UI {
                     && !tab.model_dropdown_open
                     && !tab.reasoning_dropdown_open
             });
+        self.render_chat_pane(
+            f,
+            main_chat_index,
+            chat_content_area,
+            chat_cursor_visible && self.active_tab == main_chat_index,
+        );
+        if ephemeral_open {
+            self.render_ephemeral(f, content_layout[2], chat_cursor_visible);
+        }
         if let Some(tab_state) = self.tabs.get_mut(self.active_tab) {
-            let pane =
-                Block::default().style(Style::default().fg(theme.foreground).bg(theme.background));
-            let pane_area = pane.inner(chat_content_area);
-            f.render_widget(pane, chat_content_area);
-
-            let chat_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(0)])
-                .split(pane_area);
-
             let streaming = tab_state.streaming;
-            {
-                let mut chat_tab = chat_tab::ChatTab::new(
-                    tab_state,
-                    chat_tab::ChatTabProps {
-                        user_alignment: self.user_alignment,
-                        ai_alignment: self.ai_alignment,
-                        markdown_mode: self.markdown_mode,
-                        collapse_thinking: self.collapse_thinking,
-                        show_chat_scrollbar: self.show_chat_scrollbar,
-                        kitty_enhanced_text: self.kitty_enhanced_text,
-                        kitty_heading_downscale: self.kitty_heading_downscale,
-                        image_protocol: &self.image_protocol,
-                        terminal_capabilities: self.terminal_capabilities,
-                        frame_tick: self.frame_tick,
-                        providers: &self.visible_providers,
-                        models: &self.current_models,
-                        reasoning_options: &self.current_reasoning_options,
-                    },
-                );
-                chat_tab.show_cursor = chat_cursor_visible;
-                chat_tab.render(f, chat_chunks[0]);
-            }
 
             let status_bar = StatusBar {
                 status: self.connection_status,
@@ -814,7 +821,10 @@ impl UI {
                 left_sidebar_area,
             );
             let focused = self.focus == crate::tui::focus::Focus::LeftSidebar;
-            let active_tab = &mut self.tabs[self.active_tab];
+            let active_tab = &mut self.tabs[main_chat_index];
+            active_tab
+                .command_hit_areas
+                .retain(|(_, _, _, rect)| rect.intersection(left_sidebar_area).is_empty());
             let mut sidebar = Sidebar::new(
                 &active_tab.conversations,
                 active_tab.active_conversation,
@@ -831,6 +841,9 @@ impl UI {
 
         if right_overlays_chat {
             if let Some(tab_state) = self.tabs.get_mut(self.active_tab) {
+                tab_state
+                    .command_hit_areas
+                    .retain(|(_, _, _, rect)| rect.intersection(right_sidebar_area).is_empty());
                 if artifact_actual_width > 0 {
                     f.render_widget(Clear, right_sidebar_area);
                     f.render_widget(
@@ -866,7 +879,11 @@ impl UI {
             crate::tui::shell::PanelMode::Thin => ["<", "<", ">"],
             crate::tui::shell::PanelMode::Wide => [">", ">", ">"],
         };
-        for (index, rect) in right_handle_rects.into_iter().enumerate() {
+        for (index, rect) in right_handle_rects
+            .into_iter()
+            .enumerate()
+            .filter(|_| !ephemeral_open)
+        {
             let color = if index == 2 && panels.right != crate::tui::shell::PanelMode::Closed {
                 theme.foreground
             } else {
@@ -888,22 +905,29 @@ impl UI {
         } else {
             MouseAction::RightHandle
         };
-        self.mouse_hit_areas
-            .push((right_handle_rects[0], right_primary_action));
-        self.mouse_hit_areas
-            .push((right_handle_rects[1], right_primary_action));
-        let bottom_action = match panels.right {
-            crate::tui::shell::PanelMode::Closed => MouseAction::RightHandleThin,
-            crate::tui::shell::PanelMode::Thin => MouseAction::RightHandleClose,
-            crate::tui::shell::PanelMode::Wide => MouseAction::RightHandleThin,
-        };
-        self.mouse_hit_areas
-            .push((right_handle_rects[2], bottom_action));
+        if !ephemeral_open {
+            self.mouse_hit_areas
+                .push((right_handle_rects[0], right_primary_action));
+            self.mouse_hit_areas
+                .push((right_handle_rects[1], right_primary_action));
+            let bottom_action = match panels.right {
+                crate::tui::shell::PanelMode::Closed => MouseAction::RightHandleThin,
+                crate::tui::shell::PanelMode::Thin => MouseAction::RightHandleClose,
+                crate::tui::shell::PanelMode::Wide => MouseAction::RightHandleThin,
+            };
+            self.mouse_hit_areas
+                .push((right_handle_rects[2], bottom_action));
+        }
 
         self.render_global_overlays(f, area, artifact_width);
     }
 
     fn render_global_overlays(&mut self, f: &mut Frame, area: Rect, artifact_width: u16) {
+        if !self.terminals.show_cursor {
+            for tab in &mut self.tabs {
+                tab.command_hit_areas.clear();
+            }
+        }
         if let Some(ref mut dialog) = self.save_file_dialog {
             dialog.render(f, area);
         }
@@ -1159,37 +1183,6 @@ impl UI {
         if let Some(tab) = self.tabs.get_mut(tab_id) {
             tab.messages.push(msg);
             tab.scroll_to_message = Some(tab.messages.len().saturating_sub(1));
-        }
-    }
-
-    pub fn add_stream_content(&mut self, tab_id: usize, message_idx: usize, content: String) {
-        if let Some(tab) = self.tabs.get_mut(tab_id) {
-            if let Some(message) = tab.messages.get_mut(message_idx) {
-                if message.role == "assistant" {
-                    message.content.push_str(&content);
-                    tab.scroll_to_message = Some(message_idx);
-                }
-            }
-        }
-    }
-
-    pub fn add_stream_thinking(&mut self, tab_id: usize, message_idx: usize, content: String) {
-        if let Some(tab) = self.tabs.get_mut(tab_id) {
-            if let Some(message) = tab.messages.get_mut(message_idx) {
-                if message.role == "assistant" {
-                    message
-                        .thinking_content
-                        .get_or_insert_with(String::new)
-                        .push_str(&content);
-                    tab.scroll_to_message = Some(message_idx);
-                }
-            }
-        }
-    }
-
-    pub fn finish_stream(&mut self, tab_id: usize) {
-        if let Some(tab) = self.tabs.get_mut(tab_id) {
-            tab.streaming = false;
         }
     }
 

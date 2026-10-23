@@ -53,18 +53,32 @@ fn app_with_saved_dir(saved_dir: &Path) -> TuiApp {
     )
 }
 
-fn add_assistant_placeholder(app: &mut TuiApp, conversation_id: i64) -> usize {
+fn add_assistant_placeholder(
+    app: &mut TuiApp,
+    conversation_id: i64,
+) -> (crate::app::submission::SubmissionId, usize) {
+    let submission = crate::app::submission::InputSubmission::new("fixture", Default::default());
+    let request_id = crate::app::submission::PreparedUserTurn::prepare(&submission)
+        .expect("prepare fixture")
+        .submission_id();
     let message_idx = app.ui.tabs[0].messages.len();
-    app.ui.add_message(
+    let history = app.ui.tabs[0].messages.clone();
+    app.register_request(
+        crate::app::requests::RequestRoute {
+            request_id,
+            origin_conversation_id: conversation_id,
+            destination_conversation_id: conversation_id,
+        },
         0,
-        Message::new(conversation_id, "assistant".to_string(), String::new()),
-    );
-    message_idx
+        history,
+    )
+    .expect("register fixture request");
+    (request_id, message_idx)
 }
 
 fn save_report(app: &mut TuiApp, body: &str) -> ArtifactHandle {
     let conversation_id = app.ui.tabs[0].active_conversation;
-    let message_idx = add_assistant_placeholder(app, conversation_id);
+    let (request_id, _) = add_assistant_placeholder(app, conversation_id);
     let generated = GeneratedFile::from_skill_response(7, conversation_id, "@save report.md", body)
         .expect("parse @save response");
     let message = Message::new(conversation_id, "assistant".to_string(), body.to_string());
@@ -72,13 +86,14 @@ fn save_report(app: &mut TuiApp, body: &str) -> ArtifactHandle {
         .expect("runtime")
         .block_on(
             app.dispatch(Action::FinalizeAssistantMessage(AssistantFinalization {
-                tab_id: 0,
-                message_idx,
+                request_id,
                 message,
                 generated_file: GeneratedFileFinalization::Ready(generated),
             })),
         )
         .expect("finalize generated file");
+    app.finish_request(request_id)
+        .expect("finish generated file request");
     app.ui.tabs[0].temporary_artifacts[0].handle.clone()
 }
 

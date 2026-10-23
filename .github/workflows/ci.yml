@@ -2,18 +2,46 @@ name: ci
 
 on:
   pull_request:
+    branches: [development, main]
   push:
-    branches: [main]
+    branches: [development, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    name: CI
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      CI_TIER: ${{ (github.base_ref == 'main' || github.ref == 'refs/heads/main') && 'full' || 'development' }}
+      MISE_EXEC_AUTO_INSTALL: "false"
     steps:
+      - name: Require development for main promotions
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        env:
+          HEAD_BRANCH: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          test "$HEAD_BRANCH" = development
+          test "$HEAD_REPO" = "$GITHUB_REPOSITORY"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - run: rustup toolchain install 1.96.0 --profile minimal --component rustfmt,clippy
-      - run: rustup default 1.96.0
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-features -- -D warnings
-      - run: cargo check --all-targets --all-features
-      - run: cargo test --all-features
-      - run: bash evals/smoke.sh
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          version: 2026.10.17
+          install: false
+      - name: Install package inspection tools
+        if: env.CI_TIER == 'full'
+        run: sudo apt-get update && sudo apt-get install -y binutils rpm cpio
+      - run: bash scripts/setup-ci.sh "$CI_TIER"
+      - run: mise exec -- bash scripts/ci.sh "$CI_TIER"
+      - name: Smoke release payload on glibc 2.34
+        if: env.CI_TIER == 'full'
+        run: bash scripts/smoke-oldest-runtime.sh

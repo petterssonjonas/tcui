@@ -7,10 +7,7 @@ use secrecy::ExposeSecret;
 use crate::config::AppConfig;
 use crate::llm::auth::codex::{resolve_credential, CodexCredentialSource, CodexNativeAdapter};
 use crate::llm::auth::oauth::oauth_cancellation;
-use crate::llm::chat::{
-    ensure_not_empty, flush_title_filter, ChatRequest, ChatStreamEvent, ChatStreamOutput,
-    TitleTagFilter,
-};
+use crate::llm::chat::{ensure_not_empty, ChatRequest, ChatStreamEvent, ChatStreamOutput};
 
 mod request;
 mod sse;
@@ -114,16 +111,13 @@ where
     }
 
     let mut output = ChatStreamOutput::default();
-    let mut title_filter = TitleTagFilter::default();
     let mut completed = false;
     read_sse(response, TransportLimits::PRODUCTION, |data| {
-        let chunk = codex_stream_event(data, &mut title_filter).map_err(|error| {
-            CodexTransportError::Event {
-                message: crate::llm::auth::redact_known_secret(
-                    &error.to_string(),
-                    Some(&session.access_token),
-                ),
-            }
+        let chunk = codex_stream_event(data).map_err(|error| CodexTransportError::Event {
+            message: crate::llm::auth::redact_known_secret(
+                &error.to_string(),
+                Some(&session.access_token),
+            ),
         })?;
         if let Some(total_tokens) = chunk.total_tokens {
             output.total_tokens = Some(total_tokens);
@@ -139,7 +133,6 @@ where
     if !completed {
         return Err(CodexTransportError::IncompleteResponse.into());
     }
-    flush_title_filter(&mut output, on_event, title_filter);
     ensure_not_empty(&mut output, on_event, &request.provider);
     Ok(output)
 }

@@ -174,7 +174,7 @@ fn write_service(
         .map(|profile| VaultProfileRegistration::new(profile.id.clone(), profile.root.clone()));
     #[cfg(test)]
     {
-        return VaultWriteService::at_data_root(registrations, data_root).map_err(map_write_error);
+        VaultWriteService::at_data_root(registrations, data_root).map_err(map_write_error)
     }
     #[cfg(not(test))]
     {

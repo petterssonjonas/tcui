@@ -222,12 +222,12 @@ fn encrypt_bytes(
     key: &SharedKey,
     plaintext: &[u8],
     aad: &[u8],
-) -> Result<(Vec<u8>, Vec<u8>), StorageCryptoError> {
-    let nonce = rand::random::<[u8; 12]>().to_vec();
+) -> Result<([u8; 12], Vec<u8>), StorageCryptoError> {
+    let nonce = rand::random::<[u8; 12]>();
     let ciphertext = key
         .cipher()?
         .encrypt(
-            nonce.as_slice().into(),
+            (&nonce).into(),
             Payload {
                 msg: plaintext,
                 aad,
@@ -243,6 +243,9 @@ fn decrypt_bytes(
     ciphertext: &[u8],
     aad: &[u8],
 ) -> Result<Vec<u8>, StorageCryptoError> {
+    let nonce: &[u8; 12] = nonce
+        .try_into()
+        .map_err(|_| StorageCryptoError::InvalidEnvelope)?;
     key.cipher()?
         .decrypt(
             nonce.into(),
@@ -359,6 +362,26 @@ mod tests {
     struct LocalCipherDocument {
         title: String,
         body: String,
+    }
+
+    #[test]
+    fn decrypts_document_written_before_crypto_upgrade() {
+        // Generated with aes-gcm 0.10.3; do not regenerate with the current cipher.
+        let stored = concat!(
+            "enc:v1:BwcHBwcHBwcHBwcH:",
+            "RN2LzCH4QBPDaD3J7Y7WT1PpA1GyHwJazkOgrX5vY2SbyNR5G7vhjZWvhCqtdYel",
+            "FqDUusNQ84rpz0IJsaRxQinb6Q==",
+        );
+        let document: LocalCipherDocument =
+            decrypt_serialized(&SharedKey { bytes: [42; 32] }, "chat-document", stored)
+                .expect("decrypt existing document");
+        assert_eq!(
+            document,
+            LocalCipherDocument {
+                title: "Migration".into(),
+                body: "Saved before upgrade".into(),
+            }
+        );
     }
 
     fn env_lock() -> &'static std::sync::Mutex<()> {

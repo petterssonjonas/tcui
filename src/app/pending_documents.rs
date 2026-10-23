@@ -40,7 +40,7 @@ enum InsertArtifactError {
 impl TuiApp {
     pub(crate) fn has_pending_documents(&self) -> bool {
         self.pending_documents
-            .get(&self.ui.app_tabs.active_id())
+            .get(&self.input_context_id())
             .is_some_and(|documents| !documents.is_empty())
     }
 
@@ -79,7 +79,7 @@ impl TuiApp {
     }
 
     pub(crate) fn remove_pending_document(&mut self, id: PendingDocumentId) {
-        let app_tab_id = self.ui.app_tabs.active_id();
+        let app_tab_id = self.input_context_id();
         let remove_collection =
             self.pending_documents
                 .get_mut(&app_tab_id)
@@ -98,7 +98,7 @@ impl TuiApp {
     }
 
     pub(crate) fn discard_pending_documents(&mut self) {
-        self.pending_documents.remove(&self.ui.app_tabs.active_id());
+        self.pending_documents.remove(&self.input_context_id());
         if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
             tab.pending_document_chips.clear();
             tab.pending_document_chip_hit_areas.clear();
@@ -156,6 +156,9 @@ impl TuiApp {
     }
 
     pub(crate) fn close_active_conversation(&mut self) -> color_eyre::Result<()> {
+        if self.ui.focused_ephemeral() {
+            return self.close_ephemeral();
+        }
         let active_conversation = self
             .ui
             .tabs
@@ -175,7 +178,7 @@ impl TuiApp {
     ) -> Result<QueuePendingDocumentOutcome, InsertArtifactError> {
         let document = input.snapshot()?;
         let chip = crate::ui::pending_documents::PendingDocumentChip::from_document(&document);
-        let app_tab_id = self.ui.app_tabs.active_id();
+        let app_tab_id = self.input_context_id();
         match self
             .pending_documents
             .entry(app_tab_id)

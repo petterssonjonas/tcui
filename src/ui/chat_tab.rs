@@ -2,7 +2,9 @@
 use crate::config::app_config::{HeadingDownscale, MarkdownMode, TextAlignment};
 use crate::ui::components::image_block::{is_local_image_source, ImageBlockState};
 use crate::ui::components::markdown::MarkdownRenderer;
-use crate::ui::components::markdown_model::{KittyHeadingTier, LinkTarget, RenderedImage};
+use crate::ui::components::markdown_model::{
+    KittyHeadingTier, LinkTarget, RenderedImage, RenderedMarkdown,
+};
 use crate::ui::ModelInfo;
 use ratatui::{
     layout::{Rect, Size},
@@ -18,7 +20,13 @@ const INPUT_MARGIN_HORIZONTAL: u16 = 2;
 const INPUT_MARGIN_VERTICAL: u16 = 1;
 const USER_CONTENT_PADDING: u16 = 4;
 const COPY_CONTROL_INSET: u16 = 2;
-const RUN_CONTROL: &str = "[Run]";
+const RUN_CONTROL: &str = ">_ Run in terminal";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandBlockAction {
+    Copy,
+    Run,
+}
 
 pub struct ChatTab<'a> {
     pub state: &'a mut crate::ui::ChatTabState,
@@ -62,7 +70,16 @@ struct RenderedMessages {
     kitty_headings: Vec<RenderedKittyHeading>,
     answer_anchor_lines: Vec<(usize, usize)>,
     copy_control_lines: Vec<(usize, usize)>,
-    command_control_lines: Vec<(usize, usize, u16)>,
+    command_control_lines: Vec<CommandControlLine>,
+}
+
+struct CommandControlLine {
+    message_idx: usize,
+    block_idx: usize,
+    action: CommandBlockAction,
+    line: usize,
+    column: u16,
+    width: u16,
 }
 
 struct ThinkingToggleLine {
@@ -154,6 +171,12 @@ impl<'a> ChatTab<'a> {
     }
 
     pub fn render_dropdowns(&mut self, f: &mut Frame) {
+        if self.state.provider_dropdown_open
+            || self.state.model_dropdown_open
+            || self.state.reasoning_dropdown_open
+        {
+            self.state.command_hit_areas.clear();
+        }
         self.state.dropdown_item_areas.clear();
         const VISIBLE_ITEMS: usize = 6;
         const PROVIDER_DROPDOWN_MIN_WIDTH: usize = 30;
@@ -512,14 +535,20 @@ impl<'a> ChatTab<'a> {
                 ));
             }
         }
-        for (message_idx, line, column) in rendered.command_control_lines {
-            if line >= scroll_offset && line < scroll_offset + viewport.height as usize {
+        for control in rendered.command_control_lines {
+            if control.line >= scroll_offset
+                && control.line < scroll_offset + viewport.height as usize
+                && control.width > 0
+                && control.column.saturating_add(control.width) <= viewport.width
+            {
                 self.state.command_hit_areas.push((
-                    message_idx,
+                    control.message_idx,
+                    control.block_idx,
+                    control.action,
                     Rect::new(
-                        viewport.x + column,
-                        viewport.y + (line - scroll_offset) as u16,
-                        RUN_CONTROL.len() as u16,
+                        viewport.x + control.column,
+                        viewport.y + (control.line - scroll_offset) as u16,
+                        control.width,
                         1,
                     ),
                 ));
@@ -699,9 +728,10 @@ impl<'a> ChatTab<'a> {
                 }
             }
 
-            let rendered = markdown.render(
+            let (rendered, mut message_controls) = self.render_message_content(
+                &markdown,
                 &m.content,
-                self.markdown_mode,
+                is_assistant && !is_last_streaming,
                 if is_user {
                     user_inner_width
                 } else if is_assistant {
@@ -709,9 +739,7 @@ impl<'a> ChatTab<'a> {
                 } else {
                     content_width
                 },
-                self.kitty_enhanced_text,
-                self.kitty_heading_downscale,
-                self.image_protocol != "off",
+                area.width,
             );
             let user_name = if is_user {
                 std::env::var("USER")
@@ -748,18 +776,16 @@ impl<'a> ChatTab<'a> {
                 if area.width as usize >= copy_icon().width() {
                     copy_control_lines.push((idx, lines.len()));
                 }
-                let command_column = (!is_last_streaming
-                    && crate::ui::command_blocks::has_shell_blocks(&m.content))
-                .then(|| command_control_column(area.width))
-                .flatten();
-                if let Some(column) = command_column {
-                    command_control_lines.push((idx, lines.len(), column));
-                }
-                lines.push(assistant_header_line(area.width, theme, command_column));
+                lines.push(assistant_header_line(area.width, theme));
                 lines.len()
             } else {
                 lines.len()
             };
+            for control in &mut message_controls {
+                control.message_idx = idx;
+                control.line += assistant_content_start;
+            }
+            command_control_lines.extend(message_controls);
             let inner_w = if is_user {
                 user_inner_width
             } else {
@@ -863,6 +889,166 @@ impl<'a> ChatTab<'a> {
             copy_control_lines,
             command_control_lines,
         }
+    }
+
+    fn render_message_content(
+        &self,
+        markdown: &MarkdownRenderer,
+        source: &str,
+        actionable: bool,
+        content_width: usize,
+        box_width: u16,
+    ) -> (RenderedMarkdown, Vec<CommandControlLine>) {
+        let render = |text: &str, width| {
+            markdown.render(
+                text,
+                self.markdown_mode,
+                width,
+                self.kitty_enhanced_text,
+                self.kitty_heading_downscale,
+                self.image_protocol != "off",
+            )
+        };
+        let fences = if actionable {
+            crate::ui::command_blocks::command_fences(source)
+        } else {
+            Vec::new()
+        };
+        if fences.is_empty() {
+            return (render(source, content_width), Vec::new());
+        }
+
+        let theme = crate::theme::active_theme();
+        let fill = Style::default().fg(theme.code_fg).bg(theme.code_bg);
+        let border = fill.fg(theme.muted);
+        let edge = usize::from(box_width >= 4);
+        let padding = usize::from(box_width >= 6);
+        let width = box_width as usize;
+        let inner_width = width.saturating_sub(2 * (edge + padding)).max(1);
+        let mut result = RenderedMarkdown {
+            lines: Vec::new(),
+            link_targets: Vec::new(),
+            images: Vec::new(),
+            kitty_headings: Vec::new(),
+        };
+        let mut controls = Vec::new();
+        let mut cursor = 0;
+        for (block_idx, fence) in fences.into_iter().enumerate() {
+            if cursor < fence.source_range.start {
+                append_markdown(
+                    &mut result,
+                    render(&source[cursor..fence.source_range.start], content_width),
+                );
+            }
+            let control_width = width.saturating_sub(2 * edge);
+            let icon_width = copy_icon().width();
+            let show_copy = control_width >= icon_width;
+            let header_line = result.lines.len();
+            let mut header = Vec::new();
+            if edge > 0 {
+                header.push(Span::styled("╭", border));
+            }
+            header.push(Span::styled(
+                "─".repeat(control_width.saturating_sub(if show_copy { icon_width } else { 0 })),
+                border,
+            ));
+            if show_copy {
+                header.push(Span::styled(copy_icon(), fill.fg(theme.muted)));
+                controls.push(CommandControlLine {
+                    message_idx: 0,
+                    block_idx,
+                    action: CommandBlockAction::Copy,
+                    line: header_line,
+                    column: (width - edge - icon_width) as u16,
+                    width: icon_width as u16,
+                });
+            }
+            if edge > 0 {
+                header.push(Span::styled("╮", border));
+            }
+            result.lines.push(Line::from(header));
+
+            let command_source = &source[fence.source_range.clone()];
+            let mut body = if self.markdown_mode == MarkdownMode::Off {
+                crate::ui::components::markdown_model::render_literal_code(
+                    command_source,
+                    inner_width,
+                )
+            } else {
+                render(command_source, inner_width)
+            };
+            for target in &mut body.link_targets {
+                target.column += edge + padding;
+            }
+            for line in &mut body.lines {
+                line.alignment = Some(Alignment::Left);
+            }
+            let content_start = result.lines.len();
+            append_markdown(&mut result, body);
+            for line in &mut result.lines[content_start..] {
+                let content = std::mem::take(line);
+                let padded = box_content_line(
+                    0,
+                    inner_width,
+                    if padding > 0 { " " } else { "" },
+                    content,
+                    fill,
+                );
+                let mut spans = Vec::with_capacity(padded.spans.len() + 2);
+                if edge > 0 {
+                    spans.push(Span::styled("│", border));
+                }
+                spans.extend(padded.spans);
+                if edge > 0 {
+                    spans.push(Span::styled("│", border));
+                }
+                *line = Line::from(spans);
+            }
+
+            let run_label = if control_width >= RUN_CONTROL.len() {
+                RUN_CONTROL
+            } else if control_width >= ">_ Run".len() {
+                ">_ Run"
+            } else if control_width >= 2 {
+                ">_"
+            } else {
+                ""
+            };
+            if !run_label.is_empty() {
+                controls.push(CommandControlLine {
+                    message_idx: 0,
+                    block_idx,
+                    action: CommandBlockAction::Run,
+                    line: result.lines.len(),
+                    column: edge as u16,
+                    width: run_label.len() as u16,
+                });
+            }
+            let mut footer = Vec::new();
+            if edge > 0 {
+                footer.push(Span::styled("╰", border));
+            }
+            footer.push(Span::styled(run_label, fill.fg(theme.accent)));
+            footer.push(Span::styled(
+                " ".repeat(control_width - run_label.len()),
+                fill,
+            ));
+            if edge > 0 {
+                footer.push(Span::styled("╯", border));
+            }
+            result.lines.push(Line::from(footer));
+            cursor = fence.source_range.end;
+            // The closing delimiter already occupies its own rendered line.
+            if source[cursor..].starts_with("\r\n") {
+                cursor += 2;
+            } else if source[cursor..].starts_with('\n') {
+                cursor += 1;
+            }
+        }
+        if cursor < source.len() {
+            append_markdown(&mut result, render(&source[cursor..], content_width));
+        }
+        (result, controls)
     }
 
     fn render_images(
@@ -1432,6 +1618,14 @@ fn memory_activity_lines(
             crate::memory::MemoryActivity::Failed { .. } => {
                 ("> memory unavailable".to_string(), theme.error, saving)
             }
+            crate::memory::MemoryActivity::AwaitingInput { .. } => (
+                "> memory needs clarification".to_string(),
+                Color::DarkGray,
+                true,
+            ),
+            crate::memory::MemoryActivity::Removed { .. } => {
+                ("> memory moved to Trash".to_string(), Color::DarkGray, true)
+            }
         };
         let line = Line::from(Span::styled(label, Style::default().fg(color)));
         if below_answer {
@@ -1561,25 +1755,30 @@ fn copy_control_inset(width: u16) -> u16 {
     COPY_CONTROL_INSET.min(width.saturating_sub(copy_icon().width() as u16))
 }
 
-fn command_control_column(width: u16) -> Option<u16> {
-    let controls =
-        copy_icon().width() as u16 + copy_control_inset(width) + 2 + RUN_CONTROL.len() as u16;
-    (width > controls).then(|| width - controls)
+fn append_markdown(output: &mut RenderedMarkdown, mut part: RenderedMarkdown) {
+    let offset = output.lines.len();
+    for target in &mut part.link_targets {
+        target.line += offset;
+    }
+    for image in &mut part.images {
+        image.start_line += offset;
+    }
+    for heading in &mut part.kitty_headings {
+        heading.start_line += offset;
+    }
+    output.lines.extend(part.lines);
+    output.link_targets.extend(part.link_targets);
+    output.images.extend(part.images);
+    output.kitty_headings.extend(part.kitty_headings);
 }
 
-fn assistant_header_line(
-    width: u16,
-    theme: crate::theme::ThemeSpec,
-    command_column: Option<u16>,
-) -> Line<'static> {
+fn assistant_header_line(width: u16, theme: crate::theme::ThemeSpec) -> Line<'static> {
     let label = "Assistant";
     let inset = copy_control_inset(width) as usize;
     let width = width as usize - inset;
     let icon = copy_icon();
     let icon_width = icon.width();
-    let label_end = command_column
-        .map(usize::from)
-        .unwrap_or_else(|| width.saturating_sub(icon_width));
+    let label_end = width.saturating_sub(icon_width);
     let label_width = label.len().min(label_end.saturating_sub(1));
     let mut spans = vec![Span::styled(
         &label[..label_width],
@@ -1589,10 +1788,6 @@ fn assistant_header_line(
     )];
     if width >= icon_width {
         spans.push(Span::raw(" ".repeat(label_end.saturating_sub(label_width))));
-        if command_column.is_some() {
-            spans.push(Span::styled(RUN_CONTROL, Style::default().fg(theme.accent)));
-            spans.push(Span::raw("  "));
-        }
         spans.push(Span::styled(icon, Style::default().fg(theme.muted)));
         spans.push(Span::raw(&"  "[..inset]));
     }
@@ -1704,41 +1899,241 @@ mod tests {
     }
 
     #[test]
-    fn shell_command_control_is_visible_only_for_complete_nonstreaming_assistant_code() {
+    fn command_blocks_have_independent_copy_and_run_rows_in_every_markdown_mode() {
+        let mut ui = crate::ui::UI::new();
+        ui.tabs[0].messages.push(crate::app::message::Message::new(
+            1,
+            "user".into(),
+            "Question".into(),
+        ));
+        ui.tabs[0].messages.push(crate::app::message::Message::new(
+            2,
+            "assistant".into(),
+            "Before\n\n```bash tcui-run\nprintf 'first\\n'\n```\n\n```text\nfirst output\n```\n\n```sh tcui-run\nprintf 'second\\n'\n```\n\nAfter".into(),
+        ));
+        let mut chat = copy_test_chat(&mut ui.tabs[0]);
+        let area = Rect::new(2, 1, 76, 35);
+        let mut terminal = Terminal::new(TestBackend::new(80, 38)).expect("test terminal");
+        for mode in [MarkdownMode::Full, MarkdownMode::Textual, MarkdownMode::Off] {
+            chat.markdown_mode = mode;
+            chat.ai_alignment = TextAlignment::Right;
+            terminal
+                .draw(|frame| chat.render_messages(frame, area))
+                .expect("render commands");
+            assert_eq!(
+                chat.state
+                    .command_hit_areas
+                    .iter()
+                    .map(|(message, block, action, _)| (*message, *block, *action))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (1, 0, CommandBlockAction::Copy),
+                    (1, 0, CommandBlockAction::Run),
+                    (1, 1, CommandBlockAction::Copy),
+                    (1, 1, CommandBlockAction::Run),
+                ],
+            );
+            let screen = terminal.backend().to_string();
+            for text in [
+                "Before",
+                "printf 'first\\n'",
+                "first output",
+                "printf 'second\\n'",
+                "After",
+            ] {
+                assert!(screen.contains(text), "{mode:?}: {screen}");
+            }
+            assert_eq!(chat.state.copy_hit_areas.len(), 1);
+            for controls in chat.state.command_hit_areas.as_chunks::<2>().0 {
+                let copy = controls[0].3;
+                let run = controls[1].3;
+                assert!(copy.y < run.y);
+                assert!(copy.x > run.x);
+                assert_eq!(run.width, RUN_CONTROL.len() as u16);
+                assert_eq!(
+                    terminal.backend().buffer()[(copy.x, copy.y)].symbol(),
+                    copy_icon().chars().next().expect("copy glyph").to_string(),
+                );
+                for (column, ch) in RUN_CONTROL.chars().enumerate() {
+                    assert_eq!(
+                        terminal.backend().buffer()[(run.x + column as u16, run.y)].symbol(),
+                        ch.to_string(),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn noncommand_user_thinking_and_streaming_examples_have_no_command_controls() {
         let mut ui = crate::ui::UI::new();
         ui.tabs[0].messages.push(crate::app::message::Message::new(
             1,
             "assistant".into(),
-            "```bash\nprintf 'approved only\\n'\n```".into(),
+            String::new(),
         ));
         let mut chat = copy_test_chat(&mut ui.tabs[0]);
-        let area = Rect::new(0, 0, 60, 10);
-        let mut terminal = Terminal::new(TestBackend::new(60, 10)).expect("test terminal");
+        chat.collapse_thinking = false;
+        chat.state.messages[0].thinking_content = Some("```bash tcui-run\npwd\n```".into());
+        let area = Rect::new(0, 0, 70, 25);
+        let mut terminal = Terminal::new(TestBackend::new(70, 25)).expect("test terminal");
+        for (role, source, streaming) in [
+            ("assistant", "```bash\npwd\n```", false),
+            ("assistant", "```text tcui-run\npwd\n```", false),
+            ("assistant", "> ```bash tcui-run\n> pwd\n> ```", false),
+            (
+                "assistant",
+                "- example:\n  ```bash tcui-run\n  pwd\n  ```",
+                false,
+            ),
+            (
+                "assistant",
+                "````text\n```bash tcui-run\npwd\n```\n````",
+                false,
+            ),
+            ("assistant", "```bash tcui-run\npwd", false),
+            ("assistant", "```bash tcui-run\n\n```", false),
+            ("assistant", "```bash tcui-run\npwd\n```", true),
+            ("user", "```bash tcui-run\npwd\n```", false),
+        ] {
+            chat.state.messages[0].role = role.into();
+            chat.state.messages[0].content = source.into();
+            chat.state.streaming = streaming;
+            terminal
+                .draw(|frame| chat.render_messages(frame, area))
+                .expect("render nonactionable example");
+            assert!(chat.state.command_hit_areas.is_empty(), "{role}: {source}");
+        }
+    }
+
+    #[test]
+    fn command_hit_areas_follow_visible_rows_after_scroll_resize_and_dropdown_changes() {
+        let mut ui = crate::ui::UI::new();
+        ui.tabs[0].messages.push(crate::app::message::Message::new(
+            1,
+            "assistant".into(),
+            "Before\n\n```bash tcui-run\nprintf 'a long command that wraps in a narrow pane\\n'\n```\n\nBetween\n\n```sh tcui-run\npwd\n```\n\nAfter".into(),
+        ));
+        let mut chat = copy_test_chat(&mut ui.tabs[0]);
+        chat.markdown_mode = MarkdownMode::Full;
+        chat.show_chat_scrollbar = true;
+        let mut terminal = Terminal::new(TestBackend::new(85, 18)).expect("test terminal");
+        for width in [78, 24, 10, 6, 3, 1] {
+            let area = Rect::new(2, 1, width, 12);
+            for scroll in [0, 5, usize::MAX] {
+                chat.state.scroll_offset = scroll;
+                terminal
+                    .draw(|frame| chat.render_messages(frame, area))
+                    .expect("render resized scrolled commands");
+                let viewport = if chat.state.chat_scrollbar_area.is_some() {
+                    Rect::new(area.x, area.y, width - 2, area.height)
+                } else {
+                    area
+                };
+                let rendered = chat.build_messages(viewport);
+                let offset = chat.state.scroll_offset;
+                let expected = rendered
+                    .command_control_lines
+                    .iter()
+                    .filter(|control| {
+                        control.line >= offset && control.line < offset + viewport.height as usize
+                    })
+                    .map(|control| {
+                        (
+                            control.message_idx,
+                            control.block_idx,
+                            control.action,
+                            Rect::new(
+                                viewport.x + control.column,
+                                viewport.y + (control.line - offset) as u16,
+                                control.width,
+                                1,
+                            ),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(chat.state.command_hit_areas, expected);
+                for (_, _, action, rect) in &chat.state.command_hit_areas {
+                    assert_eq!(rect.intersection(viewport), *rect);
+                    let glyph = if *action == CommandBlockAction::Copy {
+                        copy_icon().chars().next().expect("copy glyph")
+                    } else {
+                        '>'
+                    };
+                    assert_eq!(
+                        terminal.backend().buffer()[(rect.x, rect.y)].symbol(),
+                        glyph.to_string()
+                    );
+                }
+            }
+        }
+        chat.state.provider_dropdown_open = true;
         terminal
-            .draw(|frame| chat.render_messages(frame, area))
-            .expect("render commands");
-        let run = chat.state.command_hit_areas[0].1;
-        let copy = chat.state.copy_hit_areas[0].1;
-        assert_eq!(run.y, copy.y);
-        assert!(run.right() < copy.x);
-        assert_eq!(terminal.backend().buffer()[(run.x, run.y)].symbol(), "[");
-        chat.state.streaming = true;
-        terminal
-            .draw(|frame| chat.render_messages(frame, area))
-            .expect("render streaming");
+            .draw(|frame| chat.render_dropdowns(frame))
+            .expect("render dropdown");
         assert!(chat.state.command_hit_areas.is_empty());
-        chat.state.streaming = false;
-        chat.state.messages[0].content = "```bash\nprintf pending".into();
         terminal
-            .draw(|frame| chat.render_messages(frame, area))
-            .expect("render incomplete");
+            .draw(|frame| chat.render_messages(frame, Rect::default()))
+            .expect("render zero-size commands");
         assert!(chat.state.command_hit_areas.is_empty());
-        chat.state.messages[0].role = "user".into();
-        chat.state.messages[0].content = "```sh\npwd\n```".into();
+    }
+
+    #[test]
+    fn markdown_metadata_after_command_blocks_keeps_its_rendered_position() {
+        let mut ui = crate::ui::UI::new();
+        ui.tabs[0].messages.push(crate::app::message::Message::new(
+            1,
+            "assistant".into(),
+            "[before](https://before.test)\n\n```bash tcui-run\npwd\n```\n\n# After heading\n\n[after](https://after.test)\n\n![picture](https://image.test/picture.png)".into(),
+        ));
+        let mut chat = copy_test_chat(&mut ui.tabs[0]);
+        chat.markdown_mode = MarkdownMode::Full;
+        chat.image_protocol = "kitty";
+        chat.kitty_enhanced_text = true;
+        chat.terminal_capabilities.kitty_text_sizing = true;
+        let rendered = chat.build_messages(Rect::new(0, 0, 80, 40));
+        let command_end = rendered
+            .command_control_lines
+            .iter()
+            .find(|control| control.action == CommandBlockAction::Run)
+            .expect("run row")
+            .line;
+        let before = rendered
+            .link_targets
+            .iter()
+            .find(|target| target.target == "https://before.test")
+            .expect("before link");
+        let after = rendered
+            .link_targets
+            .iter()
+            .find(|target| target.target == "https://after.test")
+            .expect("after link");
+        assert!(before.line < command_end && after.line > command_end);
+        let after_line = rendered.lines[after.line]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(after_line.contains("after"));
+        assert_eq!(rendered.images.len(), 1);
+        assert!(rendered.images[0].image.start_line > after.line);
+        assert_eq!(rendered.kitty_headings.len(), 1);
+        assert!(rendered.kitty_headings[0].line > command_end);
+        assert_eq!(rendered.answer_anchor_lines, vec![(0, 0)]);
+    }
+
+    #[test]
+    fn opening_a_modal_clears_command_hit_areas_on_every_tab() {
+        let mut ui = crate::ui::UI::new();
+        ui.tabs[0]
+            .command_hit_areas
+            .push((0, 0, CommandBlockAction::Run, Rect::new(2, 2, 6, 1)));
+        ui.active_modal = Some(crate::ui::Modal::QuitConfirm);
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).expect("test terminal");
         terminal
-            .draw(|frame| chat.render_messages(frame, area))
-            .expect("render user");
-        assert!(chat.state.command_hit_areas.is_empty());
+            .draw(|frame| ui.render(frame))
+            .expect("render modal");
+        assert!(ui.tabs.iter().all(|tab| tab.command_hit_areas.is_empty()));
     }
 
     #[test]

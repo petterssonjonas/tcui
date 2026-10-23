@@ -215,7 +215,7 @@ impl McpToolCallResult {
         // Redact complete values before bounding them: truncation must not reveal key prefixes.
         let redactions = secret.map(|secret| {
             let encoded =
-                mcp_reqwest::Url::parse_with_params("https://redacted.invalid", &[("key", secret)])
+                reqwest::Url::parse_with_params("https://redacted.invalid", &[("key", secret)])
                     .ok()
                     .and_then(|url| {
                         url.query()

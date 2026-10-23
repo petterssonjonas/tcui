@@ -57,6 +57,14 @@ pub struct VaultMutationGuard {
     _file: File,
 }
 
+impl Drop for VaultMutationGuard {
+    fn drop(&mut self) {
+        // A forked child can retain the open file description until exec or exit.
+        // Release our mutation lock now, rather than waiting for every copy to close.
+        let _ = self._file.unlock();
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultDiff {
     pub unified: String,
@@ -773,6 +781,26 @@ mod tests {
         assert!(matches!(result, Err(VaultWriteError::VaultBusy)));
         drop(_guard);
         fs::remove_dir_all(root).expect("remove test data root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vault_confined_write_guard_release_is_not_delayed_by_inherited_handle() {
+        let fixture = Fixture::new("inherited-lock");
+        let lock = VaultMutationLock::at_data_root(&fixture.data_root);
+        let guard = lock.try_acquire().expect("acquire mutation lock");
+        // A fork inherits this same open file description until exec or exit.
+        // Duplicate it directly to exercise that lifetime without forking the test runner.
+        let inherited = guard._file.try_clone().expect("duplicate inherited handle");
+
+        drop(guard);
+        let reacquired = lock.try_acquire();
+        drop(inherited);
+
+        assert!(
+            reacquired.is_ok(),
+            "a completed mutation must release its lock before a child execs"
+        );
     }
 
     #[test]

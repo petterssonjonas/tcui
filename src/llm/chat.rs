@@ -215,7 +215,6 @@ struct AnthropicDelta {
 pub(crate) enum ChatStreamEvent {
     Answer(String),
     Thinking(String),
-    Title(String),
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -230,7 +229,6 @@ impl ChatStreamOutput {
         match event {
             ChatStreamEvent::Answer(content) => self.answer.push_str(content),
             ChatStreamEvent::Thinking(content) => self.thinking.push_str(content),
-            ChatStreamEvent::Title(_) => {}
         }
     }
 }
@@ -373,9 +371,8 @@ where
     }
 
     let mut output = ChatStreamOutput::default();
-    let mut title_filter = TitleTagFilter::default();
     read_sse(response, |data| {
-        let chunk = openai_stream_events(data, &mut title_filter)?;
+        let chunk = openai_stream_events(data)?;
         if let Some(total_tokens) = chunk.total_tokens {
             output.total_tokens = Some(total_tokens);
         }
@@ -386,7 +383,6 @@ where
         Ok(true)
     })
     .await?;
-    flush_title_filter(&mut output, on_event, title_filter);
     ensure_not_empty(&mut output, on_event, &request.provider);
     Ok(output)
 }
@@ -432,16 +428,14 @@ where
     }
 
     let mut output = ChatStreamOutput::default();
-    let mut title_filter = TitleTagFilter::default();
     read_sse(response, |data| {
-        for event in anthropic_stream_events(data, &mut title_filter)? {
+        for event in anthropic_stream_events(data)? {
             output.push(&event);
             on_event(event);
         }
         Ok(true)
     })
     .await?;
-    flush_title_filter(&mut output, on_event, title_filter);
     ensure_not_empty(&mut output, on_event, &request.provider);
     Ok(output)
 }
@@ -609,10 +603,7 @@ where
     on_data(&data)
 }
 
-fn openai_stream_events(
-    data: &str,
-    title_filter: &mut TitleTagFilter,
-) -> color_eyre::Result<OpenAiChunkResult> {
+fn openai_stream_events(data: &str) -> color_eyre::Result<OpenAiChunkResult> {
     let parsed: OpenAiStreamChunk = serde_json::from_str(data)?;
     if let Some(error) = parsed.error {
         return Err(eyre!(
@@ -630,13 +621,9 @@ fn openai_stream_events(
                 delta.reasoning_content,
             );
             push_if_present(&mut events, ChatStreamEvent::Thinking, delta.thinking);
-            if let Some(content) = delta.content {
-                push_title_filtered_content(&mut events, title_filter.push(&content));
-            }
+            push_if_present(&mut events, ChatStreamEvent::Answer, delta.content);
         }
-        if let Some(text) = choice.text {
-            push_title_filtered_content(&mut events, title_filter.push(&text));
-        }
+        push_if_present(&mut events, ChatStreamEvent::Answer, choice.text);
     }
     Ok(OpenAiChunkResult {
         events,
@@ -649,16 +636,12 @@ struct OpenAiChunkResult {
     total_tokens: Option<i64>,
 }
 
-fn anthropic_stream_events(
-    data: &str,
-    title_filter: &mut TitleTagFilter,
-) -> color_eyre::Result<Vec<ChatStreamEvent>> {
-    anthropic_events(serde_json::from_str(data)?, title_filter)
+fn anthropic_stream_events(data: &str) -> color_eyre::Result<Vec<ChatStreamEvent>> {
+    anthropic_events(serde_json::from_str(data)?)
 }
 
 pub(super) fn anthropic_events(
     parsed: AnthropicStreamEvent,
-    title_filter: &mut TitleTagFilter,
 ) -> color_eyre::Result<Vec<ChatStreamEvent>> {
     if let Some(error) = parsed.error {
         return Err(eyre!(
@@ -670,9 +653,7 @@ pub(super) fn anthropic_events(
     let mut events = Vec::new();
     if let Some(delta) = parsed.delta {
         push_if_present(&mut events, ChatStreamEvent::Thinking, delta.thinking);
-        if let Some(text) = delta.text {
-            push_title_filtered_content(&mut events, title_filter.push(&text));
-        }
+        push_if_present(&mut events, ChatStreamEvent::Answer, delta.text);
     }
     Ok(events)
 }
@@ -687,38 +668,6 @@ fn push_if_present(
     }
 }
 
-pub(super) fn push_title_filtered_content(
-    events: &mut Vec<ChatStreamEvent>,
-    chunk: TitleFilteredChunk,
-) {
-    if let Some(title) = chunk.title {
-        events.push(ChatStreamEvent::Title(title));
-    }
-    if !chunk.visible.is_empty() {
-        events.push(ChatStreamEvent::Answer(chunk.visible));
-    }
-}
-
-pub(super) fn flush_title_filter<F>(
-    output: &mut ChatStreamOutput,
-    on_event: &mut F,
-    title_filter: TitleTagFilter,
-) where
-    F: FnMut(ChatStreamEvent) + Send,
-{
-    let tail = title_filter.finish();
-    if let Some(title) = tail.title {
-        let event = ChatStreamEvent::Title(title);
-        output.push(&event);
-        on_event(event);
-    }
-    if !tail.visible.is_empty() {
-        let event = ChatStreamEvent::Answer(tail.visible);
-        output.push(&event);
-        on_event(event);
-    }
-}
-
 pub(super) fn ensure_not_empty<F>(output: &mut ChatStreamOutput, on_event: &mut F, provider: &str)
 where
     F: FnMut(ChatStreamEvent) + Send,
@@ -729,88 +678,6 @@ where
         output.push(&event);
         on_event(event);
     }
-}
-
-#[derive(Debug, Default)]
-pub(super) struct TitleTagFilter {
-    buffer: String,
-    title: String,
-    capturing: bool,
-}
-
-#[derive(Debug, Default, PartialEq, Eq)]
-pub(super) struct TitleFilteredChunk {
-    visible: String,
-    title: Option<String>,
-}
-
-impl TitleTagFilter {
-    const START: &str = "<tcui:chat-title>";
-    const END: &str = "</tcui:chat-title>";
-
-    pub(super) fn push(&mut self, input: &str) -> TitleFilteredChunk {
-        let mut chunk = TitleFilteredChunk::default();
-
-        self.buffer.push_str(input);
-        loop {
-            if self.capturing {
-                if let Some(end) = self.buffer.find(Self::END) {
-                    self.title.push_str(&self.buffer[..end]);
-                    self.buffer.drain(..end + Self::END.len());
-                    self.capturing = false;
-                    let title = self.title.trim();
-                    if !title.is_empty() {
-                        chunk.title = Some(title.to_string());
-                    }
-                    self.title.clear();
-                    continue;
-                }
-                let keep = matching_suffix_prefix_len(&self.buffer, Self::END);
-                let capture_len = self.buffer.len().saturating_sub(keep);
-                self.title.push_str(&self.buffer[..capture_len]);
-                self.buffer.drain(..capture_len);
-                break;
-            }
-
-            if let Some(start) = self.buffer.find(Self::START) {
-                chunk.visible.push_str(&self.buffer[..start]);
-                self.buffer.drain(..start + Self::START.len());
-                self.capturing = true;
-                continue;
-            }
-
-            let keep = matching_suffix_prefix_len(&self.buffer, Self::START);
-            if self.buffer.len() > keep {
-                let emit_len = self.buffer.len() - keep;
-                chunk.visible.push_str(&self.buffer[..emit_len]);
-                self.buffer.drain(..emit_len);
-            }
-            break;
-        }
-        chunk
-    }
-
-    fn finish(mut self) -> TitleFilteredChunk {
-        if self.capturing {
-            TitleFilteredChunk::default()
-        } else {
-            TitleFilteredChunk {
-                visible: std::mem::take(&mut self.buffer),
-                title: None,
-            }
-        }
-    }
-}
-
-fn matching_suffix_prefix_len(buffer: &str, pattern: &str) -> usize {
-    let max = pattern.len().saturating_sub(1);
-    for (idx, _) in buffer.char_indices().rev() {
-        let suffix = &buffer[idx..];
-        if suffix.len() <= max && pattern.starts_with(suffix) {
-            return suffix.len();
-        }
-    }
-    0
 }
 
 #[cfg(test)]

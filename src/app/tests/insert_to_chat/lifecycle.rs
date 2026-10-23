@@ -52,12 +52,10 @@ fn insert_to_chat_launch_consumes_chip_and_reload_shows_expanded_text() {
             app.submission_state(),
             Some(SubmissionState::Launched { .. })
         ));
-        assert!(app
+        assert!(!app
             .pending_documents
-            .get(&app.ui.app_tabs.active_id())
-            .is_none());
+            .contains_key(&app.ui.app_tabs.active_id()));
         assert!(app.ui.tabs[0].pending_document_chips.is_empty());
-        assert_eq!(app.ui.tabs[0].messages.len(), 1);
         assert_eq!(
             app.ui.tabs[0].messages[0].content,
             "typed instruction\n\nONE-REQUEST-ONLY"

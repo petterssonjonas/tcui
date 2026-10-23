@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use super::embedding::{DIMENSIONS, MODEL_ID};
 
-const SCHEMA_VERSION: &str = "2";
+const SCHEMA_VERSION: &str = "3";
 static SQLITE_VEC_REGISTRATION: OnceLock<i32> = OnceLock::new();
 
 #[derive(Debug, Error)]
@@ -84,7 +84,9 @@ impl MemoryIndex {
                 rel_path TEXT UNIQUE NOT NULL,
                 modified_ns INTEGER NOT NULL,
                 size_bytes INTEGER NOT NULL,
-                content_fingerprint INTEGER NOT NULL
+                content_fingerprint INTEGER NOT NULL,
+                scope TEXT NOT NULL DEFAULT 'unspecified',
+                machine_key TEXT
              );
              CREATE TABLE memory_chunks(
                 id INTEGER PRIMARY KEY,

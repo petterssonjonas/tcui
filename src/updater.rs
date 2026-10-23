@@ -88,6 +88,7 @@ fn github_client() -> Result<reqwest::Client> {
 }
 
 async fn latest_release(client: &reqwest::Client) -> Result<Option<ReleaseInfo>> {
+    let asset_name = asset_name_for_platform()?;
     let response = client
         .get(format!(
             "https://api.github.com/repos/{}/releases/latest",
@@ -103,7 +104,6 @@ async fn latest_release(client: &reqwest::Client) -> Result<Option<ReleaseInfo>>
     let response = response.error_for_status()?;
     let release = response.json::<GithubRelease>().await?;
     let version = normalize_version(&release.tag_name);
-    let asset_name = asset_name_for_platform()?;
     let asset = release
         .assets
         .into_iter()

@@ -9,6 +9,7 @@ mod chat_files;
 mod connection;
 mod conversations;
 pub(crate) mod credential_manager;
+mod ephemeral;
 mod export;
 pub mod generated_file;
 mod input;
@@ -17,6 +18,8 @@ pub mod message;
 mod pending_documents;
 mod popups;
 mod providers;
+mod request_control;
+pub(crate) mod requests;
 mod runtime;
 mod settings;
 pub mod submission;
@@ -73,6 +76,8 @@ pub struct TuiApp {
     pub system_prompt: String,
     pub ctrl_c_count: u32,
     pub last_ctrl_c: Option<std::time::Instant>,
+    pub(crate) cancel_escape: Option<(submission::SubmissionId, std::time::Instant)>,
+    pub(crate) requests: HashMap<submission::SubmissionId, requests::ConversationRequest>,
     pub terminal_has_focus: Arc<AtomicBool>,
     pub(crate) pending_documents:
         HashMap<crate::ui::app_tabs::AppTabId, submission::PendingDocuments>,
@@ -202,6 +207,8 @@ impl TuiApp {
             system_prompt,
             ctrl_c_count: 0,
             last_ctrl_c: None,
+            cancel_escape: None,
+            requests: HashMap::new(),
             terminal_has_focus: Arc::new(AtomicBool::new(true)),
             pending_documents: HashMap::new(),
             submission_states: HashMap::new(),
@@ -225,13 +232,13 @@ impl TuiApp {
 
     #[cfg(test)]
     pub fn pending_documents_mut(&mut self) -> &mut submission::PendingDocuments {
-        let tab_id = self.ui.app_tabs.active_id();
+        let tab_id = self.input_context_id();
         self.pending_documents.entry(tab_id).or_default()
     }
 
     #[cfg(test)]
     pub fn submission_state(&self) -> Option<&submission::SubmissionState> {
-        self.submission_states.get(&self.ui.app_tabs.active_id())
+        self.submission_states.get(&self.input_context_id())
     }
 
     pub(crate) fn transition_submission(
@@ -507,6 +514,14 @@ impl TuiApp {
 
         let filter = trimmed.trim_start_matches('/').to_ascii_lowercase();
         let commands = [
+            ("/fork", "Continue this conversation in an independent chat"),
+            ("/temp", "Open a temporary fork in the wide right sidebar"),
+            ("/temp close", "Close and delete the temporary conversation"),
+            ("/cancel", "Cancel this conversation's active request"),
+            (
+                "/steer ",
+                "Steer an active request when the transport supports it",
+            ),
             ("/settings", "Open the Settings tab"),
             ("/terminal", "Open an interactive terminal"),
             ("/providers", "Manage your added provider connections"),
@@ -580,16 +595,22 @@ impl TuiApp {
     }
 
     pub(crate) fn generate_title(content: &str) -> String {
-        let words: Vec<&str> = content.split_whitespace().collect();
-        let title_words: Vec<&str> = words.iter().take(5).copied().collect();
-        let title = title_words.join(" ");
-        let title = if title.len() > 16 {
-            format!("{}...", &title[..16])
-        } else if words.len() > 5 {
-            format!("{}...", title)
-        } else {
-            title
-        };
+        let mut words = content.split_whitespace();
+        let mut title = String::with_capacity(content.len().min(16 * 4) + 3);
+        let mut length = 0;
+        for (index, word) in words.by_ref().take(5).enumerate() {
+            for character in (index > 0).then_some(' ').into_iter().chain(word.chars()) {
+                if length == 16 {
+                    title.push_str("...");
+                    return title;
+                }
+                title.push(character);
+                length += 1;
+            }
+        }
+        if words.next().is_some() {
+            title.push_str("...");
+        }
         if title.is_empty() {
             "New Chat".to_string()
         } else {

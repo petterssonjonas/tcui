@@ -53,6 +53,22 @@ impl ChatSavedFileStore {
         }
     }
 
+    /// Save an explicitly requested artifact without retaining a conversation link.
+    pub(crate) fn create_saved(
+        &self,
+        name: &str,
+        contents: &[u8],
+    ) -> Result<SavedFileRecord, ChatFileError> {
+        let _lock = GlobalLinkLock::acquire(&self.paths)?;
+        self.ensure_saved_root()?;
+        let (filename, path) = self.write_unique_saved_file(name, contents)?;
+        Ok(SavedFileRecord {
+            filename,
+            path,
+            size_bytes: contents.len() as u64,
+        })
+    }
+
     pub(crate) fn create_for_chat(
         &self,
         conversation_id: i64,

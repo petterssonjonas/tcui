@@ -441,10 +441,9 @@ fn inserted_document_expansion_launch_consumes_snapshots_and_reloads_expanded_te
             app.submission_state(),
             Some(SubmissionState::Launched { .. })
         ));
-        assert!(app
+        assert!(!app
             .pending_documents
-            .get(&app.ui.app_tabs.active_id())
-            .is_none());
+            .contains_key(&app.ui.app_tabs.active_id()));
         let stored = app
             .storage
             .get_messages(app.ui.tabs[0].active_conversation)

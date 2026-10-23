@@ -212,7 +212,7 @@ fn render_search(text: &str, limit: usize) -> McpResult<String> {
         if candidate.len() > 4096 {
             continue;
         }
-        let Ok(url) = mcp_reqwest::Url::parse(candidate) else {
+        let Ok(url) = reqwest::Url::parse(candidate) else {
             continue;
         };
         if !matches!(url.scheme(), "http" | "https")

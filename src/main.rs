@@ -204,11 +204,11 @@ async fn main() -> Result<()> {
     app.ui
         .show_toast("Welcome to TCUI.\nType /help for instructions.".to_string());
 
-    app.run(&mut terminal).await?;
+    let result = app.run(&mut terminal).await;
 
     drop(app);
     restore_terminal();
-    Ok(())
+    result
 }
 
 fn recover_vault_moves(config: &AppConfig) -> Result<()> {
@@ -493,8 +493,6 @@ fn export_all_memories(
 mod tests {
     use super::{Cli, Command, OfflineAction};
     use clap::Parser;
-    #[cfg(feature = "memory")]
-    use std::path::PathBuf;
 
     #[test]
     fn offline_action_parses_decrypt_and_export_flags() {
@@ -555,7 +553,7 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Some(Command::MemoryMcp { vault: Some(path) }) if path == PathBuf::from("/tmp/vault")
+            Some(Command::MemoryMcp { vault: Some(path) }) if path == std::path::Path::new("/tmp/vault")
         ));
     }
 

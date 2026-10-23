@@ -25,6 +25,34 @@ fn table_boxes_include_vertical_borders_corners_and_alignment() {
 }
 
 #[test]
+fn table_cells_keep_html_and_tcui_tags_literal_without_autolinking_them() {
+    let rendered = render_markdown(
+        "| Literal | Link |\n| --- | --- |\n\
+         | A<tag></tag>B | [docs](https://example.com/docs) |\n\
+         | <tcui:remember>keep</tcui:remember> | <!-- comment --> |\n\
+         | <tcui:chat-title>title</tcui:chat-title> | `<tcui:remember>` |",
+        opts(120),
+    );
+    let output = text(&rendered);
+    for expected in [
+        "A<tag></tag>B",
+        "<tcui:remember>keep</tcui:remember>",
+        "<tcui:chat-title>title</tcui:chat-title>",
+        "<!-- comment -->",
+    ] {
+        assert!(output.contains(expected), "missing {expected}:\n{output}");
+    }
+    assert_eq!(
+        rendered
+            .link_targets
+            .iter()
+            .map(|target| target.target.as_str())
+            .collect::<Vec<_>>(),
+        ["https://example.com/docs"]
+    );
+}
+
+#[test]
 fn table_cells_keep_escaped_and_inline_code_pipes_and_markdown_styles() {
     let rendered = render_markdown(
         "| Value | Code |\n| --- | --- |\n| a\\|b | `x|y` |\n| **bold** | ``a`b`` |",
@@ -174,9 +202,9 @@ fn unsupported_malformed_streamed_and_too_wide_diagrams_remain_readable_source()
     ] {
         let rendered = diagram(source, width);
         let output = text(&rendered);
-        let stripped = output.replace('\n', "").replace(' ', "");
+        let stripped = output.replace(['\n', ' '], "");
         assert!(
-            stripped.contains(&source.replace('\n', "").replace(' ', "")),
+            stripped.contains(&source.replace(['\n', ' '], "")),
             "source missing: {output}"
         );
         assert!(rendered.lines.iter().all(|line| line.width() <= width));

@@ -1,128 +1,141 @@
 #!/usr/bin/env bash
-# tcui installer: detects CPU arch and native package manager, downloads the
-# matching release artifact, verifies its SHA256 against the release SHA256SUMS,
-# and installs it.
-#
-# Override knobs:
-#   TCUI_REPO        GitHub owner/repo (default: petterssonjonas/tcui)
-#   TCUI_VERSION     release tag to install (default: latest)
-#   TCUI_BIN_DIR     install dir for the tarball fallback (default: ~/.local/bin,
-#                    or /usr/local/bin when run as root)
-#   TCUI_PKG         force package type: deb | rpm | tarball (default: auto)
-#
-# Usage:
-#   curl -fsSL https://github.com/petterssonjonas/tcui/releases/latest/download/install.sh | bash
-#   TCUI_VERSION=v0.8.0 bash install.sh
+# Install a Linux x86-64 release into ~/.local/bin without sudo or package managers.
+# Usage: bash install.sh [install|uninstall]
+# TCUI_BIN_DIR selects an absolute destination; TCUI_REPO selects owner/repository.
+# TCUI_VERSION selects a release tag (with or without v), defaulting to latest.
+# A regular sibling tcui is a trusted, already-extracted offline release. Otherwise
+# the downloaded tarball must match its release SHA256SUMS before it is opened.
 set -euo pipefail
 
-repo="${TCUI_REPO:-petterssonjonas/tcui}"
-version="${TCUI_VERSION:-latest}"
-force_pkg="${TCUI_PKG:-}"
-
-err() { echo "tcui: $*" >&2; }
+err() { printf 'tcui: %s\n' "$*" >&2; }
 die() { err "$*"; exit 1; }
 
-[[ "$(uname -s)" == "Linux" ]] || die "installer currently supports Linux only."
+(( $# <= 1 )) || die 'usage: bash install.sh [install|uninstall]'
+action="${1:-install}"
+case "$action" in install|uninstall) ;; *) die 'usage: bash install.sh [install|uninstall]' ;; esac
 
-# --- arch detection -----------------------------------------------------------
-case "$(uname -m)" in
-  x86_64|amd64)  arch="x86_64"; rust_target="x86_64-unknown-linux-gnu"; deb_arch="amd64" ;;
-  aarch64|arm64) arch="arm64";  rust_target="aarch64-unknown-linux-gnu"; deb_arch="arm64" ;;
-  *)             die "unsupported architecture: $(uname -m)" ;;
-esac
-
-# --- package-manager detection (overridable) ---------------------------------
-if [[ -n "$force_pkg" ]]; then
-  pkg_type="$force_pkg"
-  case "$pkg_type" in deb|rpm|tarball) ;; *) die "TCUI_PKG must be deb|rpm|tarball" ;; esac
-elif command -v dpkg >/dev/null 2>&1; then
-  pkg_type="deb"
-elif command -v rpm >/dev/null 2>&1; then
-  pkg_type="rpm"
-else
-  pkg_type="tarball"
+bin_dir="${TCUI_BIN_DIR-${HOME:?HOME must be set}/.local/bin}"
+[[ "$bin_dir" == /* && "$bin_dir" != / ]] || die 'TCUI_BIN_DIR must be an absolute directory other than /'
+[[ "$bin_dir" != *$'\n'* && "$bin_dir" != *$'\r'* ]] || die 'TCUI_BIN_DIR must not contain newlines'
+# Reject ambiguous paths and symlink components rather than following them during
+# installation or removal. Spaces are ordinary path characters.
+IFS=/ read -r -a components <<< "${bin_dir#/}"
+path=''
+for component in "${components[@]}"; do
+    [[ -n "$component" && "$component" != . && "$component" != .. ]] || die 'TCUI_BIN_DIR must not contain empty, . or .. components'
+    path="$path/$component"
+    [[ ! -L "$path" ]] || die "refusing symlink directory: $path"
+    if [[ -e "$path" ]]; then
+        [[ -d "$path" ]] || die "not a directory: $path"
+    fi
+done
+[[ "$bin_dir" != */ ]] || die 'TCUI_BIN_DIR must not end with /'
+target="$bin_dir/tcui"
+[[ ! -L "$target" ]] || die "refusing symlink target: $target"
+if [[ -e "$target" ]]; then
+    [[ -f "$target" && -O "$target" ]] || die "target must be a regular file owned by the current user: $target"
 fi
 
-# rpm artifacts are published for x86_64 only; arm64 hosts with an rpm stack
-# fall back to the tarball so the install still succeeds.
-if [[ "$pkg_type" == "rpm" && "$arch" != "x86_64" ]]; then
-  pkg_type="tarball"
+if [[ "$action" == uninstall ]]; then
+    # Never remove directories, configuration, chats, credentials or symlink targets.
+    if [[ -f "$target" ]]; then
+        rm -- "$target"
+        printf 'tcui: removed %s; user data preserved\n' "$target"
+    else
+        printf 'tcui: no installation at %s; user data preserved\n' "$target"
+    fi
+    exit 0
 fi
 
-# --- resolve "latest" to a concrete tag via the GitHub API ------------------
-if [[ "$version" == "latest" ]]; then
-  tag="$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" \
-        | grep -m1 '"tag_name"' \
-        | sed -E 's/^[[:space:]]*"tag_name":[[:space:]]*"v?([^"]+)".*/\1/')"
-  [[ -n "$tag" ]] || die "could not resolve latest release tag from ${repo}"
-else
-  tag="${version#v}"
-fi
-base="https://github.com/${repo}/releases/download/v${tag}"
+[[ "$(uname -s)" == Linux ]] || die 'installer supports Linux only'
+case "$(uname -m)" in x86_64|amd64) ;; *) die 'installer supports x86-64 only' ;; esac
 
-# --- pick the asset filename ------------------------------------------------
-case "$pkg_type" in
-  deb)     asset="tcui_${tag}_${deb_arch}.deb" ;;
-  rpm)     asset="tcui-${tag}-1.x86_64.rpm" ;;
-  tarball) asset="tcui-${rust_target}.tar.gz" ;;
-esac
-
-echo "tcui: installing ${asset} (pkg=${pkg_type}, arch=${arch}, tag=v${tag})"
-
-# --- download + verify -------------------------------------------------------
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
-
-curl -fsSL "${base}/${asset}" -o "${tmp}/${asset}"
-asset_sum="$(sha256sum "${tmp}/${asset}" | awk '{print $1}')"
-
-if curl -fsSL "${base}/SHA256SUMS" -o "${tmp}/SHA256SUMS"; then
-  expected="$(grep -E "[[:space:]]${asset}\$" "${tmp}/SHA256SUMS" | awk '{print $1}')"
-  [[ -n "$expected" ]] || die "no checksum entry for ${asset} in SHA256SUMS"
-  [[ "$asset_sum" == "$expected" ]] \
-    || die "checksum mismatch for ${asset}: got ${asset_sum}, expected ${expected}"
-  echo "tcui: checksum verified (${asset_sum})"
-else
-  err "warning: SHA256SUMS unavailable at v${tag}; installed without checksum verification"
-fi
-
-# --- install -----------------------------------------------------------------
-install_deb() {
-  local file="$1"
-  if (( EUID == 0 )); then
-    dpkg -i "$file"
-  else
-    sudo dpkg -i "$file"
-  fi
-  echo "tcui: /usr/bin/tcui installed from .deb (re-run with TCUI_PKG=tarball to install without root)"
+work=''
+stage=''
+cleanup() {
+    [[ -z "$stage" ]] || rm -rf -- "$stage"
+    [[ -z "$work" ]] || rm -rf -- "$work"
+    return 0
 }
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-install_rpm() {
-  local file="$1"
-  if     command -v dnf    >/dev/null 2>&1; then sudo dnf    -y install "$file"
-  elif   command -v yum    >/dev/null 2>&1; then sudo yum    -y install "$file"
-  elif   command -v zypper >/dev/null 2>&1; then sudo zypper -y install "$file"
-  else   die "no rpm frontend (dnf/yum/zypper) found"
-  fi
-  echo "tcui: /usr/bin/tcui installed from .rpm (re-run with TCUI_PKG=tarball to install without root)"
-}
+source_binary=''
+script="${BASH_SOURCE[0]:-}"
+if [[ -n "$script" && -f "$script" ]]; then
+    script_dir="$(cd -- "$(dirname -- "$script")" && pwd -P)"
+    if [[ -e "$script_dir/tcui" || -L "$script_dir/tcui" ]]; then
+        [[ -f "$script_dir/tcui" && ! -L "$script_dir/tcui" ]] || die 'offline tcui must be a regular file, not a symlink'
+        source_binary="$script_dir/tcui"
+    fi
+fi
 
-install_tarball() {
-  local file="$1"
-  local bin_dir="${TCUI_BIN_DIR:-}"
-  [[ -n "$bin_dir" ]] || bin_dir="$([ "$EUID" = 0 ] && echo /usr/local/bin || echo "$HOME/.local/bin")"
-  mkdir -p "$bin_dir"
-  tar -xzf "$file" -C "$tmp"
-  install -m 755 "${tmp}/tcui" "${bin_dir}/tcui"
-  echo "tcui: installed to ${bin_dir}/tcui"
-  case ":${PATH}:" in
-    *":${bin_dir}:"*) ;;
-    *) err "note: add ${bin_dir} to your PATH (or move tcui somewhere on it)" ;;
-  esac
-}
+if [[ -z "$source_binary" ]]; then
+    repo="${TCUI_REPO:-petterssonjonas/tcui}"
+    version="${TCUI_VERSION:-latest}"
+    [[ "$repo" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die 'TCUI_REPO must be owner/repository'
+    if [[ "$version" == latest ]]; then
+        base="https://github.com/$repo/releases/latest/download"
+    else
+        version="${version#v}"
+        [[ "$version" =~ ^[0-9][A-Za-z0-9.+-]*$ ]] || die 'TCUI_VERSION must be a version such as v1.2.3 or latest'
+        base="https://github.com/$repo/releases/download/v$version"
+    fi
+    asset='tcui-x86_64-unknown-linux-gnu.tar.gz'
+    work="$(mktemp -d "${TMPDIR:-/tmp}/tcui-install.XXXXXXXX")"
+    for name in "$asset" SHA256SUMS; do
+        curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            "$base/$name" --output "$work/$name" || die "could not download $name"
+    done
 
-case "$pkg_type" in
-  deb)     install_deb     "${tmp}/${asset}" ;;
-  rpm)     install_rpm     "${tmp}/${asset}" ;;
-  tarball) install_tarball "${tmp}/${asset}" ;;
+    expected=''
+    while read -r digest filename extra; do
+        if [[ "$filename" == "$asset" || "$filename" == "*$asset" ]]; then
+            [[ -z "$expected" && -z "$extra" && "$digest" =~ ^[[:xdigit:]]{64}$ ]] || die "invalid or duplicate checksum for $asset"
+            expected="${digest,,}"
+        fi
+    done < "$work/SHA256SUMS"
+    [[ -n "$expected" ]] || die "missing checksum for $asset"
+    actual="$(sha256sum -- "$work/$asset")"
+    [[ "${actual%% *}" == "$expected" ]] || die "checksum mismatch for $asset"
+
+    # Accept only the four regular root files in the release contract. Never
+    # extract paths from the archive: stream only tcui into our private directory.
+    listing="$(tar --list --gzip --file "$work/$asset")" || die 'invalid release archive'
+    declare -A members=()
+    while IFS= read -r member; do
+        case "$member" in tcui|install.sh|LICENSE|potion-base-8M-LICENSE) ;; *) die "unexpected archive member: $member" ;; esac
+        [[ ! -v "members[$member]" ]] || die "duplicate archive member: $member"
+        members["$member"]=1
+    done <<< "$listing"
+    (( ${#members[@]} == 4 )) || die 'release archive is missing required files'
+    details="$(tar --list --verbose --gzip --file "$work/$asset")" || die 'invalid release archive'
+    while IFS= read -r detail; do
+        [[ "$detail" == -* ]] || die 'release archive members must be regular files'
+    done <<< "$details"
+    tar --extract --gzip --to-stdout --file "$work/$asset" -- tcui > "$work/tcui" || die 'could not read release binary'
+    source_binary="$work/tcui"
+fi
+
+# Check the ELF header without running an untrusted binary. Require little-endian
+# ELF64, executable or shared-object type, and the AMD64 machine identifier.
+header="$(od -An -tu1 -N20 -- "$source_binary")"
+read -r -a bytes <<< "${header//$'\n'/ }"
+[[ ${#bytes[@]} == 20 ]] || die 'release binary has an invalid ELF header'
+[[ ${bytes[0]} == 127 && ${bytes[1]} == 69 && ${bytes[2]} == 76 && ${bytes[3]} == 70 &&
+   ${bytes[4]} == 2 && ${bytes[5]} == 1 && ${bytes[6]} == 1 &&
+   ( ${bytes[16]} == 2 || ${bytes[16]} == 3 ) && ${bytes[17]} == 0 &&
+   ${bytes[18]} == 62 && ${bytes[19]} == 0 ]] || die 'release binary must be an x86-64 Linux ELF executable'
+
+# Stage on the destination filesystem, then rename atomically. A failed download,
+# validation or copy leaves the previous installation untouched.
+mkdir -p -- "$bin_dir"
+stage="$(mktemp -d "$bin_dir/.tcui-install.XXXXXXXX")"
+install -m 755 -- "$source_binary" "$stage/tcui"
+mv -fT -- "$stage/tcui" "$target"
+printf 'tcui: installed %s\n' "$target"
+case ":${PATH:-}:" in
+    *":$bin_dir:"*) ;;
+    *) err "add $bin_dir to PATH to run tcui" ;;
 esac

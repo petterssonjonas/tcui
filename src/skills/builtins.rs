@@ -70,20 +70,26 @@ pub(crate) const BUILTINS: &[Builtin] = &[
     #[cfg(feature = "memory")]
     Builtin {
         name: "remember",
-        description: "Save one durable fact or preference to local memory.",
+        description: "Save or recall useful facts from the request and conversation context.",
         source: include_str!("../../skills/remember/SKILL.md"),
     },
     #[cfg(feature = "memory")]
     Builtin {
         name: "memory",
-        description: "Search, read, write, forget, or inspect local memory.",
+        description: "Save or recall contextual facts, preferences, and machine configuration.",
         source: include_str!("../../skills/memory/SKILL.md"),
     },
     #[cfg(feature = "memory")]
     Builtin {
         name: "memorize",
-        description: "Search, read, write, forget, or inspect local memory.",
+        description: "Alias for the built-in contextual memory skill.",
         source: include_str!("../../skills/memory/SKILL.md"),
+    },
+    #[cfg(feature = "memory")]
+    Builtin {
+        name: "recall",
+        description: "Recall local memory without saving or changing it.",
+        source: include_str!("../../skills/recall/SKILL.md"),
     },
 ];
 

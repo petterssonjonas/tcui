@@ -5,7 +5,7 @@ use crate::{
         registry::McpProfile,
     },
 };
-use mcp_reqwest::{
+use reqwest::{
     header::{HeaderMap, HeaderValue, AUTHORIZATION},
     redirect::Policy,
     Url,
@@ -189,7 +189,7 @@ pub(crate) fn http_transport(
     url: Url,
     profile: Option<&McpProfile>,
     secret: Option<&str>,
-) -> McpResult<StreamableHttpClientTransport<mcp_reqwest::Client>> {
+) -> McpResult<StreamableHttpClientTransport<reqwest::Client>> {
     let mut headers = HeaderMap::new();
     if let Some(secret) = secret {
         let is_exa = profile.is_some_and(|profile| profile.skill == "exa");
@@ -204,14 +204,14 @@ pub(crate) fn http_transport(
         value.set_sensitive(true);
         headers.insert(
             if is_exa {
-                mcp_reqwest::header::HeaderName::from_static("x-api-key")
+                reqwest::header::HeaderName::from_static("x-api-key")
             } else {
                 AUTHORIZATION
             },
             value,
         );
     }
-    let client = mcp_reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .redirect(Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(35))

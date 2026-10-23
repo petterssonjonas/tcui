@@ -230,3 +230,138 @@ fn frame_padding_allocation_stays_proportional_to_input_size() {
     assert!(output_bytes < source.len() * 16);
     assert!(lines.iter().all(|line| line.width() <= u16::MAX as usize));
 }
+
+fn emphasized_commands(lines: &[Line<'_>]) -> String {
+    lines
+        .iter()
+        .skip(1)
+        .flat_map(|line| &line.spans)
+        .filter(|span| {
+            span.style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        })
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
+#[test]
+fn shell_commands_stand_out_from_screenshot_labels_and_conditionals() {
+    let source = concat!(
+        "(\n",
+        "  printf '%s\\n' '=== Local IP addresses ==='\n",
+        "  if ip -brief address 2>&1; then\n",
+        "    printf '%s\\n' 'ip address exit status: 0'\n",
+        "  else\n",
+        "    printf 'ip address exit status: %s\\n' \"$?\"\n",
+        "  fi\n",
+        "  printf '\\n%s\\n' '=== MAC addresses ==='\n",
+        "  if ip -brief link 2>&1; then\n",
+        "    printf '%s\\n' 'ip link exit status: 0'\n",
+        "  fi\n",
+        ")",
+    );
+    let rendered = code(source, Some("bash"), 100);
+    let emphasized = emphasized_commands(&rendered);
+    assert!(emphasized.contains("ip -brief address"));
+    assert!(emphasized.contains("ip -brief link"));
+    for scaffolding in ["printf", "then", "else", "fi", "Local IP", "MAC addresses"] {
+        assert!(!emphasized.contains(scaffolding), "{emphasized:?}");
+    }
+    let command_color = rendered
+        .iter()
+        .flat_map(|line| &line.spans)
+        .find(|span| span.content.contains("ip -brief address"))
+        .unwrap()
+        .style
+        .fg;
+    let label_color = rendered
+        .iter()
+        .flat_map(|line| &line.spans)
+        .find(|span| span.content.contains("=== Local IP"))
+        .unwrap()
+        .style
+        .fg;
+    assert_ne!(command_color, label_color);
+}
+
+#[test]
+fn shell_emphasis_excludes_comments_literal_labels_and_heredoc_data() {
+    let source = concat!(
+        "# ip -brief address is only a comment\n",
+        "printf '\\n%s\\n' '--- if ip -brief link; then ---'\n",
+        "cat <<'EOF'\n",
+        "ip -brief address\n",
+        "if quoted text; then\n",
+        "EOF\n",
+        "ip -brief link\n",
+    );
+    let emphasized = emphasized_commands(&code(source, Some("sh"), 100));
+    assert!(emphasized.contains("cat"));
+    assert!(emphasized.contains("ip -brief link"));
+    assert!(!emphasized.contains("ip -brief address"), "{emphasized:?}");
+    assert!(!emphasized.contains("then"), "{emphasized:?}");
+    assert!(!emphasized.contains("printf"), "{emphasized:?}");
+}
+
+#[test]
+fn printing_commands_with_real_work_are_not_mistaken_for_annotations() {
+    for source in [
+        "printf '%s\\n' 'hello'",
+        "echo hello",
+        "printf '%s\\n' '--- report ---' > report.txt",
+        "printf '%s\\n' \"--- $(id) ---\"",
+        "printf '%s\\n' '--- not a label ---' | cat",
+    ] {
+        let emphasized = emphasized_commands(&code(source, Some("bash"), 120));
+        assert!(
+            emphasized.starts_with("printf") || emphasized.starts_with("echo"),
+            "{source}: {emphasized:?}"
+        );
+    }
+}
+
+#[test]
+fn shell_emphasis_tracks_wrapped_unicode_and_expanded_tabs() {
+    let command = "ip -brief address dev '界👩‍💻é接口-long-interface-name'";
+    for language in ["sh", "bash", "shell", "zsh", "fish", "BASH"] {
+        for width in [24, 40, 100] {
+            let rendered = code(&format!("\t{command}"), Some(language), width);
+            assert_eq!(
+                emphasized_commands(&rendered),
+                command,
+                "{language}: {width}"
+            );
+            assert!(rendered.iter().all(|line| line.width() <= width));
+        }
+    }
+}
+
+#[test]
+fn fish_conditionals_keep_commands_distinct_from_flow_keywords() {
+    let source = "if ip -brief address\nprintf '%s\\n' '=== IP addresses ==='\nend\n";
+    assert_eq!(
+        emphasized_commands(&code(source, Some("fish"), 100)),
+        "ip -brief address"
+    );
+}
+
+#[test]
+fn incomplete_shell_syntax_is_preserved_not_hidden_by_highlighting() {
+    for source in [
+        "if ip -brief address; then\n",
+        "printf 'unterminated\n",
+        "echo $(ip",
+    ] {
+        let rendered = code(source, Some("bash"), 100);
+        assert_eq!(
+            rendered
+                .iter()
+                .skip(1)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            source
+        );
+    }
+}

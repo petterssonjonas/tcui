@@ -10,6 +10,157 @@ TCUI is functional but still a work in progress and not yet ready for a general 
 cargo run
 ```
 
+## Conversations and response control
+
+Each response has a request ID, an origin conversation ID, and a destination
+conversation ID. Origin and destination normally match. Switching chats does not
+move or cancel a response: it continues in its destination, including when that
+chat is not visible. Each destination permits one active request; other chats
+can run requests independently.
+
+- `/cancel`, or **Escape twice within 1000 ms**, stops the focused chat's running
+  response and keeps its partial text. Persistent chats save that text to disk;
+  temporary chats keep it in memory. The key sequence applies only to chat input,
+  not a dialog or focused terminal. Another key or a view change resets it.
+  Old queued events cannot change a later request.
+- Deleting a running persistent destination creates a **Recovered** conversation with its
+  known history and partial response. The request keeps its original request
+  and origin IDs, but uses the new destination ID. Recovery does not overwrite
+  unreadable or corrupt chat files.
+- `/fork` creates and selects an independent, encrypted conversation named
+  **`Fork of <title>`** in the sidebar. It includes a partial response already received,
+  but the original request continues only in its original destination. The fork
+  retains the provider, model, and reasoning selection. Send or clear pending
+  draft text and inserted documents first. Message history is copied; Chat file
+  links are not. Saved files remain available through **Insert to chat**.
+- `/steer <instruction>` is reserved for real live steering. Current HTTP SSE
+  connections and the Claude print-mode connection cannot accept new input
+  during a response. The command reports this, preserves the draft, and leaves
+  the request unchanged; it does not simulate steering with cancel-and-restart.
+
+A normal app exit cancels and saves remaining responses in persistent chats.
+Cancellation cannot undo completed side effects or guarantee that a remote
+provider stops its own processing. Request preparation currently finishes before
+the event loop can handle cancellation; the key sequence stops running responses.
+Future model-task scheduling can use the same registry with distinct origin and
+destination IDs. This does not add a model-task scheduler.
+
+### Temporary forks
+
+`/temp` opens a memory-only copy in the **Wide right sidebar**, titled
+**`Ephemeral fork of <title> conversation`**. It copies the current messages,
+including a live partial response, but does not move the original request.
+The main chat and temporary chat have separate drafts, inserted documents,
+and requests. Click a pane, or use **Alt+Left** for main and **Alt+Right** for
+temporary. If a temporary pane is already open, `/temp` focuses it.
+
+Close it with **[X]**, `/temp close`, or the right-sidebar close control.
+Closing it cancels its request and deletes its history, without recovery or
+trash. Normal exit also discards it. Temporary history does not enter chat
+lists, bulk exports, or automatic cross-chat recall.
+
+Explicit `@save` can create a Saved file. Contextual `@remember` and `@memory`
+skills work when Memory is available and configured. Other selected skills
+keep their normal behavior. Completed explicit saves survive closing the
+temporary chat. A skill mention alone does not request a memory write.
+Automatic local-media saving is disabled for temporary requests. Closing a chat
+cannot undo a completed skill operation or remove data already sent to a provider.
+
+In the main chat, ask **“Read the temp chat”** or **“Read the ephemeral chat”**
+to copy its visible text into that request and the main chat's saved history.
+The copy includes a live partial response, but not hidden thinking. It is
+marked as untrusted reference data and does not itself activate skill commands.
+If main is still the source conversation, only new branch messages are copied;
+if main has changed to another conversation, the whole temporary history is
+copied. This explicit copy is not limited to the automatic recall excerpt size.
+It remains in main after the temporary pane closes. `/fork` from the temporary
+pane instead creates a persistent continuation in main and leaves the pane open.
+
+### Relevant context from other chats
+
+Before a request, TCUI searches a bounded set of local, encrypted chat documents
+for matching words. It can send **up to three excerpts, at most 3,000 characters
+total**, to the selected provider. Each excerpt includes its conversation ID,
+title, and role and is marked as untrusted evidence, not instructions. This is
+automatic and independent of the optional Memory feature: content from another
+chat can therefore reach the provider selected for the current chat.
+
+The search excludes the current chat, trash, and duplicate content already in
+the request. It examines at most 128 eligible documents, 8 MiB total, and 4,096
+directory entries; documents over 1 MiB are skipped. A notice reports unreadable
+files or a limited search. Excerpts are request-only: they do not become saved
+messages or new memories. Matching is lexical, not a claim of semantic recall
+across all history.
+
+### Literal text and contextual memory skills
+
+HTML/XML-like text remains visible in chat. Answer text does not rename
+conversations or execute hidden memory directives. Titles come from the first
+user message, with a five-word and 16-Unicode-character limit before an
+optional ellipsis.
+
+With Memory enabled and a vault configured, select a skill anywhere in your
+own prompt, or use `/skill <name> <request>`:
+
+```text
+This machine is used for local CI @remember that, and the configuration we have set up this session.
+This machine runs Ubuntu, but I don't @remember what it is for.
+Recover @memory related to this machine.
+/skill recall how this machine was configured
+```
+
+`@remember`, `@memory`, and the existing `@memorize` alias use the full prompt
+and current conversation. The model selects saving or recall from the meaning
+of the request. They do not save the literal text after a marker. If required
+facts or the intended machine are unclear, the skill asks before saving.
+A plain reply can continue that clarification in the same conversation,
+including after restart. A copied question from another chat cannot authorize
+the operation.
+
+`@recall` and `/skill recall` are read-only. The host rejects save, removal,
+and reindex actions for those invocations, including mixed-skill prompts.
+Quoted examples, code, attached documents, and assistant text do not invoke
+memory actions. The host reports actual operation results. Normal answer
+text cannot execute a memory action.
+
+Contextual saves contain Markdown, user or machine scope, relevant tags, and
+a source-conversation title snapshot. Machine records also contain a machine
+ID and readable name. The local identity comes from the TCUI execution host;
+a remote or discussed machine is not automatically that host. Named targets
+use an existing saved identity or a label-derived identity, not verified
+remote hardware discovery. Persistent source IDs are retained when available.
+A first-turn save can precede chat ID allocation; temporary sources retain a
+title without a durable chat ID. Existing unscoped records remain unchanged.
+
+Memory instructions, plans, and saved Markdown have a 1 MiB limit. Contextual notes do not
+have the old literal-fact 500-character limit. Empty notes and recognized
+credential patterns are rejected. Manual retrieval uses at most four planning
+steps, eight search hits per query, and 16,000 characters per tool result;
+truncation is reported. Machine/scope filters apply before vector ranking.
+Existing synchronization still scans records before a search.
+
+Open the right sidebar with `Ctrl+Right`, then use **Memories → View** to
+inspect the note and its stored metadata. **Insert to chat** copies the note
+into the next request. The copy remains in chat history after memory deletion.
+
+A requested memory removal moves the record to Trash and updates the index.
+Sidebar **Delete** still removes the active file directly. Neither path erases
+existing chat copies. Unified deletion, sorting, and filters remain under AR-15.
+Completed saves/removals are reported separately from index failures.
+
+Saved records survive chat closure and restart. **They are not protected by
+the credential-vault password.** Chats and memory records currently use a
+local key file; the SQLite search cache is not password-encrypted. App-wide
+password protection is a planned migration under AR-17, not an implemented
+security guarantee.
+
+Automatic capture remains removed. Automatic recall still runs for ordinary
+prompts when Memory is enabled. Explicit memory tasks use their own bounded
+retrieval instead of a second automatic memory injection. There is no
+independent automatic-recall switch or multi-device synchronization yet.
+See the [actionable review](docs/2026-10-22-actionable-review.md) for the
+remaining memory work and encryption plan.
+
 ## Settings
 
 `Ctrl+P` opens **Settings search**. With no query it offers **Settings tab**;
@@ -38,15 +189,37 @@ pass, not an immediate purge.
 
 ## Commands and terminal tabs
 
-Closed `sh`, `bash`, `shell`, `zsh`, and `fish` code fences in completed assistant
-responses expose **Run** next to the top copy control. Run first opens a review;
-it never executes merely because a response arrived or the review was opened.
+Completed assistant command blocks use an explicit fence such as `bash tcui-run`.
+Supported shells are `sh`, `bash`, `shell`, `zsh`, and `fish`; `tcui-run` is required.
+Fences must be top-level, unindented, closed, and nonempty. Ordinary shell examples,
+quotations, script-file contents, and unfinished or streaming blocks are not actionable.
 
-- Up/Down chooses a block; Space or its checkbox selects it. Only the first block
-  starts selected. PageUp/PageDown scroll the payload.
+Command blocks show their shell and mark visually wrapped lines. Each has a
+**top-right copy icon** and a **bottom-left
+`>_ Run in terminal` control**. Copy preserves the exact command payload, including
+newlines, without fences, prose, or display wrapping. Run opens review for **only
+the clicked block**; receiving a response or opening review never executes it.
+The full-answer copy icon remains separate.
+
+Shell commands and arguments use a contrasting theme color and bold text.
+Recognized output headings, exit-status labels, and control-flow scaffolding keep
+the normal code color. Ordinary `echo`/`printf` work, redirections, and pipelines
+remain emphasized. Colors aid reading, not safety assessment; they never change
+what is copied or approved. Unsupported or oversized syntax remains readable.
+
+`assets/TCUI.md` asks for short output headings followed directly by commands,
+keeping related steps in one paste-ready block. It discourages unnecessary
+conditionals, wrappers, functions, and exit-status boilerplate; use them only when
+the task needs them. Journal/systemd queries retain supported `--no-pager` options.
+Independent diagnostics may continue after a failure; dependent changes must stop
+when prerequisites fail. Warnings and commands being discussed rather than
+recommended stay inline, not in runnable blocks.
+
+- The clicked block starts selected. Space or its checkbox toggles selection;
+  PageUp/PageDown scroll the payload.
 - **Copy** or Ctrl+C copies selected commands, not surrounding prose.
 - **Run** or Ctrl+R explicitly approves the displayed commands in a **new terminal**.
-  The fence interpreter is respected; incompatible mixed interpreters are rejected.
+  The fence interpreter is respected.
   Clean startup skips shell startup files and waits for shell readiness. Approved
   text is sourced from an owner-only temporary script (`0600` on Unix), not typed
   line by line. Interactive `sudo`, confirmation, and `read` prompts therefore
@@ -301,50 +474,357 @@ Vault does not implement Obsidian Sync, APIs, or plugins.
 
 ## Install
 
-Release assets for every published release:
+Releases target **Linux x86-64 with glibc 2.34 or newer**, plus the GCC support
+runtime and CA certificates. CI runs on Ubuntu 26.04, but release builds explicitly
+target the older ABI instead of inheriting the runner's libc. Native packages and
+archives remain the distribution formats. Toolbx is a first-class way to build
+and run TCUI, not a requirement.
 
-- `tcui_<version>_amd64.deb` — Debian/Ubuntu package for x86_64
-- `tcui_<version>_arm64.deb` — Debian/Ubuntu package for aarch64/arm64
-- `tcui-<version>-1.x86_64.rpm` — RPM package for x86_64
-- `tcui-x86_64-unknown-linux-gnu.tar.gz` — portable x86_64 binary
-- `tcui-aarch64-unknown-linux-gnu.tar.gz` — portable aarch64 binary
-- `tcui-<version>-source.tar.gz` — source archive
-- `PKGBUILD` — Arch Linux / AUR `tcui-bin` build script (regenerated per release with the correct `pkgver` and binary checksums)
-- `install.sh`, `SHA256SUMS`, `LICENSE`, `potion-base-8M-LICENSE`
+The baseline is a minimum ABI, not a bundled libc or an exact runtime version pin.
+The binary uses the installed distro's glibc, including newer implementations.
+Keep the distro supported and its security updates installed: vendors
+[backport security fixes](https://access.redhat.com/security/updates/backporting)
+without necessarily changing the upstream version number.
+Running a prebuilt binary does not require Rust, Cargo, a C/C++ compiler, Zig, mise,
+or a container. Optional integrations still need their external commands/services.
 
-Linux install script (detects `uname -m` and the native package manager, downloads the matching `.deb` / `.rpm` / tarball, verifies `SHA256SUMS`, then installs):
+GNU/glibc is the release and required CI target. Static musl builds are available
+from source without a second required CI matrix. macOS remains experimental;
+see the source-build instructions below.
 
-```bash
-curl -fsSL https://github.com/petterssonjonas/tcui/releases/latest/download/install.sh | bash
-```
+Each release contains:
 
-Options, all optional:
+- `tcui_<version>_amd64.deb` and `tcui-<version>-1.x86_64.rpm`
+- `tcui-x86_64-unknown-linux-gnu.tar.gz` with a prebuilt binary, installer, and licenses
+- `PKGBUILD` for Arch's `tcui-bin`, with release-specific checksums
+- `tcui-<version>-source.tar.gz` from the exact tagged commit
+- `install.sh`, `SHA256SUMS`, `LICENSE`, and `potion-base-8M-LICENSE`
 
-| Env var          | Default                  | Notes |
-|------------------|--------------------------|-------|
-| `TCUI_VERSION`   | `latest`                 | Release tag, with or without leading `v`. |
-| `TCUI_PKG`       | auto                     | Force `deb`, `rpm`, or `tarball` (skips auto-detection). |
-| `TCUI_BIN_DIR`   | `~/.local/bin` (or `/usr/local/bin` as root) | Install dir for the tarball fallback only. |
-| `TCUI_REPO`      | `petterssonjonas/tcui`   | Override for forks. |
+### Local user install and uninstall
 
-The release workflow (`.github/workflows/release.yml`) builds all of the above on every published release and on manual dispatch.
-
-### Arch Linux / AUR
-
-Each release ships a `PKGBUILD` (`tcui-bin`, sources the matching prebuilt binary tarball for `x86_64` or `aarch64`). Download it from the release and build locally:
+Download and inspect the installer, then run it without sudo:
 
 ```bash
-curl -fsSL https://github.com/petterssonjonas/tcui/releases/latest/download/PKGBUILD -o PKGBUILD
-makepkg -si
+curl -fL https://github.com/petterssonjonas/tcui/releases/latest/download/install.sh -o install.sh
 ```
 
-The in-repo `packaging/PKGBUILD` is the source of truth the release pipeline regenerates from; AUR maintainers can use it directly when publishing the `tcui-bin` AUR package.
-
-Upgrade in place without touching your config:
+Inspect the downloaded script before executing it:
 
 ```bash
-tcui --upgrade
+bash install.sh
 ```
+
+The installer downloads the tarball and requires a matching `SHA256SUMS` entry
+before replacing the binary. It never invokes a package manager. Uninstall removes
+only the installed binary, leaving configuration, chats, credentials, and directories.
+Keep the downloaded script; uninstall later with `bash install.sh uninstall`.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `TCUI_VERSION` | `latest` | Release tag, with or without `v`. |
+| `TCUI_BIN_DIR` | `$HOME/.local/bin` | Absolute, normalized, symlink-free destination. Add it to `PATH`. |
+| `TCUI_REPO` | `petterssonjonas/tcui` | Release repository, including forks. |
+
+For offline installation, download the tarball and `SHA256SUMS` from the **same
+release**, verify the archive, then extract it into an empty directory and run
+its `install.sh`. A sibling `tcui` binary selects offline mode and is trusted as
+already verified; `TCUI_VERSION` and `TCUI_REPO` do not override that binary.
+
+```bash
+(
+  set -euo pipefail
+  grep '  tcui-x86_64-unknown-linux-gnu.tar.gz$' SHA256SUMS | sha256sum --check --strict
+  mkdir tcui-release
+  tar -xzf tcui-x86_64-unknown-linux-gnu.tar.gz -C tcui-release
+  bash tcui-release/install.sh
+)
+```
+
+Checksums detect corruption; they do not authenticate a compromised publisher.
+Inspect downloaded scripts and recipes before executing them.
+
+### Native packages and Arch
+
+Install the downloaded `.deb` with `sudo apt install ./tcui_<version>_amd64.deb`,
+or the `.rpm` with `sudo dnf install ./tcui-<version>-1.x86_64.rpm`.
+Use the same package manager to upgrade or remove a system installation.
+The local installer/uninstaller does not manage system packages.
+
+On Arch, download `PKGBUILD` from the selected release, inspect it, then run
+`makepkg -si`. It downloads and verifies the matching x86-64 binary and both
+licenses. `packaging/PKGBUILD` is a template, not a directly usable AUR recipe;
+the release pipeline generates the usable file. Nothing is published to AUR
+automatically.
+
+### Build from source on bare metal
+
+Use a complete checkout or the release's source archive, including `Cargo.lock`
+and the bundled model assets. Install [mise](https://mise.jdx.dev/getting-started.html)
+and the native SDK for the build machine:
+
+| Linux distribution | Native build packages |
+| --- | --- |
+| Ubuntu / Debian | `gcc`, `binutils`, `libc6-dev` |
+| Fedora / RHEL-compatible | `gcc`, `binutils`, `glibc-devel` |
+| Arch | `gcc`, `binutils`, `glibc` |
+
+Rust/Cargo are versioned through mise. These system compiler/linker/header packages
+are native SDK exceptions, not TCUI runtime compiler requirements. Bash, CA
+certificates and download tools are also needed for setup. No `just`, C++ compiler,
+separate SQLite installation, or OpenSSL development package is required.
+
+From the source directory:
+
+```bash
+mise install rust
+mise exec rust -- cargo build --locked --release
+./target/release/tcui
+```
+
+Naming `rust` in `mise exec` limits automatic tool installation to the source-build
+toolchain. Bare `mise exec -- ...` can otherwise install every configured tool,
+including release packaging and CI tools that an ordinary source build does not need.
+
+This ordinary GNU build uses the build machine's libc; it does **not** promise the
+release's minimum ABI. Arch users can compile this way without using the binary
+PKGBUILD. To install a source build locally, copy the executable to a directory
+you control in `PATH`; remove that executable to uninstall. Keep configuration
+and credentials unless you explicitly intend to delete your data.
+
+#### GNU build with the glibc 2.34 release baseline
+
+On Linux x86-64, use the pinned Zig cross-linker rather than downgrading host glibc.
+Zig and `cargo-zigbuild` are build tools installed in mise's user-local tool
+directory, not system packages or TCUI runtime dependencies. Cargo does not fetch
+Zig by itself; the following mise command installs both pinned tools. No Zig
+application source is involved, and this does not replace the system's glibc.
+Python 3.11+ and `readelf` from binutils are required for the artifact check.
+
+```bash
+mise install rust zig cargo:cargo-zigbuild
+mise exec rust zig cargo:cargo-zigbuild -- bash scripts/build-release.sh
+./target/x86_64-unknown-linux-gnu/release/tcui
+```
+
+The script sets the x86-64 CPU baseline and rejects inherited compiler overrides.
+It checks the executable's loader, shared libraries, and required symbol versions;
+optional weak symbols are not mistaken for mandatory newer libc dependencies.
+Full CI also runs the packaged executable in a pinned glibc 2.34 environment.
+`CARGO_TARGET_DIR` can select another writable build/output directory.
+
+#### Static musl build
+
+Build this separately from the GNU release. The included header supplies a missing
+`sys/types.h` include in sqlite-vec's C build; it does not disable vector memory.
+
+```bash
+mise install rust zig cargo:cargo-zigbuild
+mise exec rust -- rustup target add --toolchain 1.99.1 x86_64-unknown-linux-musl
+CFLAGS_x86_64_unknown_linux_musl="-include $PWD/scripts/musl-headers.h" \
+  mise exec rust zig cargo:cargo-zigbuild -- cargo zigbuild --locked --release --all-features \
+    --target x86_64-unknown-linux-musl
+./target/x86_64-unknown-linux-musl/release/tcui
+```
+
+The static executable does not require the destination system to install musl or
+glibc. A compatible Linux kernel/CPU, certificates, and any external commands you
+use are still needed. DNS/NSS integration can differ from glibc. Rebuild to pick up
+bundled runtime security fixes. Musl builds intentionally refuse `tcui upgrade`:
+published upgrade assets are GNU binaries, so update musl builds from source.
+
+#### macOS build attempt
+
+On a Mac, install Apple's Xcode Command Line Tools (`xcode-select --install`) and
+mise. The Apple SDK/compiler is a platform SDK exception to mise tool management.
+From the source directory:
+
+```bash
+mise install rust
+mise exec rust -- cargo build --locked --release
+./target/release/tcui
+```
+
+Native targets are `aarch64-apple-darwin` (Apple Silicon) and
+`x86_64-apple-darwin` (Intel). The Linux-to-Apple-Silicon cross-build reached the final
+link, then failed because the Apple SDK/frameworks were unavailable; no native Mac
+run has been verified. Cross-compilation needs a legitimately obtained SDK, not
+just the Rust target. Systemd reminders have no macOS backend, native Notification
+Center integration is not implemented, and the updater/installer publish only
+GNU/Linux x86-64 artifacts. A successful compile alone does not establish full
+macOS support.
+
+### Running in Toolbx or Distrobox
+
+Use a container for an integrated workspace or to run on an older host libc
+without replacing it. The host must support the container engine and image;
+this does not fix an unsupported CPU architecture or an incompatible kernel.
+On managed servers, obtain permission to use rootless containers first.
+
+Choose **one** of these environments. Reuse an existing `tcui` container rather
+than recreating it:
+
+```bash
+# Toolbx: commands run on the host.
+toolbox create --image registry.fedoraproject.org/fedora-toolbox:45 tcui
+toolbox enter tcui
+```
+
+```bash
+# Distrobox: commands run on the host.
+distrobox create --name tcui --image docker.io/library/ubuntu:26.04
+distrobox enter tcui
+```
+
+Inside the container, ensure Bash, curl, tar, CA certificates, and the GCC support
+runtime are available from the image's package manager (`libgcc` on Fedora,
+`libgcc-s1` on Ubuntu). Download and inspect `install.sh`, but do not run the
+ordinary host-install command above. Use a separate destination so that an
+incompatible binary does not replace a host-native installation:
+
+```bash
+# Inside the chosen container, after inspecting the downloaded installer.
+TCUI_BIN_DIR="$HOME/.local/share/tcui-container/bin" bash install.sh
+"$HOME/.local/share/tcui-container/bin/tcui"
+```
+
+Subsequent launches from the host must also enter the chosen container:
+
+```bash
+# Toolbx:
+toolbox run --container tcui "$HOME/.local/share/tcui-container/bin/tcui"
+# Or Distrobox:
+distrobox enter --name tcui -- "$HOME/.local/share/tcui-container/bin/tcui"
+```
+
+Uninstall inside that container with
+`TCUI_BIN_DIR="$HOME/.local/share/tcui-container/bin" bash install.sh uninstall`.
+Configuration and credentials remain in the shared home directory.
+
+**These environments are not security sandboxes.** They integrate with the host,
+including its home directory and potentially its credentials and sockets.
+TCUI's local commands and embedded terminals run inside the container by default;
+package and service commands do not automatically manage the host. You can copy a
+suggested command into a separate host terminal instead: using TCUI's embedded
+terminal is optional. For execution from TCUI, use an explicit SSH connection or a
+deliberate host-execution mechanism, and confirm which machine receives the command.
+
+Scheduled reminders and desktop notifications need separate integration checks:
+host systemd may otherwise try to execute the container's binary using the
+incompatible host runtime. These mutable environments also need package updates;
+pulling a newer image does not update an existing container. Image tags and
+subsequent package changes are not a reproducibility guarantee.
+
+See the upstream [Toolbx documentation](https://containertoolbx.org/doc/) and
+[Distrobox documentation](https://distrobox.it/usage/distrobox-create/) for engine
+requirements, host integration, and image maintenance.
+
+### Compiling in Toolbx or Distrobox
+
+Create or enter an environment as above; compilation does not require installing
+a released TCUI binary first. Install mise and the native SDK packages **inside**
+that environment, then follow the bare-metal GNU or musl build instructions from
+the source directory in the shared home. For example, after installing the Rust
+pin inside `tcui`, run from the checkout on the host:
+
+```bash
+toolbox run --container tcui mise exec rust -- cargo build --locked --release
+toolbox run --container tcui ./target/release/tcui
+```
+
+For Distrobox, use `distrobox enter --name tcui --` in place of
+`toolbox run --container tcui`. Ordinary builds should continue running inside
+their build environment: compiling against newer container glibc does not make
+the result compatible with an older host. Use the explicit glibc 2.34 or static
+musl procedure when building for another machine, and verify there before relying
+on it. Contributors and agents still follow the `tcui` Toolbx workflow in
+`AGENTS.md`; bare-metal instructions are available for end-user source builds.
+
+For system-specific help, provide `/etc/os-release`, `uname -m`, `uname -r`, and
+`getconf GNU_LIBC_VERSION` output (or its error on a non-glibc system). A useful
+request to your administrator or AI assistant is:
+
+> Recommend the least-invasive supported way to run or build TCUI on this system.
+> Check CPU, libc, kernel, container permissions, and where commands will execute.
+> Keep the host libc unchanged, use verified release artifacts, and explain any
+> package installation or privilege requirement before proceeding.
+
+Do not share credentials, private keys, or an unfiltered environment dump.
+
+## Contributing and releases
+
+Read [AGENTS.md](AGENTS.md).
+Feature PRs squash into `development`; reviewed promotions use a merge commit
+into `main`. Auto-merge is never enabled.
+
+Codegraph and Context7 are development tools, not application dependencies.
+Initialize a checkout with `codegraph init .`, then refresh with `codegraph sync .`.
+The index remains ignored and local. Use Context7 for version-appropriate library
+documentation and the relevant installed Rust skills for Rust work and review.
+
+Local development runs inside `toolbox enter tcui`. Rust is pinned to **1.99.1**
+in both `mise.toml` and `rust-toolchain.toml`; activate mise in that shell or prefix
+Rust commands with `mise exec rust --`. Install development tools with `mise use <tool>@<version>`
+from the project directory, rather than installing an unversioned host or distro CLI.
+
+CI prerequisites: the pinned Rust toolchain, a C compiler and linker, Python 3.11+,
+Bash, curl, tar, Git, and standard Linux tools. `scripts/setup-ci.sh` installs the
+requested tier's tools from `mise.toml`; local and GitHub CI use the same pins.
+Full validation adds Zig/cargo-zigbuild, cargo-deb, and cargo-generate-rpm.
+Package inspection needs binutils, `dpkg-deb`, `rpm`, `rpm2cpio`, and `cpio`;
+these native package-system tools may require a distro-package exception.
+CI disables implicit tool installation during execution so that the selected
+setup tier, not the complete tool manifest, determines what gets installed.
+
+TCUI itself is Rust. SQLite/sqlite-vec, Tree-sitter and AWS-LC still contain native
+C code; BLAKE3 retains its optimized assembly backend. The memory tokenizer uses
+Rust regex and disables unused C++ training code. The Linux build does not require
+a C++ compiler or `libstdc++`; replacing the database or TLS provider solely to
+remove C would require a separate compatibility/security evaluation.
+Tokio's virtual-clock utilities are enabled for test targets, not ordinary builds
+(including ordinary debug builds).
+
+The GCC support runtime (`libgcc_s.so.1`) is not a compiler. Ordinary GNU builds
+link it directly; the Zig release currently does not. Packages retain this
+standard runtime, which is also a dependency of Rocky 9/Fedora glibc.
+
+Dependency checks use `mise exec rust cargo:cargo-audit -- cargo audit` (pinned in `mise.toml`).
+
+```bash
+bash scripts/setup-ci.sh development
+MISE_EXEC_AUTO_INSTALL=false mise exec -- bash scripts/ci.sh development
+# Full validation requires a clean committed checkout and absent/empty target/dist:
+bash scripts/setup-ci.sh full
+MISE_EXEC_AUTO_INSTALL=false mise exec -- bash scripts/ci.sh full
+# Separate oldest-runtime check needs Docker, or TCUI_CONTAINER_ENGINE=podman:
+bash scripts/smoke-oldest-runtime.sh
+```
+
+Development runs Rust lint/tests/CLI smoke plus installer and workflow checks.
+Tests use temporary HOME/XDG directories while preserving Rust's tool and cache locations.
+Environment-mutating tests retain the shared environment lock until cleanup.
+Run their async work with `Runtime::block_on` from a synchronous test, keeping
+lock acquisition outside the async runtime.
+Main adds the no-default-feature configuration, rustdoc, the glibc 2.34 release
+build and ABI gate, packaging, and native-payload/Arch-recipe/install smoke.
+Ubuntu 26.04 full CI/release jobs additionally run the packaged binary in a pinned
+Rocky Linux 9 container. That checks the old userspace ABI, not an old host kernel.
+Musl has source-build instructions rather than a second required CI matrix.
+Full validation produces `${CARGO_TARGET_DIR:-target}/dist`; move previous outputs
+aside before another full run. Local Toolbx validation does not require nesting
+containers; run the separate oldest-runtime check where an engine is available.
+Both branches also run `bash scripts/scan-secrets.sh`: it downloads a checksum-pinned
+Gitleaks CLI and scans full reachable Git history, including merge resolutions.
+A shallow checkout is rejected. This scan checks committed history, not uncommitted files.
+
+Only an explicit release instruction authorizes tagging and publication. After
+the version commit reaches `main`, create a stable `vX.Y.Z` tag on that commit
+and manually run `release.yml` **on main**, supplying `tag=vX.Y.Z` (Actions UI or
+`gh workflow run release.yml --ref main -f tag=vX.Y.Z`). The workflow verifies
+ancestry and version, runs full CI on the exact tag, and creates the GitHub
+Release with all assets. Merges and tag pushes alone do not publish anything.
+Before publication, verify GitHub protections require reviews and passing checks
+on both branches, block direct pushes, and restrict the `release` environment to
+`main` with owner approval. Workflow files do not configure those remote safeguards.
 
 ## License
 

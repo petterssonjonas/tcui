@@ -184,25 +184,33 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn open_command_review(&mut self, message_index: usize) {
-        let Some(message) = self
+    pub(crate) fn command_block_for_message(
+        &self,
+        message_index: usize,
+        block_index: usize,
+    ) -> Option<crate::ui::command_blocks::CommandBlock> {
+        if !self.ui.app_tabs.active_view().is_chat() {
+            return None;
+        }
+        let message = self
             .ui
             .tabs
             .get(self.ui.active_tab)
             .filter(|tab| !(tab.streaming && message_index.saturating_add(1) == tab.messages.len()))
             .and_then(|tab| tab.messages.get(message_index))
-            .filter(|message| message.role == "assistant")
-        else {
+            .filter(|message| message.role == "assistant")?;
+        crate::ui::command_blocks::command_block(&message.content, block_index)
+    }
+
+    pub(crate) fn open_command_review(&mut self, message_index: usize, block_index: usize) {
+        let Some(block) = self.command_block_for_message(message_index, block_index) else {
             return;
         };
-        let blocks = crate::ui::command_blocks::shell_blocks(&message.content);
-        if blocks.is_empty() {
-            return;
-        }
         match self.terminal_start_directory() {
             // The review snapshots its executable; changes elsewhere cannot alter approval.
             Ok(directory) => {
-                let mut review = CommandReview::new(blocks, directory, Self::terminal_host(), None);
+                let mut review =
+                    CommandReview::new(vec![block], directory, Self::terminal_host(), None);
                 if let Ok(config) = self.config.try_read() {
                     if let Some(shell) = config
                         .tui
@@ -697,9 +705,9 @@ mod tests {
             app.ui.tabs[0].messages.push(crate::app::Message::new(
                 0,
                 "assistant".into(),
-                "```bash\nprintf reviewed\n```\n".into(),
+                "```bash tcui-run\nprintf reviewed\n```\n".into(),
             ));
-            app.open_command_review(0);
+            app.open_command_review(0, 0);
             assert!(app.ui.command_review.is_some());
             assert!(matches!(app.terminal_key(key(KeyCode::Enter)), Some(None)));
             assert!(app.terminal_paste("unexpected paste\n"));
@@ -708,8 +716,57 @@ mod tests {
             assert!(app.ui.command_review.is_none());
             assert!(app.ui.terminals.sessions.is_empty());
             app.ui.tabs[0].streaming = true;
-            app.open_command_review(0);
+            app.open_command_review(0, 0);
             assert!(app.ui.command_review.is_none());
+        });
+    }
+
+    #[test]
+    fn command_review_snapshots_only_the_clicked_runnable_block() {
+        crate::app::tests::with_test_app("command-review-specific-block", |app| {
+            let expected = "printf '%s\\n' 'second batch'\nprintf '%s\\n' \"$?\"\n";
+            app.ui.tabs[0].messages.push(crate::app::Message::new(
+                0,
+                "assistant".into(),
+                format!(
+                    "Do not run `false`.\n\n```sh\nfalse\n```\n\n\
+                     ```bash tcui-run\nprintf first\n```\n\n\
+                     ```sh tcui-run\n{expected}```\n"
+                ),
+            ));
+            app.open_command_review(0, 1);
+            let review = app
+                .ui
+                .command_review
+                .as_ref()
+                .expect("selected block review");
+            assert_eq!(review.command(), expected);
+            assert_eq!(review.shell(), Ok("sh".into()));
+            assert!(app.ui.terminals.sessions.is_empty());
+
+            app.ui.tabs[0].messages[0].content = "```sh tcui-run\nprintf changed\n```".into();
+            assert_eq!(
+                app.ui.command_review.as_ref().expect("snapshot").command(),
+                expected
+            );
+            app.terminal_key(key(KeyCode::Esc));
+            app.open_command_review(0, 1);
+            assert!(app.ui.command_review.is_none());
+        });
+    }
+
+    #[test]
+    fn command_controls_reject_non_assistant_and_background_messages() {
+        crate::app::tests::with_test_app("command-control-message-boundary", |app| {
+            app.ui.tabs[0].messages.push(crate::app::Message::new(
+                0,
+                "user".into(),
+                "```bash tcui-run\nprintf user\n```".into(),
+            ));
+            assert!(app.command_block_for_message(0, 0).is_none());
+            app.ui.tabs[0].messages[0].role = "assistant".into();
+            app.ui.app_tabs.open_view(AppView::Settings);
+            assert!(app.command_block_for_message(0, 0).is_none());
         });
     }
 
