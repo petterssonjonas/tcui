@@ -3,7 +3,7 @@ use crate::app::message::Message;
 use color_eyre::Result;
 use rusqlite::{params, types::Type, Connection};
 
-use crate::storage::chat_store::{ChatDocument, ChatStore};
+use crate::storage::chat_store::{ChatDocument, ChatLineage, ChatStore};
 use crate::storage::crypto::{
     decrypt_shared_text_with_key, encrypt_shared_text_with_key, SharedKey,
 };
@@ -130,6 +130,57 @@ impl Storage {
 
     pub fn create_conversation(&self, tab_id: i64) -> Result<i64> {
         self.chat_store.create_conversation(tab_id)
+    }
+
+    pub(crate) fn chat_reader(&self) -> ChatStore {
+        self.chat_store.clone()
+    }
+
+    pub(crate) fn read_chat_document(&self, conversation_id: i64) -> Result<ChatDocument> {
+        self.chat_store.read_document(conversation_id)
+    }
+
+    pub(crate) fn conversation_exists(&self, conversation_id: i64) -> Result<bool> {
+        self.chat_store.conversation_exists(conversation_id)
+    }
+
+    pub(crate) fn create_conversation_snapshot(
+        &self,
+        tab_id: i64,
+        title: &str,
+        messages: &[Message],
+    ) -> Result<i64> {
+        Ok(self
+            .chat_store
+            .create_snapshot(tab_id, title, messages, None)?
+            .id)
+    }
+
+    pub(crate) fn create_ephemeral_conversation(
+        &self,
+        tab_id: i64,
+        parent_id: i64,
+        title: &str,
+        messages: &[Message],
+    ) -> Result<i64> {
+        self.chat_store.create_ephemeral_snapshot(
+            tab_id,
+            title,
+            messages,
+            ChatLineage::from_messages(parent_id, messages),
+        )
+    }
+
+    pub(crate) fn fork_conversation(
+        &self,
+        tab_id: i64,
+        source_conversation_id: i64,
+        title: &str,
+        messages: &[Message],
+    ) -> Result<ChatDocument> {
+        let parent = ChatLineage::from_messages(source_conversation_id, messages);
+        self.chat_store
+            .create_snapshot(tab_id, title, messages, Some(parent))
     }
 
     pub fn get_conversations(&self, tab_id: i64) -> Result<Vec<ConversationEntry>> {
@@ -446,7 +497,7 @@ mod tests {
     use super::*;
     use crate::storage::chat_store::ChatDocument;
     use crate::storage::crypto::{read_encrypted_document, SharedKey};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
     fn env_lock() -> &'static Mutex<()> {
@@ -828,14 +879,14 @@ mod tests {
         (storage, root)
     }
 
-    fn chat_path(data_home: &PathBuf, conversation_id: i64) -> PathBuf {
+    fn chat_path(data_home: &Path, conversation_id: i64) -> PathBuf {
         data_home
             .join("tcui")
             .join("chats")
             .join(format!("{:016x}.tcui-chat", conversation_id as u64))
     }
 
-    fn trash_chat_path(data_home: &PathBuf, conversation_id: i64) -> PathBuf {
+    fn trash_chat_path(data_home: &Path, conversation_id: i64) -> PathBuf {
         data_home
             .join("tcui")
             .join("chats")
@@ -843,3 +894,7 @@ mod tests {
             .join(format!("{:016x}.tcui-chat", conversation_id as u64))
     }
 }
+
+#[cfg(test)]
+#[path = "ephemeral_tests.rs"]
+mod ephemeral_tests;

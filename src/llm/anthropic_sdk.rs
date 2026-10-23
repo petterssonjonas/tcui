@@ -7,10 +7,7 @@ use color_eyre::eyre::{eyre, WrapErr};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
-use super::chat::{
-    flush_title_filter, push_title_filtered_content, ChatRequest, ChatStreamEvent,
-    ChatStreamOutput, TitleTagFilter,
-};
+use super::chat::{ChatRequest, ChatStreamEvent, ChatStreamOutput};
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_EVENT_BYTES: u64 = 4 * 1024 * 1024;
@@ -158,7 +155,6 @@ where
     let mut reader = BufReader::new(stdout);
     let mut line = Vec::new();
     let mut output = ChatStreamOutput::default();
-    let mut filter = TitleTagFilter::default();
     let mut completed = false;
     let mut received_text = false;
     loop {
@@ -187,9 +183,8 @@ where
                 received_text |= event
                     .pointer("/delta/text")
                     .and_then(serde_json::Value::as_str)
-                    .is_some();
-                let events =
-                    super::chat::anthropic_events(serde_json::from_value(event)?, &mut filter)?;
+                    .is_some_and(|text| !text.is_empty());
+                let events = super::chat::anthropic_events(serde_json::from_value(event)?)?;
                 for event in events {
                     output.push(&event);
                     on_event(event);
@@ -203,13 +198,14 @@ where
                 }
                 // Partial streams already emitted the reply; result is not another delta.
                 if !received_text {
-                    if let Some(text) = message.get("result").and_then(serde_json::Value::as_str) {
-                        let mut events = Vec::new();
-                        push_title_filtered_content(&mut events, filter.push(text));
-                        for event in events {
-                            output.push(&event);
-                            on_event(event);
-                        }
+                    if let Some(text) = message
+                        .get("result")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|text| !text.is_empty())
+                    {
+                        let event = ChatStreamEvent::Answer(text.to_owned());
+                        output.push(&event);
+                        on_event(event);
                     }
                 }
                 if let Some(usage) = message.get("usage") {
@@ -233,7 +229,6 @@ where
             "Claude CLI ended before a successful result. {DEPENDENCY_ERROR}"
         ));
     }
-    flush_title_filter(&mut output, on_event, filter);
     if output.answer.is_empty() && output.thinking.is_empty() {
         return Err(eyre!("Anthropic Agent SDK returned an empty response."));
     }
@@ -270,20 +265,66 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn streams_text_thinking_title_and_usage_without_duplicate_result() {
+    async fn streams_literal_text_thinking_and_usage_without_duplicate_result() {
         let stream = concat!(
             "{\"type\":\"stream_event\",\"event\":{\"delta\":{\"thinking\":\"reason\"}}}\n",
-            "{\"type\":\"stream_event\",\"event\":{\"delta\":{\"text\":\"<tcui:chat-title>Title</tcui:chat-title>Hello\"}}}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"delta\":{\"text\":\"<tcui:chat\"}}}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"delta\":{\"text\":\"-title>Title</tcui:chat-title>Hello\"}}}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"delta\":{\"text\":\" \\\"<memory>quoted</memory>\\\" <tcui:chat-title>unfinished\"}}}\n",
             "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Hello\",\"usage\":{\"input_tokens\":2,\"output_tokens\":3}}\n",
         );
         let mut events = Vec::new();
         let output = consume(stream.as_bytes(), &mut |event| events.push(event))
             .await
             .unwrap();
-        assert_eq!(output.answer, "Hello");
+        assert_eq!(
+            output.answer,
+            "<tcui:chat-title>Title</tcui:chat-title>Hello \"<memory>quoted</memory>\" <tcui:chat-title>unfinished"
+        );
         assert_eq!(output.thinking, "reason");
         assert_eq!(output.total_tokens, Some(5));
-        assert!(events.contains(&ChatStreamEvent::Title("Title".to_owned())));
+        assert_eq!(
+            events,
+            vec![
+                ChatStreamEvent::Thinking("reason".to_owned()),
+                ChatStreamEvent::Answer("<tcui:chat".to_owned()),
+                ChatStreamEvent::Answer("-title>Title</tcui:chat-title>Hello".to_owned()),
+                ChatStreamEvent::Answer(
+                    " \"<memory>quoted</memory>\" <tcui:chat-title>unfinished".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn result_only_response_preserves_literal_tags() {
+        let text = "<tcui:chat-title>Title</tcui:chat-title> \"<memory>quoted</memory>\" <tcui:chat-title>unfinished";
+        let stream = format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "result": text,
+            })
+        );
+        let mut events = Vec::new();
+        let output = consume(stream.as_bytes(), &mut |event| events.push(event))
+            .await
+            .unwrap();
+
+        assert_eq!(output.answer, text);
+        assert_eq!(events, vec![ChatStreamEvent::Answer(text.to_owned())]);
+    }
+
+    #[tokio::test]
+    async fn empty_text_delta_does_not_discard_the_result_answer() {
+        let stream = concat!(
+            "{\"type\":\"stream_event\",\"event\":{\"delta\":{\"text\":\"\"}}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"<tag>complete answer</tag>\"}\n",
+        );
+        let output = consume(stream.as_bytes(), &mut |_| {}).await.unwrap();
+        assert_eq!(output.answer, "<tag>complete answer</tag>");
     }
 
     #[tokio::test]

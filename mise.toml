@@ -1,0 +1,10 @@
+[tools]
+"cargo:cargo-audit" = "0.22.2"
+"cargo:cargo-deb" = "3.8.0"
+"cargo:cargo-generate-rpm" = "0.21.1"
+"cargo:cargo-zigbuild" = "0.24.0"
+github-cli = "2.97.0"
+jactionlint = "2.3.0"
+rust = "1.99.1"
+shellcheck = "0.11.0"
+zig = "0.17.0"

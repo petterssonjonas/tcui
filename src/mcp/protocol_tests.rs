@@ -9,7 +9,7 @@ use tokio::{
 };
 
 struct Fixture {
-    url: mcp_reqwest::Url,
+    url: reqwest::Url,
     requests: Arc<Mutex<Vec<(String, Value)>>>,
     task: JoinHandle<()>,
 }
@@ -33,8 +33,7 @@ impl Fixture {
     ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url =
-            mcp_reqwest::Url::parse(&format!("http://{}/mcp", listener.local_addr().unwrap()))
-                .unwrap();
+            reqwest::Url::parse(&format!("http://{}/mcp", listener.local_addr().unwrap())).unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = requests.clone();
         let task = tokio::spawn(async move {

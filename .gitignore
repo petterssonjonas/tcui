@@ -1,4 +1,5 @@
 .gitnexus
+.codegraph/
 target/
 .opencode/
 .omo/

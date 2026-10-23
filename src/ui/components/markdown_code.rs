@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, ops::Range};
 
 use ratatui::{
     style::{Modifier, Style},
@@ -6,6 +6,16 @@ use ratatui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+
+#[path = "markdown_shell.rs"]
+mod shell;
+
+#[derive(Clone, Copy)]
+struct CommandEmphasis<'a> {
+    ranges: &'a [Range<usize>],
+    offset: usize,
+    style: Style,
+}
 
 const TAB_STOP: usize = 8;
 
@@ -73,8 +83,17 @@ pub(super) fn render_code(
             }
         }
     } else {
+        let commands =
+            language.and_then(|language| shell::command_ranges(content, &source, language));
+        let mut offset = 0;
         for line in source {
-            push_wrapped(lines, &line, width, style, true);
+            let emphasis = commands.as_deref().map(|ranges| CommandEmphasis {
+                ranges,
+                offset,
+                style: style.fg(theme.warning).add_modifier(Modifier::BOLD),
+            });
+            push_wrapped_styled(lines, &line, width, style, true, emphasis);
+            offset += line.len() + 1;
         }
     }
 }
@@ -117,6 +136,17 @@ fn push_wrapped(
     style: Style,
     continuation: bool,
 ) {
+    push_wrapped_styled(lines, text, width, style, continuation, None);
+}
+
+fn push_wrapped_styled(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    width: usize,
+    style: Style,
+    continuation: bool,
+    emphasis: Option<CommandEmphasis<'_>>,
+) {
     let mut rest = text;
     let mut continued = false;
     loop {
@@ -133,13 +163,19 @@ fn push_wrapped(
         };
         let available = width - prefix.width();
         let (part, remaining) = split_width(rest, available);
-        let mut row = String::from(prefix);
         if part.is_empty() && !remaining.is_empty() {
             // A two-cell grapheme cannot fit a one-cell viewport. Show its lossless
             // Unicode escape rather than splitting it or silently clipping it.
             if let Some(grapheme) = remaining.graphemes(true).next() {
                 let escaped: String = grapheme.chars().flat_map(char::escape_unicode).collect();
-                push_wrapped(lines, &escaped, width, style, false);
+                let escaped_style = emphasis
+                    .filter(|emphasis| {
+                        emphasis.ranges.iter().any(|range| {
+                            range.contains(&(emphasis.offset + text.len() - rest.len()))
+                        })
+                    })
+                    .map_or(style, |emphasis| emphasis.style);
+                push_wrapped(lines, &escaped, width, escaped_style, false);
                 rest = &remaining[grapheme.len()..];
                 if rest.is_empty() {
                     break;
@@ -148,8 +184,40 @@ fn push_wrapped(
                 continue;
             }
         }
-        row.push_str(part);
-        lines.push(Line::from(Span::styled(row, style)));
+        let mut spans = Vec::new();
+        if !prefix.is_empty() {
+            spans.push(Span::styled(prefix, style));
+        }
+        if let Some(emphasis) = emphasis {
+            let start = emphasis.offset + text.len() - rest.len();
+            let end = start + part.len();
+            let first = emphasis.ranges.partition_point(|range| range.end <= start);
+            let mut position = start;
+            for range in &emphasis.ranges[first..] {
+                if range.start >= end {
+                    break;
+                }
+                let highlighted_start = range.start.max(start);
+                let highlighted_end = range.end.min(end);
+                if position < highlighted_start {
+                    spans.push(Span::styled(
+                        part[position - start..highlighted_start - start].to_owned(),
+                        style,
+                    ));
+                }
+                spans.push(Span::styled(
+                    part[highlighted_start - start..highlighted_end - start].to_owned(),
+                    emphasis.style,
+                ));
+                position = highlighted_end;
+            }
+            if position < end || spans.is_empty() {
+                spans.push(Span::styled(part[position - start..].to_owned(), style));
+            }
+        } else {
+            spans.push(Span::styled(part.to_owned(), style));
+        }
+        lines.push(Line::from(spans));
         if remaining.is_empty() {
             break;
         }

@@ -8,7 +8,7 @@ static NEXT_APP_TAB_ID: AtomicU64 = AtomicU64::new(1);
 pub struct AppTabId(u64);
 
 impl AppTabId {
-    fn next() -> Self {
+    pub(crate) fn next() -> Self {
         match NEXT_APP_TAB_ID.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             current.checked_add(1)
         }) {

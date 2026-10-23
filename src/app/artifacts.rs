@@ -91,11 +91,18 @@ impl TuiApp {
             self.ui.memory_artifacts = documents
                 .into_iter()
                 .map(|(path, document)| {
-                    let body = strip_frontmatter(&document.markdown);
+                    let mut body = strip_frontmatter(&document.markdown).to_owned();
+                    if let Some(metadata) = &document.metadata {
+                        if let Ok(details) = serde_json::to_string_pretty(metadata) {
+                            body.push_str("\n\n## Memory details\n\n```json\n");
+                            body.push_str(&details);
+                            body.push_str("\n```\n");
+                        }
+                    }
                     crate::ui::artifact_sidebar::ArtifactEntry::memory_file(
                         document.logical_path,
                         document.title,
-                        body.to_string(),
+                        body,
                         path,
                     )
                 })
@@ -371,6 +378,7 @@ fn is_artifact_image(source: &str) -> bool {
     )
 }
 
+#[cfg(feature = "memory")]
 fn strip_frontmatter(markdown: &str) -> &str {
     let trimmed = markdown.trim_start();
     let Some(after_dashes) = trimmed.strip_prefix("---") else {

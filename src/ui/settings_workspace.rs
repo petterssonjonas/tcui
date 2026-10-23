@@ -142,8 +142,6 @@ pub fn catalog() -> &'static [WorkspaceSetting] {
         #[cfg(feature = "memory")]
         entry!("memory.enabled", "Enable memory", "Allow memory retrieval for subsequent requests.", Memory, Bool),
         #[cfg(feature = "memory")]
-        entry!("memory.auto_capture", "Automatic memory capture", "Allow automatic capture of memories from conversations.", Memory, Bool),
-        #[cfg(feature = "memory")]
         entry!("memory.max_memories", "Maximum recalled memories", "Maximum memory records included in request context.", Memory, Number { min: 0, max: 255 }),
         #[cfg(feature = "memory")]
         entry!("memory.max_context_chars", "Memory context characters", "Maximum characters of memory context included in requests.", Memory, Number { min: 0, max: usize::MAX as u64 }),

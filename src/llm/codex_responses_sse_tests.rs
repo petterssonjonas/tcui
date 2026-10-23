@@ -1,35 +1,29 @@
 use std::io;
 use std::time::Duration;
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 
 use super::*;
 
 #[test]
-fn responses_events_preserve_answer_reasoning_title_and_usage() -> color_eyre::Result<()> {
-    let mut filter = TitleTagFilter::default();
-
+fn responses_events_preserve_literal_answer_reasoning_and_usage() -> color_eyre::Result<()> {
     let first = codex_stream_event(
-        r#"{"type":"response.output_text.delta","delta":"Visible <tcui:chat-title>Secret"}"#,
-        &mut filter,
+        r#"{"type":"response.output_text.delta","delta":"Visible <tcui:chat"}"#,
     )?;
     let reasoning = codex_stream_event(
         r#"{"type":"response.reasoning_summary_text.delta","delta":"Working"}"#,
-        &mut filter,
     )?;
     let second = codex_stream_event(
-        r#"{"type":"response.output_text.delta","delta":"</tcui:chat-title> answer"}"#,
-        &mut filter,
+        r#"{"type":"response.output_text.delta","delta":"-title>Secret</tcui:chat-title> \"<memory>quoted</memory>\" <tcui:chat-title>unfinished"}"#,
     )?;
     let completed = codex_stream_event(
         r#"{"type":"response.completed","response":{"id":"resp-1","usage":{"total_tokens":42}}}"#,
-        &mut filter,
     )?;
 
     assert_eq!(
         first.events,
-        vec![ChatStreamEvent::Answer("Visible ".to_string())]
+        vec![ChatStreamEvent::Answer("Visible <tcui:chat".to_string())]
     );
     assert_eq!(
         reasoning.events,
@@ -37,10 +31,9 @@ fn responses_events_preserve_answer_reasoning_title_and_usage() -> color_eyre::R
     );
     assert_eq!(
         second.events,
-        vec![
-            ChatStreamEvent::Title("Secret".to_string()),
-            ChatStreamEvent::Answer(" answer".to_string())
-        ]
+        vec![ChatStreamEvent::Answer(
+            "-title>Secret</tcui:chat-title> \"<memory>quoted</memory>\" <tcui:chat-title>unfinished".to_string()
+        )]
     );
     assert_eq!(completed.total_tokens, Some(42));
     assert!(completed.completed);
@@ -49,9 +42,7 @@ fn responses_events_preserve_answer_reasoning_title_and_usage() -> color_eyre::R
 
 #[test]
 fn malformed_responses_sse_is_rejected() {
-    let mut filter = TitleTagFilter::default();
-
-    assert!(codex_stream_event("{not-json", &mut filter).is_err());
+    assert!(codex_stream_event("{not-json").is_err());
 }
 
 #[test]
@@ -65,10 +56,8 @@ fn response_error_message_extracts_only_the_provider_message() {
 
 #[test]
 fn responses_stream_errors_redact_oauth_tokens() {
-    let mut filter = TitleTagFilter::default();
     let error = codex_stream_event(
         r#"{"type":"response.failed","response":{"error":{"message":"access_token=eyJ.secret-value"}}}"#,
-        &mut filter,
     )
     .expect_err("failed response must surface an error");
 
@@ -231,6 +220,7 @@ async fn response_with(
     let body = body.to_vec();
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await?;
+        receive_request(&mut socket).await?;
         let headers = format!(
             "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
@@ -251,6 +241,7 @@ async fn stalled_response(
     let endpoint = format!("http://{}", listener.local_addr()?);
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await?;
+        receive_request(&mut socket).await?;
         socket
             .write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n",
@@ -260,4 +251,20 @@ async fn stalled_response(
     });
     let response = reqwest::Client::new().get(endpoint).send().await?;
     Ok((response, server))
+}
+
+async fn receive_request(socket: &mut tokio::net::TcpStream) -> io::Result<()> {
+    // Respond only after the client sends its request, as a real HTTP server would.
+    let mut reader = BufReader::new(socket);
+    let mut line = String::new();
+    while reader.read_line(&mut line).await? != 0 {
+        if line == "\r\n" {
+            return Ok(());
+        }
+        line.clear();
+    }
+    Err(io::Error::new(
+        io::ErrorKind::UnexpectedEof,
+        "incomplete fixture request",
+    ))
 }

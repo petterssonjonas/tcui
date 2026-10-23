@@ -1,11 +1,12 @@
 mod activity;
 mod config;
-mod directive;
+mod contextual;
 mod embedding;
 mod host;
 mod index;
 mod markdown;
 mod mcp_server;
+mod metadata;
 mod paths;
 mod recall;
 mod store;
@@ -14,8 +15,9 @@ mod write;
 
 pub(crate) use activity::{activities, set_activities, MemoryActivity};
 pub(crate) use config::MemoryConfig;
-pub(crate) use directive::{RememberDirectiveIssue, RememberFilter};
-pub(crate) use host::{append_recall, capture, recall, run_skill_operation, AUTO_CAPTURE_POLICY};
+pub(crate) use contextual::{invocation, run_skill_operation};
+pub(crate) use host::{append_recall, is_memory_file_operation, recall};
 pub(crate) use mcp_server::run as run_mcp;
+pub(crate) use metadata::MemorySource;
 pub(crate) use store::{MemoryDocument, MemoryStore};
 pub(crate) use write::WriteOutcome;

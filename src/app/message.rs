@@ -14,6 +14,8 @@ pub struct Message {
     pub images: Option<String>,
     pub diff_data: Option<String>,
     pub token_count: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) request: Option<crate::app::requests::RequestRoute>,
 }
 
 impl Message {
@@ -30,6 +32,7 @@ impl Message {
             images: None,
             diff_data: None,
             token_count: None,
+            request: None,
         }
     }
 }

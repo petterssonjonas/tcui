@@ -5,11 +5,27 @@ impl TuiApp {
         &mut self,
         mut completion: crate::app::action::AssistantFinalization,
     ) -> color_eyre::Result<()> {
+        if !self.request_accepts_events(completion.request_id) {
+            return Ok(());
+        }
+        let Some(owner_index) = self.ensure_request_destination(completion.request_id)? else {
+            return Ok(());
+        };
+        let Some(request) = self.requests.get(&completion.request_id) else {
+            return Ok(());
+        };
+        let route = request.route;
+        let message_idx = request.assistant_idx;
+        completion.message.conversation_id = route.destination_conversation_id;
+        completion.message.request = Some(route);
         let source_content = completion.message.content.clone();
         let import_media = match completion.generated_file {
-            crate::app::action::GeneratedFileFinalization::NotRequested => true,
-            crate::app::action::GeneratedFileFinalization::Ready(file) => {
-                match self.persist_generated_file(completion.tab_id, file) {
+            crate::app::action::GeneratedFileFinalization::NotRequested => {
+                route.destination_conversation_id > 0
+            }
+            crate::app::action::GeneratedFileFinalization::Ready(mut file) => {
+                file.conversation_id = route.destination_conversation_id;
+                match self.persist_generated_file(owner_index, file) {
                     Ok(filename) => {
                         completion.message.content = format!("Saved as {filename}");
                         self.ui.connection_status =
@@ -35,7 +51,7 @@ impl TuiApp {
         };
         if import_media {
             if let Err(error) = self.import_completed_assistant_media(
-                completion.tab_id,
+                owner_index,
                 completion.message.conversation_id,
                 &source_content,
             ) {
@@ -44,14 +60,25 @@ impl TuiApp {
                     Some(format!("Generated media import failed: {error}"));
             }
         }
-        if let Some(tab) = self.ui.tabs.get_mut(completion.tab_id) {
-            if let Some(existing) = tab.messages.get_mut(completion.message_idx) {
-                *existing = completion.message;
+        if let Some(request) = self.requests.get_mut(&completion.request_id) {
+            request.messages[message_idx] = completion.message;
+            request.finalized = true;
+            for tab in &mut self.ui.tabs {
+                if tab.active_conversation == route.destination_conversation_id {
+                    if let Some(existing) = tab.messages.get_mut(message_idx) {
+                        existing.clone_from(&request.messages[message_idx]);
+                    }
+                    tab.streaming = false;
+                    tab.scroll_to_message = Some(message_idx);
+                }
             }
-            tab.scroll_to_message = Some(completion.message_idx);
+            self.storage
+                .replace_messages(route.destination_conversation_id, &request.messages)?;
         }
-        self.persist_active_conversation(completion.tab_id)?;
-        self.refresh_tab_conversations(completion.tab_id)
+        for index in 0..self.ui.tabs.len() {
+            self.refresh_tab_conversations(index)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn persist_generated_file(
@@ -59,6 +86,18 @@ impl TuiApp {
         tab_id: usize,
         file: crate::app::GeneratedFile,
     ) -> color_eyre::Result<String> {
+        if file.conversation_id < 0 {
+            let record = self
+                .chat_files
+                .create_saved(&file.name, file.content.as_bytes())?;
+            if let Err(error) = self.refresh_canonical_file_catalogs(tab_id, file.conversation_id) {
+                self.ui.show_toast(format!(
+                    "Saved {}, but could not refresh the file list: {error}",
+                    record.filename
+                ));
+            }
+            return Ok(record.filename);
+        }
         let link = self.chat_files.create_for_chat(
             file.conversation_id,
             &file.name,
@@ -85,6 +124,12 @@ impl TuiApp {
         tab_id: usize,
         conversation_id: i64,
     ) -> color_eyre::Result<()> {
+        if conversation_id < 0 {
+            if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
+                tab.temporary_artifacts.clear();
+            }
+            return Ok(());
+        }
         self.ui.artifact_sidebar_state.clear_hit_areas();
         let links = self.chat_files.list_for_conversation(conversation_id)?;
         let artifacts = links
@@ -112,7 +157,7 @@ impl TuiApp {
         content: &str,
     ) -> color_eyre::Result<()> {
         let mut imported = false;
-        for source in crate::app::local_media_sources(content) {
+        for source in super::local_media_sources(content) {
             let Some(artifact) = crate::ui::artifact_sidebar::ArtifactEntry::temp_media(&source)
             else {
                 continue;
@@ -120,7 +165,16 @@ impl TuiApp {
             let Some(path) = artifact.path else {
                 continue;
             };
-            self.chat_files.import_for_chat(conversation_id, &path)?;
+            if conversation_id < 0 {
+                let bytes = std::fs::read(&path)?;
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("saved-media");
+                self.chat_files.create_saved(name, &bytes)?;
+            } else {
+                self.chat_files.import_for_chat(conversation_id, &path)?;
+            }
             imported = true;
         }
         if imported {
@@ -141,7 +195,14 @@ impl TuiApp {
             .into_iter()
             .map(|record| crate::ui::artifact_sidebar::ArtifactEntry::saved_file(record.path))
             .collect();
-        self.hydrate_chat_files(tab_id, conversation_id)?;
+        if self
+            .ui
+            .tabs
+            .get(tab_id)
+            .is_some_and(|tab| tab.active_conversation == conversation_id)
+        {
+            self.hydrate_chat_files(tab_id, conversation_id)?;
+        }
         self.ui.saved_artifacts = saved;
         Ok(())
     }

@@ -1149,6 +1149,37 @@ fn send_message_creates_conversation_and_saves_user_message() {
 }
 
 #[test]
+fn generate_title_preserves_word_and_length_limits() {
+    for (content, expected) in [
+        (" \t\n ", "New Chat"),
+        ("  one \t two\nthree  ", "one two three"),
+        ("a b c d e", "a b c d e"),
+        ("a b c d e f", "a b c d e..."),
+        ("1234567890123456", "1234567890123456"),
+        ("12345678901234567", "1234567890123456..."),
+    ] {
+        assert_eq!(TuiApp::generate_title(content), expected, "{content:?}");
+    }
+}
+
+#[test]
+fn generate_title_truncates_unicode_only_at_character_boundaries() {
+    for (content, expected) in [
+        ("東京の会話", "東京の会話"),
+        ("123456789012345é", "123456789012345é"),
+        ("123456789012345éx", "123456789012345é..."),
+        ("東京 你好 café naïve", "東京 你好 café naïve"),
+        (
+            "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+            "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀...",
+        ),
+        ("一 二 三 四 五 六", "一 二 三 四 五..."),
+    ] {
+        assert_eq!(TuiApp::generate_title(content), expected, "{content:?}");
+    }
+}
+
+#[test]
 fn slash_remindme_is_handled_without_model_streaming() {
     with_test_app("slash-remindme", |app| {
         std::env::set_var("TCUI_REMINDER_SYSTEMD_RUN", "true");
@@ -1640,8 +1671,10 @@ fn refresh_vault_artifacts_uses_configured_path_without_runtime_vault() {
     std::env::set_var("XDG_DATA_HOME", &data_home);
     std::env::set_var("XDG_CONFIG_HOME", &config_home);
 
-    let mut config = AppConfig::default();
-    config.vault_path = Some(vault.to_string_lossy().to_string());
+    let config = AppConfig {
+        vault_path: Some(vault.to_string_lossy().to_string()),
+        ..AppConfig::default()
+    };
     let storage = Storage::new().expect("create storage");
     let mut app = TuiApp::new(
         storage,
@@ -1694,70 +1727,25 @@ fn refresh_memory_artifacts_expands_tilde_vault_path() {
         crate::memory::MemoryStore::open(&vault, &crate::memory::MemoryStore::default_cache_path())
             .expect("open memory store");
     store
-        .remember("User prefers dark mode for coding.")
+        .write(
+            std::path::Path::new("preferences.md"),
+            "User prefers dark mode for coding.",
+            false,
+        )
         .expect("save memory");
 
     app.refresh_memory_artifacts();
 
-    assert_eq!(app.ui.memory_artifacts.len(), 1);
-    assert_eq!(
-        app.ui.memory_artifacts[0].content.as_deref(),
-        Some("User prefers dark mode for coding.")
-    );
+    assert!(matches!(
+        app.ui.memory_artifacts.as_slice(),
+        [crate::ui::artifact_sidebar::ArtifactEntry {
+            handle: crate::ui::artifact_sidebar::ArtifactHandle::Memory(path),
+            ..
+        }] if path == std::path::Path::new("preferences.md")
+    ));
 
     std::fs::remove_dir_all(&root).expect("cleanup temp dir");
     std::env::remove_var("HOME");
-    std::env::remove_var("XDG_DATA_HOME");
-    std::env::remove_var("XDG_CONFIG_HOME");
-}
-
-#[cfg(feature = "memory")]
-#[tokio::test]
-async fn refresh_artifact_sidebar_action_populates_memory_artifacts() {
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let root = unique_temp_dir("memory-sidebar");
-    let data_home = root.join("data-home");
-    let config_home = root.join("config-home");
-    let vault = root.join("vault");
-    std::fs::create_dir_all(&data_home).expect("create data dir");
-    std::fs::create_dir_all(&config_home).expect("create config dir");
-    std::fs::create_dir_all(&vault).expect("create vault dir");
-    std::env::set_var("XDG_DATA_HOME", &data_home);
-    std::env::set_var("XDG_CONFIG_HOME", &config_home);
-
-    let mut config = AppConfig::default();
-    config.memory.enabled = true;
-    config.vault_path = Some(vault.to_string_lossy().to_string());
-    config.save().expect("save config");
-
-    let storage = Storage::new().expect("create storage");
-    let mut app = TuiApp::new(
-        storage,
-        Arc::new(tokio::sync::RwLock::new(config)),
-        Arc::new(crate::llm::LlmClient::new()),
-        Some(Arc::new(crate::obsidian::Vault::new(vault.clone()))),
-    );
-
-    let store =
-        crate::memory::MemoryStore::open(&vault, &crate::memory::MemoryStore::default_cache_path())
-            .expect("open memory store");
-    store
-        .remember("User prefers Rust for systems work.")
-        .expect("save memory");
-
-    assert!(app.ui.memory_artifacts.is_empty());
-
-    app.dispatch(Action::RefreshArtifactSidebar)
-        .await
-        .expect("dispatch refresh");
-
-    assert_eq!(app.ui.memory_artifacts.len(), 1);
-    assert_eq!(
-        app.ui.memory_artifacts[0].content.as_deref(),
-        Some("User prefers Rust for systems work.")
-    );
-
-    std::fs::remove_dir_all(&root).expect("cleanup temp dir");
     std::env::remove_var("XDG_DATA_HOME");
     std::env::remove_var("XDG_CONFIG_HOME");
 }

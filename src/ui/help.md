@@ -8,6 +8,11 @@ Type any slash command in the message box:
 
 - `/help` — show this help
 - `/keybinds` — show keyboard shortcuts
+- `/fork` — open a persistent continuation named `Fork of <title>`
+- `/temp` — open an ephemeral fork in the Wide right sidebar
+- `/temp close` — cancel its request and delete the ephemeral conversation
+- `/cancel` — stop this chat's response and keep its partial text
+- `/steer <instruction>` — request live steering; current connections report that it is unsupported and keep the draft
 - `/settings` — open the dedicated Settings tab
 - `/terminal` — open a persistent terminal session
 - `/providers`, `/connect` — manage added providers, choose a preset or add a custom endpoint
@@ -17,6 +22,7 @@ Type any slash command in the message box:
 - `/theme` — change the theme (or `/theme <name>` to apply one directly)
 - `/mcp` — open the MCP servers popup
 - `/skills` — open the skills popup
+- `/skill <name> <request>` — invoke an installed skill with the full request
 - `/web` — toggle automatic web search before each chat message
 - `/quit`, `/exit`, `/q` — quit TCUI
 
@@ -57,6 +63,47 @@ Type any slash command in the message box:
   Kitty/Ghostty/WezTerm terminal delivery over SSH. Unsupported routes are off;
   SSH never sends desktop notifications to the server's D-Bus.
 
+## Conversation ownership and recall
+
+- Responses continue in their destination when you switch chats. There can be
+  one active request per chat, with independent requests in other chats.
+- Press Escape twice within 1000 ms in chat input to cancel its response.
+  Dialogs and terminal focus keep their own Escape behavior. `/cancel` also
+  keeps partial text: on disk for persistent chats, in memory for temporary chats.
+- Deleting a running persistent destination creates a recovered chat with its
+  known context. Later output goes there, not into another selected chat.
+- `/fork` selects `Fork of <title>`, copies messages including a partial answer,
+  and keeps the provider/model selection. It does not move a running request or
+  copy Chat file links. Send or clear pending draft text and inserted documents first.
+- `/temp` opens `Ephemeral fork of <title> conversation` in the Wide right sidebar.
+  Click a pane or use Alt+Left for main and Alt+Right for temporary. Drafts and
+  requests stay separate. Repeating `/temp` focuses the existing temporary pane.
+- [X], `/temp close`, or closing the right sidebar deletes the temporary history
+  and cancels its request. It is not recovered or included in bulk exports or
+  automatic recall. Normal exit saves persistent responses but discards the temporary chat.
+- Select skills with inline `@name` mentions or `/skill <name> <request>`.
+  `/skills` lists installed skills. Code and quoted examples do not select skills,
+  and attached documents do not authorize memory actions.
+- `@memory`, `@remember`, and the `@memorize` alias use the full request and
+  conversation context to recall facts or save requested facts and configuration.
+  Missing facts or uncertain machine identity require clarification; relevant
+  topic and machine tags describe saved records. `@recall` is always read-only.
+  Memory must be available and configured; completed actions require host results.
+- Explicit `@save` and requested memory saves can keep results after a chat closes.
+  Automatic memory capture and automatic media saving are off.
+- Ask main to “Read the temp chat” or “Read the ephemeral chat” to copy visible
+  branch text into its request and saved history. Hidden thinking is excluded.
+  Only new branch messages are copied when main is still the source chat;
+  otherwise the full temporary history is copied. The copy remains after close.
+  Quoted skill markers do not activate skills. `/fork` from temporary creates a
+  persistent continuation in main without closing the temporary pane.
+- Before sending, TCUI can add up to three relevant excerpts from other local
+  chats, with a combined limit of 3,000 characters. These excerpts go to the
+  selected provider as untrusted evidence with source IDs. They are not saved
+  into the current conversation. Current, deleted, and duplicate content is
+  excluded. Matching uses words and a bounded search, not full-history semantic
+  memory.
+
 ## Web search
 
 - `@websearch <query>` and `@research <query>` use the source selected in
@@ -79,10 +126,21 @@ Type any slash command in the message box:
 
 ## Commands and terminals
 
-- Completed shell code blocks expose **Run** at the top of the assistant response.
-  It opens review only; arriving responses and opening review never execute commands.
-- Up/Down chooses a block; Space or its checkbox selects it. Only the first block
-  starts selected. PageUp/PageDown scroll the exact payload.
+- Recommended commands use an explicit shell fence such as `bash tcui-run`.
+  Each completed command block has a top-right copy icon and bottom-left
+  **>_ Run in terminal** control. Copy preserves exact commands without fences
+  or display wrapping; Run opens review for only that block.
+- Ordinary shell examples, quotations, script contents, and unfinished or
+  streaming blocks have no command controls. Discussed or rejected commands
+  stay inline. Arriving responses and opening review never execute commands.
+- Shell commands and arguments stand out in a contrasting color and bold text;
+  recognized headings, status labels, and flow keywords keep the normal code color.
+  Highlighting never changes copied commands and is not a safety verdict.
+- Prefer a short heading followed by each command, grouped in one paste-ready
+  block. Conditionals, wrappers, and status reports are for cases that need them.
+  Journal/systemd queries retain supported `--no-pager` options.
+- The clicked block starts selected; Space or its checkbox toggles it.
+  PageUp/PageDown scroll the exact payload.
 - In review, **Copy** or `Ctrl+C` copies selected code. **Run** or `Ctrl+R` approves
   those commands in a new clean terminal using the indicated shell.
   Code is sourced from a private temporary script, so interactive prompts cannot

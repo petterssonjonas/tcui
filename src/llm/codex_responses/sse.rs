@@ -1,7 +1,7 @@
 use color_eyre::eyre::eyre;
 use serde::Deserialize;
 
-use crate::llm::chat::{push_title_filtered_content, ChatStreamEvent, TitleTagFilter};
+use crate::llm::chat::ChatStreamEvent;
 
 #[derive(Deserialize)]
 struct CodexStreamEvent {
@@ -40,10 +40,7 @@ pub(super) struct CodexChunk {
     pub(super) completed: bool,
 }
 
-pub(super) fn codex_stream_event(
-    data: &str,
-    title_filter: &mut TitleTagFilter,
-) -> color_eyre::Result<CodexChunk> {
+pub(super) fn codex_stream_event(data: &str) -> color_eyre::Result<CodexChunk> {
     let event: CodexStreamEvent = serde_json::from_str(data)?;
     if let Some(error) = event_error(&event) {
         return Err(eyre!("{}", crate::llm::auth::redact_secrets(&error)));
@@ -58,7 +55,7 @@ pub(super) fn codex_stream_event(
     match event.kind.as_str() {
         "response.output_text.delta" => {
             if let Some(delta) = event.delta.filter(|delta| !delta.is_empty()) {
-                push_title_filtered_content(&mut events, title_filter.push(&delta));
+                events.push(ChatStreamEvent::Answer(delta));
             }
         }
         "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {

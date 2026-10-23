@@ -1,4 +1,4 @@
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -136,6 +136,17 @@ struct StyledRun {
     text: String,
     style: Style,
     link: Option<String>,
+}
+
+pub(crate) fn render_literal_code(content: &str, width: usize) -> RenderedMarkdown {
+    let mut lines = Vec::new();
+    code::render_code(&mut lines, None, content, width);
+    RenderedMarkdown {
+        lines,
+        link_targets: Vec::new(),
+        images: Vec::new(),
+        kitty_headings: Vec::new(),
+    }
 }
 
 pub fn render_markdown(content: &str, opts: RenderOptions) -> RenderedMarkdown {
@@ -566,6 +577,41 @@ fn parse_inline_runs(text: &str, base_style: Style) -> Vec<StyledRun> {
     )
 }
 
+fn is_namespaced_tag_autolink(destination: &str) -> bool {
+    let Some((namespace, name)) = destination.split_once(':') else {
+        return false;
+    };
+    if ["http", "https", "mailto"]
+        .iter()
+        .any(|scheme| namespace.eq_ignore_ascii_case(scheme))
+    {
+        return false;
+    }
+    let is_name_start = |ch: char| {
+        matches!(ch,
+            'A'..='Z' | '_' | 'a'..='z'
+            | '\u{c0}'..='\u{d6}' | '\u{d8}'..='\u{f6}' | '\u{f8}'..='\u{2ff}'
+            | '\u{370}'..='\u{37d}' | '\u{37f}'..='\u{1fff}'
+            | '\u{200c}'..='\u{200d}' | '\u{2070}'..='\u{218f}'
+            | '\u{2c00}'..='\u{2fef}' | '\u{3001}'..='\u{d7ff}'
+            | '\u{f900}'..='\u{fdcf}' | '\u{fdf0}'..='\u{fffd}'
+            | '\u{10000}'..='\u{effff}')
+    };
+    let is_name = |name: &str| {
+        let mut chars = name.chars();
+        chars.next().is_some_and(is_name_start)
+            && chars.all(|ch| {
+                is_name_start(ch)
+                    || matches!(ch,
+                        '-' | '.' | '0'..='9' | '\u{b7}'
+                        | '\u{300}'..='\u{36f}' | '\u{203f}'..='\u{2040}')
+            })
+    };
+    // Bare namespace:name pairs look like XML, not URLs. URI punctuation
+    // (slashes, @, ?, #, another colon) keeps ordinary autolinks intact.
+    is_name(namespace) && is_name(name.strip_suffix('/').unwrap_or(name))
+}
+
 fn parse_inline_events<'a>(
     parser: impl IntoIterator<Item = Event<'a>>,
     base_style: Style,
@@ -574,8 +620,15 @@ fn parse_inline_events<'a>(
     let mut runs = Vec::new();
     let mut styles = vec![base_style];
     let mut links = Vec::new();
+    let mut literal_autolink = false;
 
     for event in parser {
+        if literal_autolink {
+            if matches!(event, Event::End(TagEnd::Link)) {
+                literal_autolink = false;
+            }
+            continue;
+        }
         match event {
             Event::Start(Tag::Strong) => {
                 styles.push(current_style(&styles).add_modifier(Modifier::BOLD))
@@ -595,10 +648,28 @@ fn parse_inline_events<'a>(
             Event::End(TagEnd::Strikethrough) => {
                 styles.pop();
             }
+            Event::Start(Tag::Link {
+                link_type: LinkType::Autolink,
+                dest_url,
+                ..
+            }) if is_namespaced_tag_autolink(&dest_url) => {
+                // Autolink destinations retain the exact source inside <...>.
+                runs.push(StyledRun {
+                    text: format!("<{dest_url}>"),
+                    style: current_style(&styles),
+                    link: None,
+                });
+                literal_autolink = true;
+            }
             Event::Start(Tag::Link { dest_url, .. }) => links.push(dest_url.to_string()),
             Event::End(TagEnd::Link) => {
                 links.pop();
             }
+            Event::Html(text) | Event::InlineHtml(text) => runs.push(StyledRun {
+                text: text.to_string(),
+                style: current_style(&styles),
+                link: links.last().cloned(),
+            }),
             Event::Code(code) => runs.push(StyledRun {
                 text: code.to_string(),
                 style: current_style(&styles).fg(theme.warning).bg(theme.code_bg),
@@ -794,6 +865,18 @@ fn parse_fence_start(line: &str) -> Option<(&str, Option<String>)> {
         return None;
     }
     let rest = trimmed[length..].trim();
+    let mut info = rest.split_whitespace();
+    let language = info.next().unwrap_or_default();
+    let rest = if info.next() == Some("tcui-run")
+        && info.next().is_none()
+        && ["sh", "bash", "shell", "zsh", "fish"]
+            .iter()
+            .any(|shell| language.eq_ignore_ascii_case(shell))
+    {
+        language
+    } else {
+        rest
+    };
     Some((
         &trimmed[..length],
         (!rest.is_empty()).then(|| rest.to_string()),
@@ -931,7 +1014,7 @@ fn relative_luminance(color: Color) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{heading_style_for, render_markdown, RenderOptions};
+    use super::{heading_style_for, render_markdown, Modifier, RenderOptions, RenderedMarkdown};
     use crate::config::app_config::{HeadingDownscale, MarkdownMode};
     use crate::theme::find_theme;
     use crate::ui::components::terminal_capabilities::TerminalCapabilities;
@@ -944,6 +1027,150 @@ mod tests {
             kitty_heading_downscale: HeadingDownscale::None,
             image_protocol_enabled: false,
             terminal_capabilities: TerminalCapabilities::detect(),
+        }
+    }
+
+    fn text(rendered: &RenderedMarkdown) -> String {
+        rendered
+            .lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn html_and_xml_namespace_tags_render_literally_without_link_targets() {
+        for mode in [MarkdownMode::Full, MarkdownMode::Textual] {
+            for source in [
+                "A<tag></tag>B",
+                "A<tag data-x=\"one &amp; two\"></tag>B",
+                "<div>block text</div>",
+                "<a href=\"https://example.com\">visible</a>",
+                "<!-- @caveman <tcui:remember> -->",
+                "A<!-- comment -->B",
+                "<?xml version=\"1.0\"?>",
+                "<![CDATA[<tag>raw</tag>]]>",
+                "<remember>visible</remember>",
+                "<chat-title>visible</chat-title>",
+                "<tcui:remember>keep this</tcui:remember>",
+                "<tcui:remember key=\"note\">keep this</tcui:remember>",
+                "<tcui:chat-title>Visible title</tcui:chat-title>",
+                "A<tcui:remember/>B",
+                "界<tcui:remember>🙂</tcui:remember>終",
+                "<schema:element>visible</schema:element>",
+                "A<schema:child-name/>B",
+                "<schema:_élément>visible</schema:_élément>",
+                "<schema:e\u{301}>body</schema:e\u{301}>",
+                "<schema:a·b>body</schema:a·b>",
+            ] {
+                let mut options = opts(160);
+                options.mode = mode;
+                let rendered = render_markdown(source, options);
+                assert_eq!(text(&rendered), source, "{mode:?}: {source}");
+                assert!(rendered.link_targets.is_empty(), "{mode:?}: {source}");
+            }
+        }
+    }
+
+    #[test]
+    fn literal_tags_preserve_markdown_links_and_ordinary_autolinks() {
+        let rendered = render_markdown(
+            "<tcui:remember>note</tcui:remember> [docs](https://example.com/docs) \
+             <https://example.org> <mailto:reader@example.net>",
+            opts(200),
+        );
+        assert_eq!(
+            text(&rendered),
+            "<tcui:remember>note</tcui:remember> docs https://example.org \
+             mailto:reader@example.net"
+        );
+        assert_eq!(
+            rendered
+                .link_targets
+                .iter()
+                .map(|target| target.target.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "https://example.com/docs",
+                "https://example.org",
+                "mailto:reader@example.net",
+            ]
+        );
+    }
+
+    #[test]
+    fn uri_syntax_and_standard_web_schemes_remain_autolinks() {
+        for destination in [
+            "http:example.com",
+            "HTTPS:example.com",
+            "MAILTO:reader",
+            "custom://host/path",
+            "custom:document?view",
+            "custom:document#part",
+            "urn:isbn:9780141036144",
+            "tel:+123456789",
+        ] {
+            let rendered = render_markdown(&format!("<{destination}>"), opts(120));
+            assert_eq!(text(&rendered), destination);
+            assert_eq!(rendered.link_targets.len(), 1, "{destination}");
+            assert_eq!(rendered.link_targets[0].target, destination);
+        }
+    }
+
+    #[test]
+    fn explicit_markdown_links_can_use_tcui_destinations() {
+        let rendered = render_markdown("[explicit](tcui:remember)", opts(80));
+        assert_eq!(text(&rendered), "explicit");
+        assert_eq!(rendered.link_targets.len(), 1);
+        assert_eq!(rendered.link_targets[0].target, "tcui:remember");
+    }
+
+    #[test]
+    fn literal_tags_preserve_inline_formatting_and_code() {
+        let rendered = render_markdown(
+            "**bold** *italic* ~~gone~~ `<tcui:remember>` A<tag></tag>B \
+             <tcui:chat-title>title</tcui:chat-title> **after**",
+            opts(160),
+        );
+        assert_eq!(
+            text(&rendered),
+            "bold italic gone <tcui:remember> A<tag></tag>B \
+             <tcui:chat-title>title</tcui:chat-title> after"
+        );
+        for (word, modifier) in [
+            ("bold", Modifier::BOLD),
+            ("italic", Modifier::ITALIC),
+            ("gone", Modifier::CROSSED_OUT),
+            ("after", Modifier::BOLD),
+        ] {
+            assert!(rendered
+                .lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| span.content == word && span.style.add_modifier.contains(modifier)));
+        }
+        assert!(rendered.link_targets.is_empty());
+    }
+
+    #[test]
+    fn fenced_code_keeps_tags_and_markdown_literal_without_link_targets() {
+        let source = "<tcui:remember>**literal**</tcui:remember> <https://example.com>";
+        let rendered = render_markdown(&format!("```text\n{source}\n```"), opts(160));
+        assert!(text(&rendered).contains(source));
+        assert!(rendered.link_targets.is_empty());
+    }
+
+    #[test]
+    fn actionable_shell_marker_preserves_normal_code_title_and_highlighting() {
+        for shell in ["sh", "bash", "shell", "zsh", "fish", "BASH"] {
+            let ordinary =
+                render_markdown(&format!("```{shell}\nprintf 'hello\\n'\n```"), opts(60));
+            let actionable = render_markdown(
+                &format!("```{shell} tcui-run\nprintf 'hello\\n'\n```"),
+                opts(60),
+            );
+            assert_eq!(ordinary.lines, actionable.lines, "{shell}");
         }
     }
 

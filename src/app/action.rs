@@ -10,8 +10,7 @@ pub(crate) enum GeneratedFileFinalization {
 
 #[derive(Debug, Clone)]
 pub(crate) struct AssistantFinalization {
-    pub(crate) tab_id: usize,
-    pub(crate) message_idx: usize,
+    pub(crate) request_id: crate::app::submission::SubmissionId,
     pub(crate) message: Message,
     pub(crate) generated_file: GeneratedFileFinalization,
 }
@@ -22,6 +21,12 @@ pub enum Action {
     ConfirmQuit,
     CancelModal,
     SendMessage(String),
+    ForkConversation,
+    OpenEphemeral,
+    CloseEphemeral,
+    FocusChatPane(usize),
+    CancelRequest,
+    SteerRequest(String),
     QueuePendingDocument(crate::app::submission::PendingDocumentInput),
     InsertArtifactToChat(crate::ui::artifact_sidebar::ArtifactHandle),
     RemovePendingDocument(crate::app::submission::PendingDocumentId),
@@ -34,12 +39,15 @@ pub enum Action {
         crate::ui::app_tabs::AppTabId,
         crate::app::submission::SubmissionId,
     ),
-    StreamResponse(usize, usize, String),
-    StreamThinking(usize, usize, String),
+    StreamResponse(crate::app::submission::SubmissionId, String),
+    StreamThinking(crate::app::submission::SubmissionId, String),
     #[cfg(feature = "memory")]
-    SetMemoryActivities(usize, usize, Vec<crate::memory::MemoryActivity>),
+    SetMemoryActivities(
+        crate::app::submission::SubmissionId,
+        Vec<crate::memory::MemoryActivity>,
+    ),
     FinalizeAssistantMessage(AssistantFinalization),
-    StopStream(usize),
+    StopStream(crate::app::submission::SubmissionId),
     AddMessage(usize, Message),
     AddGeneratedFile(usize, crate::app::GeneratedFile),
     LoadConversation(i64),
@@ -48,7 +56,6 @@ pub enum Action {
     UpdateStatus(String),
     ShowToast(String),
     SetConnectionState(crate::ui::status_bar::ConnectionStatus, Option<String>),
-    SetTitle(String),
     SwitchTab(usize),
     AddTab(crate::app::Tab),
     RemoveTab(usize),

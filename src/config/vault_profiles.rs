@@ -6,7 +6,7 @@ use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
-use rand::RngCore;
+use rand::Rng;
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use unicode_normalization::UnicodeNormalization;
 

@@ -75,25 +75,32 @@ impl TuiApp {
                                     if matches!(action, Action::Quit) {
                                         break;
                                     }
-                                    let _ = self.dispatch(action).await;
+                                    if let Err(error) = self.dispatch(action).await {
+                                        self.ui.show_toast(format!("Action failed: {error}"));
+                                    }
                                 }
                             }
                         }
                         Some(Ok(crossterm::event::Event::Mouse(mouse))) => {
+                            self.cancel_escape = None;
                             if let Some(action) = self.handle_mouse(mouse) {
                                 if matches!(action, Action::Quit) {
                                     break;
                                 }
-                                let _ = self.dispatch(action).await;
+                                if let Err(error) = self.dispatch(action).await {
+                                    self.ui.show_toast(format!("Action failed: {error}"));
+                                }
                             }
                         }
                         Some(Ok(crossterm::event::Event::FocusGained)) => {
                             self.terminal_has_focus.store(true, Ordering::Relaxed);
                         }
                         Some(Ok(crossterm::event::Event::FocusLost)) => {
+                            self.cancel_escape = None;
                             self.terminal_has_focus.store(false, Ordering::Relaxed);
                         }
                         Some(Ok(crossterm::event::Event::Paste(text))) => {
+                            self.cancel_escape = None;
                             if let Some(manager) = self.ui.credential_manager.as_mut() {
                                 manager.paste(&text);
                             } else if self.ui.command_review.is_some() || self.ui.terminals.close_pending.is_some()
@@ -127,13 +134,21 @@ impl TuiApp {
                         if matches!(action, Action::Quit) {
                             break;
                         }
-                        let _ = self.dispatch(action).await;
+                        if let Err(error) = self.dispatch(action).await {
+                            self.ui.show_toast(format!("Action failed: {error}"));
+                        }
                     }
                 }
             }
         }
+        let ephemeral_result = self.close_ephemeral();
+        let ids: Vec<_> = self.requests.keys().copied().collect();
+        let mut result = ephemeral_result;
+        for id in ids {
+            result = result.and(self.cancel_request(id));
+        }
         self.shutdown_terminals();
-        Ok(())
+        result
     }
 
     pub async fn dispatch(&mut self, action: Action) -> color_eyre::Result<()> {
@@ -246,6 +261,9 @@ impl TuiApp {
                 Ok(())
             }
             Action::ToggleArtifactSidebar => {
+                if self.ui.ephemeral.is_some() {
+                    return self.close_ephemeral();
+                }
                 self.ui.panel_state.toggle_right();
                 self.ui.artifact_sidebar_open =
                     self.ui.panel_state.right != crate::tui::shell::PanelMode::Closed;
@@ -290,6 +308,7 @@ impl TuiApp {
                 Ok(())
             }
             Action::NewChat => {
+                self.focus_chat_pane(self.ui.main_chat_index());
                 let tab_id = self.ui.active_tab;
                 if self.request_pending_document_discard(
                     crate::app::pending_documents::PendingDocumentDiscardAction::NewConversation(
@@ -317,6 +336,20 @@ impl TuiApp {
                 self.delete_conversation_by_id(conversation_id)
             }
             Action::SendMessage(msg) => self.send_message(msg).await,
+            Action::ForkConversation => self.fork_active_conversation(),
+            Action::OpenEphemeral => self.open_ephemeral(),
+            Action::CloseEphemeral => self.close_ephemeral(),
+            Action::FocusChatPane(index) => {
+                self.focus_chat_pane(index);
+                Ok(())
+            }
+            Action::CancelRequest => self.cancel_active_request(),
+            Action::SteerRequest(instruction) => {
+                if let Err(error) = self.steer_active_request(instruction) {
+                    self.ui.show_toast(error.to_string());
+                }
+                Ok(())
+            }
             Action::QueuePendingDocument(input) => self.queue_pending_document(input),
             Action::InsertArtifactToChat(handle) => {
                 self.insert_artifact_to_chat(handle);
@@ -352,34 +385,20 @@ impl TuiApp {
                 }
                 Ok(())
             }
-            Action::StreamResponse(tab_id, message_idx, content) => {
-                self.ui.add_stream_content(tab_id, message_idx, content);
-                Ok(())
+            Action::StreamResponse(request_id, content) => {
+                self.append_request_content(request_id, &content, false)
             }
-            Action::StreamThinking(tab_id, message_idx, content) => {
-                self.ui.add_stream_thinking(tab_id, message_idx, content);
-                Ok(())
+            Action::StreamThinking(request_id, content) => {
+                self.append_request_content(request_id, &content, true)
             }
             #[cfg(feature = "memory")]
-            Action::SetMemoryActivities(tab_id, message_idx, activities) => {
-                if let Some(message) = self
-                    .ui
-                    .tabs
-                    .get_mut(tab_id)
-                    .and_then(|tab| tab.messages.get_mut(message_idx))
-                {
-                    let _ = crate::memory::set_activities(message, &activities);
-                }
-                Ok(())
+            Action::SetMemoryActivities(request_id, activities) => {
+                self.set_request_memory_activities(request_id, &activities)
             }
             Action::FinalizeAssistantMessage(completion) => {
                 self.finalize_assistant_message(completion)
             }
-            Action::StopStream(tab_id) => {
-                self.ui.finish_stream(tab_id);
-                self.refresh_tab_conversations(tab_id)?;
-                Ok(())
-            }
+            Action::StopStream(request_id) => self.finish_request(request_id),
             Action::AddMessage(tab_id, msg) => {
                 let mut stored = msg;
                 if let Ok(message_id) = self.storage.save_message(&stored) {
@@ -404,6 +423,7 @@ impl TuiApp {
                 Ok(())
             }
             Action::LoadConversation(conv_id) => {
+                self.focus_chat_pane(self.ui.main_chat_index());
                 if self.request_pending_document_discard(
                     crate::app::pending_documents::PendingDocumentDiscardAction::LoadConversation(
                         conv_id,
@@ -441,18 +461,6 @@ impl TuiApp {
                 self.set_connection_state(status, message);
                 Ok(())
             }
-            Action::SetTitle(title) => {
-                if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
-                    tab.generated_title = Some(title.clone());
-                    if tab.active_conversation != 0 {
-                        self.storage
-                            .update_conversation_title(tab.active_conversation, &title)?;
-                    }
-                }
-                self.ui.set_title(title);
-                self.refresh_tab_conversations(self.ui.active_tab)?;
-                Ok(())
-            }
             Action::SwitchTab(idx) => {
                 if self.request_pending_document_discard(
                     crate::app::pending_documents::PendingDocumentDiscardAction::SwitchTab(idx),
@@ -466,12 +474,22 @@ impl TuiApp {
                 }
             }
             Action::AddTab(tab) => {
+                self.close_ephemeral()?;
                 self.ui.add_tab(tab);
                 self.ui.settings_v2 = None;
                 self.refresh_visible_selectors();
                 Ok(())
             }
             Action::RemoveTab(idx) => {
+                if self
+                    .ui
+                    .ephemeral
+                    .as_ref()
+                    .is_some_and(|pane| pane.tab_index == idx)
+                {
+                    return self.close_ephemeral();
+                }
+                self.close_ephemeral()?;
                 if self.request_pending_document_discard(
                     crate::app::pending_documents::PendingDocumentDiscardAction::RemoveTab(idx),
                 ) {
@@ -583,6 +601,14 @@ impl TuiApp {
     }
 
     pub(crate) async fn send_message(&mut self, content: String) -> color_eyre::Result<()> {
+        if self.active_request_id().is_some() {
+            self.replace_input_content(content);
+            self.ui.show_toast(
+                "This conversation already has an active request. Use /cancel or press Esc twice."
+                    .into(),
+            );
+            return Ok(());
+        }
         if tokio::runtime::Handle::try_current().is_err() {
             return Err(color_eyre::eyre::eyre!(
                 "Cannot send a message without a Tokio runtime"
@@ -600,7 +626,7 @@ impl TuiApp {
             ));
         }
         let completed_vault_mutation = completed_vault_result.is_some();
-        let app_tab_id = self.ui.app_tabs.active_id();
+        let app_tab_id = self.input_context_id();
         let (content, documents) = match self.ui.pending_vault_mutation.as_ref() {
             Some(pending) if completed_vault_mutation => (
                 pending.submission.instruction().to_owned(),
@@ -617,6 +643,13 @@ impl TuiApp {
         let submission = crate::app::submission::InputSubmission::new(&content, documents);
         let prepared_turn = crate::app::submission::PreparedUserTurn::prepare(&submission)?;
         let canonical_content = prepared_turn.content().to_owned();
+        let ephemeral_context = match self.ephemeral_context_for_request(&content) {
+            Ok(context) => context,
+            Err(error) => {
+                self.replace_input_content(content);
+                return Err(error);
+            }
+        };
         let preparing =
             crate::app::submission::SubmissionState::draft(submission.clone()).begin_preparing()?;
         self.submission_states.insert(app_tab_id, preparing);
@@ -643,7 +676,12 @@ impl TuiApp {
             .find(|entry| entry.id == model)
             .map(|entry| entry.supported_reasoning_efforts.clone())
             .unwrap_or_default();
-        let messages = prepared_turn.expand_messages(&tab_state.messages, conversation_id);
+        let mut messages = prepared_turn.expand_messages(&tab_state.messages, conversation_id);
+        if let Some(context) = &ephemeral_context {
+            if let Some(message) = messages.last_mut() {
+                message.content.push_str(context);
+            }
+        }
         let tab_endpoint = tab_state.tab.endpoint.clone();
         let config_snapshot = self.config.read().await.clone();
         if let Some(response) =
@@ -673,6 +711,9 @@ impl TuiApp {
                 "user".to_string(),
                 canonical_content.clone(),
             );
+            if let Some(context) = &ephemeral_context {
+                user_message.content.push_str(context);
+            }
             match self.storage.save_message(&user_message) {
                 Ok(message_id) => user_message.id = Some(message_id),
                 Err(error) => {
@@ -788,6 +829,7 @@ impl TuiApp {
         };
         let preparation = crate::app::submission_runtime::RequestPreparation {
             conversation_id,
+            history: self.storage.chat_reader(),
             provider: provider.clone(),
             endpoint,
             model: model.clone(),
@@ -800,6 +842,8 @@ impl TuiApp {
             messages,
             config: config_snapshot.clone(),
             user_request: canonical_content.clone(),
+            #[cfg(feature = "memory")]
+            memory_instruction: content,
             is_local_provider,
             vault_result: completed_vault_result,
         };
@@ -868,6 +912,9 @@ impl TuiApp {
             "user".to_string(),
             canonical_content.clone(),
         );
+        if let Some(context) = &ephemeral_context {
+            user_message.content.push_str(context);
+        }
         match crate::app::vault_mutation_execute::persist_user_message(
             &self.storage,
             &user_message,
@@ -910,16 +957,16 @@ impl TuiApp {
             )));
         }
 
-        let assistant_msg = Message::new(conversation_id, "assistant".to_string(), String::new());
-        self.ui.add_message(tab_id, assistant_msg);
-        let assistant_idx = self
-            .ui
-            .tabs
-            .get(tab_id)
-            .map(|tab| tab.messages.len().saturating_sub(1))
-            .unwrap_or(0);
-        if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
-            tab.streaming = true;
+        let submission_id = prepared_turn.submission_id();
+        let route = crate::app::requests::RequestRoute {
+            request_id: submission_id,
+            origin_conversation_id: conversation_id,
+            destination_conversation_id: conversation_id,
+        };
+        let history = self.ui.tabs[tab_id].messages.clone();
+        self.register_request(route, tab_id, history)?;
+        if let Some(request) = self.requests.get_mut(&submission_id) {
+            request.hide_answer = save_requested;
         }
         if is_local_provider {
             self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::LocalConnected;
@@ -932,78 +979,42 @@ impl TuiApp {
             let _ = action_tx.send(Action::UpdateStatus(notice));
         }
         #[cfg(feature = "memory")]
-        let mut memory_activities = prepared.memory_activities;
+        let memory_activities = prepared.memory_activities;
+        #[cfg(feature = "memory")]
+        if memory_activities.iter().any(|activity| {
+            matches!(
+                activity,
+                crate::memory::MemoryActivity::Saved { .. }
+                    | crate::memory::MemoryActivity::Removed { .. }
+            )
+        }) {
+            let _ = action_tx.send(Action::RefreshArtifactSidebar);
+        }
         #[cfg(feature = "memory")]
         let _ = action_tx.send(Action::SetMemoryActivities(
-            tab_id,
-            assistant_idx,
+            submission_id,
             memory_activities.clone(),
         ));
         let event_tx = action_tx.clone();
         let request = prepared.request;
-        let submission_id = prepared_turn.submission_id();
-        let _handle = tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
+            let _completion = crate::app::requests::StreamCompletion {
+                request_id: submission_id,
+                sender: action_tx.clone(),
+            };
             let mut visible_answer = String::new();
-            #[cfg(feature = "memory")]
-            let mut remember_filter = crate::memory::RememberFilter::default();
             let result = crate::llm::chat::stream_prepared_chat(request, |event| match event {
                 crate::llm::chat::ChatStreamEvent::Answer(content) => {
-                    let visible = {
-                        #[cfg(feature = "memory")]
-                        {
-                            remember_filter.push(&content)
-                        }
-                        #[cfg(not(feature = "memory"))]
-                        {
-                            content
-                        }
-                    };
-                    if !visible.is_empty() {
-                        visible_answer.push_str(&visible);
-                        if !save_requested {
-                            let _ = event_tx.send(Action::StreamResponse(
-                                tab_id,
-                                assistant_idx,
-                                visible,
-                            ));
-                        }
+                    if !content.is_empty() {
+                        visible_answer.push_str(&content);
+                        let _ = event_tx.send(Action::StreamResponse(submission_id, content));
                     }
                 }
                 crate::llm::chat::ChatStreamEvent::Thinking(content) => {
-                    let _ = event_tx.send(Action::StreamThinking(tab_id, assistant_idx, content));
-                }
-                crate::llm::chat::ChatStreamEvent::Title(title) => {
-                    let _ = event_tx.send(Action::SetTitle(title));
+                    let _ = event_tx.send(Action::StreamThinking(submission_id, content));
                 }
             })
             .await;
-
-            #[cfg(feature = "memory")]
-            let remembered = {
-                let filtered = remember_filter.finish();
-                if !filtered.visible.is_empty() {
-                    visible_answer.push_str(&filtered.visible);
-                    if !save_requested {
-                        let _ = action_tx.send(Action::StreamResponse(
-                            tab_id,
-                            assistant_idx,
-                            filtered.visible,
-                        ));
-                    }
-                }
-                for issue in filtered.issues {
-                    let message = match issue {
-                        crate::memory::RememberDirectiveIssue::UnterminatedOpen => {
-                            "Memory was not saved: <tcui:remember> was started but never closed."
-                        }
-                        crate::memory::RememberDirectiveIssue::ClosingWithoutOpening => {
-                            "Memory was not saved: </tcui:remember> appeared without a matching start tag."
-                        }
-                    };
-                    let _ = action_tx.send(Action::UpdateStatus(message.to_string()));
-                }
-                filtered.memory
-            };
 
             match result {
                 Ok(response)
@@ -1011,49 +1022,6 @@ impl TuiApp {
                         || !visible_answer.is_empty()
                         || !response.thinking.is_empty() =>
                 {
-                    #[cfg(feature = "memory")]
-                    if let Some(fact) = remembered {
-                        memory_activities.push(crate::memory::MemoryActivity::Saving);
-                        let _ = action_tx.send(Action::SetMemoryActivities(
-                            tab_id,
-                            assistant_idx,
-                            memory_activities.clone(),
-                        ));
-                        let capture_config = config_snapshot.clone();
-                        let capture = tokio::task::spawn_blocking(move || {
-                            crate::memory::capture(&capture_config, &fact)
-                        })
-                        .await;
-                        memory_activities.retain(|activity| {
-                            !matches!(activity, crate::memory::MemoryActivity::Saving)
-                        });
-                        match capture {
-                            Ok(Ok(crate::memory::WriteOutcome::Saved { title, path })) => {
-                                memory_activities
-                                    .push(crate::memory::MemoryActivity::Saved { title, path });
-                                let _ = action_tx.send(Action::RefreshArtifactSidebar);
-                            }
-                            Ok(Ok(crate::memory::WriteOutcome::AlreadyKnown { title })) => {
-                                memory_activities
-                                    .push(crate::memory::MemoryActivity::AlreadyKnown { title });
-                            }
-                            Ok(Err(error)) => {
-                                memory_activities.push(crate::memory::MemoryActivity::Failed {
-                                    message: error.to_string(),
-                                });
-                            }
-                            Err(error) => {
-                                memory_activities.push(crate::memory::MemoryActivity::Failed {
-                                    message: error.to_string(),
-                                });
-                            }
-                        }
-                        let _ = action_tx.send(Action::SetMemoryActivities(
-                            tab_id,
-                            assistant_idx,
-                            memory_activities.clone(),
-                        ));
-                    }
                     let assistant_content = visible_answer.clone();
                     let mut msg =
                         Message::new(conversation_id, "assistant".to_string(), assistant_content);
@@ -1078,12 +1046,12 @@ impl TuiApp {
                     };
                     let _ = action_tx.send(Action::FinalizeAssistantMessage(
                         crate::app::action::AssistantFinalization {
-                            tab_id,
-                            message_idx: assistant_idx,
+                            request_id: submission_id,
                             message: msg,
                             generated_file,
                         },
                     ));
+                    let _ = action_tx.send(Action::StopStream(submission_id));
                     if !save_requested && !terminal_has_focus.load(Ordering::Relaxed) {
                         let _ = crate::notifications::notify_finished(
                             &config_snapshot,
@@ -1097,15 +1065,18 @@ impl TuiApp {
                 Err(err) => {
                     let message = format!("Provider request failed: {err}");
                     let _ = action_tx.send(Action::UpdateStatus(message.clone()));
+                    let final_message =
+                        Message::new(conversation_id, "assistant".to_string(), message);
+                    #[cfg(feature = "memory")]
+                    let final_message = {
+                        let mut message = final_message;
+                        let _ = crate::memory::set_activities(&mut message, &memory_activities);
+                        message
+                    };
                     let _ = action_tx.send(Action::FinalizeAssistantMessage(
                         crate::app::action::AssistantFinalization {
-                            tab_id,
-                            message_idx: assistant_idx,
-                            message: Message::new(
-                                conversation_id,
-                                "assistant".to_string(),
-                                message,
-                            ),
+                            request_id: submission_id,
+                            message: final_message,
                             generated_file:
                                 crate::app::action::GeneratedFileFinalization::NotRequested,
                         },
@@ -1116,8 +1087,10 @@ impl TuiApp {
                     ));
                 }
             }
-            let _ = action_tx.send(Action::StopStream(tab_id));
         });
+        if let Some(request) = self.requests.get_mut(&submission_id) {
+            request.abort = Some(handle.abort_handle());
+        }
 
         self.transition_submission(app_tab_id, crate::app::submission::SubmissionState::launch)?;
         self.discard_pending_documents();
@@ -1141,7 +1114,7 @@ impl TuiApp {
         if pending.is_workspace() {
             return Ok(());
         }
-        let app_tab_id = self.ui.app_tabs.active_id();
+        let app_tab_id = self.input_context_id();
         self.transition_submission(
             app_tab_id,
             crate::app::submission::SubmissionState::return_to_draft,
@@ -1196,7 +1169,7 @@ impl TuiApp {
                 return Err(error.into());
             }
             if !pending.is_workspace() {
-                let app_tab_id = self.ui.app_tabs.active_id();
+                let app_tab_id = self.input_context_id();
                 self.transition_submission(
                     app_tab_id,
                     crate::app::submission::SubmissionState::confirm,
@@ -1273,17 +1246,22 @@ impl TuiApp {
                 Ok(())
             }
             MouseClickAction::ToggleRightHandle => {
+                if self.ui.ephemeral.is_some() {
+                    return self.close_ephemeral();
+                }
                 self.ui.panel_state.toggle_right();
                 self.ui.artifact_sidebar_open =
                     self.ui.panel_state.right != crate::tui::shell::PanelMode::Closed;
                 Ok(())
             }
             MouseClickAction::CloseRightSidebar => {
+                self.close_ephemeral()?;
                 self.ui.panel_state.right = crate::tui::shell::PanelMode::Closed;
                 self.ui.artifact_sidebar_open = false;
                 Ok(())
             }
             MouseClickAction::SetRightSidebarThin => {
+                self.close_ephemeral()?;
                 self.ui.panel_state.right = crate::tui::shell::PanelMode::Thin;
                 self.ui.artifact_sidebar_open = true;
                 Ok(())

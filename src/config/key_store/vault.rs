@@ -491,9 +491,9 @@ fn decrypt(
     nonce: &[u8],
     ciphertext: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>> {
-    if nonce.len() != 12 {
-        return Err(KeyStoreError::VaultAuthentication);
-    }
+    let nonce: &[u8; 12] = nonce
+        .try_into()
+        .map_err(|_| KeyStoreError::VaultAuthentication)?;
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| KeyStoreError::KeyAccess)?;
     cipher
         .decrypt(
@@ -505,4 +505,24 @@ fn decrypt(
         )
         .map(Zeroizing::new)
         .map_err(|_| KeyStoreError::VaultAuthentication)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    #[test]
+    fn decrypts_credential_written_before_crypto_upgrade() {
+        // Generated with argon2 0.5.3 and aes-gcm 0.10.3, using the v1 vault parameters.
+        let ciphertext = STANDARD
+            .decode("T0sNNweFUydx3HfamRI7JyK5kxk+3m4gz8lYr+gOTUP1GrkW")
+            .expect("decode fixture");
+        let key = derive_key("dependency-compatibility-password", &[0x11; 16])
+            .expect("derive existing vault key");
+        let aad = metadata("machine_password", "fixture", "Fixture").expect("record metadata");
+        let plaintext =
+            decrypt(&key, &aad, &[7; 12], &ciphertext).expect("decrypt existing credential");
+        assert_eq!(plaintext.as_slice(), b"local fixture secret");
+    }
 }

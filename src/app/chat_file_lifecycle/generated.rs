@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn direct_save_uses_collision_name_confirmation_and_survives_restart() {
+fn direct_save_preserves_colliding_file_and_survives_restart() {
     // Given
     let _guard = env_lock().lock().expect("env lock poisoned");
     let root = unique_root("direct-save");
@@ -15,23 +15,21 @@ fn direct_save_uses_collision_name_confirmation_and_survives_restart() {
 
     // Then
     assert_eq!(
-        app.ui.tabs[0]
-            .messages
-            .last()
-            .map(|message| message.content.as_str()),
-        Some("Saved as report (2).md")
+        std::fs::read_to_string(saved_dir.join("report.md")).unwrap(),
+        "existing"
     );
     assert_eq!(app.ui.saved_artifacts.len(), 2);
     assert_eq!(app.ui.tabs[0].temporary_artifacts.len(), 1);
     drop(app);
     let restarted = app_with_saved_dir(&saved_dir);
     assert_eq!(restarted.ui.tabs[0].temporary_artifacts[0].handle, handle);
+    let saved_path = restarted.ui.tabs[0].temporary_artifacts[0]
+        .path
+        .as_ref()
+        .unwrap();
     assert_eq!(
-        restarted.ui.tabs[0]
-            .messages
-            .last()
-            .map(|message| message.content.as_str()),
-        Some("Saved as report (2).md")
+        std::fs::read_to_string(saved_path).unwrap(),
+        "# Report\n\nPersistent content."
     );
     reset_environment(&root);
 }
@@ -45,7 +43,7 @@ fn failed_save_persists_failure_without_file_link_or_success_claim() {
     let saved_dir = root.join("saved");
     let mut app = app_with_saved_dir(&saved_dir);
     let conversation_id = app.ui.tabs[0].active_conversation;
-    let message_idx = add_assistant_placeholder(&mut app, conversation_id);
+    let (request_id, message_idx) = add_assistant_placeholder(&mut app, conversation_id);
     let generated =
         GeneratedFile::from_skill_response(9, conversation_id, "@save report.md", "# Report")
             .expect("parse @save response");
@@ -56,8 +54,7 @@ fn failed_save_persists_failure_without_file_link_or_success_claim() {
         .expect("runtime")
         .block_on(
             app.dispatch(Action::FinalizeAssistantMessage(AssistantFinalization {
-                tab_id: 0,
-                message_idx,
+                request_id,
                 message: Message::new(
                     conversation_id,
                     "assistant".to_string(),
@@ -92,7 +89,7 @@ fn completed_model_media_is_imported_once_and_reload_only_hydrates_link() {
     std::fs::write(&source, b"generated-image").expect("write generated media");
     let mut app = app_with_saved_dir(&saved_dir);
     let conversation_id = app.ui.tabs[0].active_conversation;
-    let message_idx = add_assistant_placeholder(&mut app, conversation_id);
+    let (request_id, _) = add_assistant_placeholder(&mut app, conversation_id);
     let content = format!("![generated]({})", source.display());
 
     // When
@@ -100,8 +97,7 @@ fn completed_model_media_is_imported_once_and_reload_only_hydrates_link() {
         .expect("runtime")
         .block_on(
             app.dispatch(Action::FinalizeAssistantMessage(AssistantFinalization {
-                tab_id: 0,
-                message_idx,
+                request_id,
                 message: Message::new(conversation_id, "assistant".to_string(), content),
                 generated_file: GeneratedFileFinalization::NotRequested,
             })),
@@ -161,15 +157,14 @@ fn invalid_save_response_persists_failure_without_creating_artifact() {
     let saved_dir = root.join("saved");
     let mut app = app_with_saved_dir(&saved_dir);
     let conversation_id = app.ui.tabs[0].active_conversation;
-    let message_idx = add_assistant_placeholder(&mut app, conversation_id);
+    let (request_id, message_idx) = add_assistant_placeholder(&mut app, conversation_id);
 
     // When
     tokio::runtime::Runtime::new()
         .expect("runtime")
         .block_on(
             app.dispatch(Action::FinalizeAssistantMessage(AssistantFinalization {
-                tab_id: 0,
-                message_idx,
+                request_id,
                 message: Message::new(conversation_id, "assistant".to_string(), String::new()),
                 generated_file: GeneratedFileFinalization::Invalid,
             })),

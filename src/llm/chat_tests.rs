@@ -1,24 +1,7 @@
 use super::*;
 
 #[test]
-fn title_tag_filter_strips_split_control_tag() {
-    let mut filter = TitleTagFilter::default();
-
-    let first = filter.push("<tcui:chat");
-    let second = filter.push("-title>Hidden");
-    let third = filter.push("</tcui:chat-title>\nok");
-    let tail = filter.finish();
-
-    assert_eq!(first, TitleFilteredChunk::default());
-    assert_eq!(second, TitleFilteredChunk::default());
-    assert_eq!(third.visible, "\nok");
-    assert_eq!(third.title, Some("Hidden".to_string()));
-    assert_eq!(tail, TitleFilteredChunk::default());
-}
-
-#[test]
 fn openai_stream_events_split_thinking_from_answer() {
-    let mut filter = TitleTagFilter::default();
     let data = r#"{
         "choices": [{
             "delta": {
@@ -28,7 +11,7 @@ fn openai_stream_events_split_thinking_from_answer() {
         }]
     }"#;
 
-    let events = openai_stream_events(data, &mut filter).unwrap();
+    let events = openai_stream_events(data).unwrap();
 
     assert_eq!(
         events.events,
@@ -40,44 +23,59 @@ fn openai_stream_events_split_thinking_from_answer() {
 }
 
 #[test]
-fn openai_stream_events_strips_title_from_answer() {
-    let mut filter = TitleTagFilter::default();
-    let first = r#"{"choices":[{"delta":{"content":"<tcui:chat-title>Hidden"}}]}"#;
-    let second = r#"{"choices":[{"delta":{"content":"</tcui:chat-title>\nok"}}]}"#;
+fn stream_events_preserve_literal_tags_across_chunks() {
+    let chunks = [
+        "<tcui:chat",
+        "-title>東京</tcui:chat-title>\n",
+        "\"<memory>quoted</memory>\" <tcui:mem",
+        "ory>literal</tcui:memory> ",
+        "<chat-title>legacy</chat-title> <tcui:chat-title>unfinished ",
+        "<memory>unfinished <tcui:mem",
+    ];
+    let expected: Vec<_> = chunks
+        .iter()
+        .map(|chunk| ChatStreamEvent::Answer((*chunk).to_owned()))
+        .collect();
+    let mut openai_events = Vec::new();
+    let mut completion_events = Vec::new();
+    let mut anthropic_events = Vec::new();
+    for text in chunks {
+        let openai = serde_json::json!({"choices": [{"delta": {"content": text}}]});
+        openai_events.extend(openai_stream_events(&openai.to_string()).unwrap().events);
+        let completion = serde_json::json!({"choices": [{"text": text}]});
+        completion_events.extend(
+            openai_stream_events(&completion.to_string())
+                .unwrap()
+                .events,
+        );
+        let anthropic = serde_json::json!({"delta": {"text": text}});
+        anthropic_events.extend(anthropic_stream_events(&anthropic.to_string()).unwrap());
+    }
 
-    let mut events = openai_stream_events(first, &mut filter).unwrap().events;
-    events.extend(openai_stream_events(second, &mut filter).unwrap().events);
+    assert_eq!(openai_events, expected);
+    assert_eq!(completion_events, expected);
+    assert_eq!(anthropic_events, expected);
+}
+
+#[test]
+fn anthropic_stream_events_split_thinking_from_answer() {
+    let events =
+        anthropic_stream_events(r#"{"delta":{"thinking":"working","text":"answer"}}"#).unwrap();
 
     assert_eq!(
         events,
         vec![
-            ChatStreamEvent::Title("Hidden".to_string()),
-            ChatStreamEvent::Answer("\nok".to_string())
+            ChatStreamEvent::Thinking("working".to_owned()),
+            ChatStreamEvent::Answer("answer".to_owned())
         ]
     );
 }
 
 #[test]
-fn legacy_chat_title_tag_remains_visible_text() {
-    let mut filter = TitleTagFilter::default();
-
-    let first = filter.push("<chat-title>Old");
-    let second = filter.push("</chat-title>");
-    let tail = filter.finish();
-
-    assert_eq!(first.visible, "<chat-title>Old");
-    assert_eq!(first.title, None);
-    assert_eq!(second.visible, "</chat-title>");
-    assert_eq!(second.title, None);
-    assert_eq!(tail, TitleFilteredChunk::default());
-}
-
-#[test]
 fn openai_stream_events_capture_usage_when_present() {
-    let mut filter = TitleTagFilter::default();
     let data = r#"{"choices":[{"delta":{"content":"answer"}}],"usage":{"total_tokens":2048}}"#;
 
-    let chunk = openai_stream_events(data, &mut filter).unwrap();
+    let chunk = openai_stream_events(data).unwrap();
 
     assert_eq!(chunk.total_tokens, Some(2048));
     assert_eq!(

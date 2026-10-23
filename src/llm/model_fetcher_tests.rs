@@ -130,8 +130,8 @@ fn cached_model(id: &str) -> crate::storage::db::ModelRow {
     (id.to_string(), None, None, None, None, Vec::new())
 }
 
-#[tokio::test]
-async fn authenticated_discovery_replaces_the_obsolete_catalog_without_external_codex_files(
+#[test]
+fn authenticated_discovery_replaces_the_obsolete_catalog_without_external_codex_files(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock().lock().expect("env lock");
     let environment = TestEnvironment::new();
@@ -153,12 +153,18 @@ async fn authenticated_discovery_replaces_the_obsolete_catalog_without_external_
             cached_model("retired-three"),
         ],
     )?;
-    let server = fixture("200 OK", CATALOG).await?;
-
-    let models = refresh_provider_models(&storage, "Codex", API_BASE, "CODEX_API_KEY", "codex")
-        .await
-        .map_err(std::io::Error::other)?;
-    let request = server.await??.to_ascii_lowercase();
+    let (models, request) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            let server = fixture("200 OK", CATALOG).await?;
+            let models =
+                refresh_provider_models(&storage, "Codex", API_BASE, "CODEX_API_KEY", "codex")
+                    .await
+                    .map_err(std::io::Error::other)?;
+            let request = server.await??.to_ascii_lowercase();
+            Ok::<_, Box<dyn std::error::Error>>((models, request))
+        })?;
     let ids: Vec<_> = models.iter().map(|model| model.id.as_str()).collect();
     assert_eq!(
         ids,
@@ -190,8 +196,8 @@ async fn authenticated_discovery_replaces_the_obsolete_catalog_without_external_
     Ok(())
 }
 
-#[tokio::test]
-async fn failed_discovery_preserves_the_last_catalog_without_synthesizing_models(
+#[test]
+fn failed_discovery_preserves_the_last_catalog_without_synthesizing_models(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock().lock().expect("env lock");
     let environment = TestEnvironment::new();
@@ -199,15 +205,21 @@ async fn failed_discovery_preserves_the_last_catalog_without_synthesizing_models
     let storage = crate::storage::Storage::new()?;
     let cached = vec![cached_model("last-discovered-model")];
     storage.save_models("Codex", &cached)?;
-    let server = fixture(
-        "503 Service Unavailable",
-        r#"{"error":"temporarily unavailable"}"#,
-    )
-    .await?;
-
-    let result =
-        refresh_provider_models(&storage, "Codex", API_BASE, "CODEX_API_KEY", "codex").await;
-    let _ = server.await??;
+    let result = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            let server = fixture(
+                "503 Service Unavailable",
+                r#"{"error":"temporarily unavailable"}"#,
+            )
+            .await?;
+            let result =
+                refresh_provider_models(&storage, "Codex", API_BASE, "CODEX_API_KEY", "codex")
+                    .await;
+            let _ = server.await??;
+            Ok::<_, Box<dyn std::error::Error>>(result)
+        })?;
 
     assert!(result.is_err());
     assert_eq!(storage.get_models("Codex")?, cached);
@@ -232,22 +244,27 @@ fn fixture_api_override_rejects_off_host_or_credential_bearing_urls() {
     }
 }
 
-#[tokio::test]
-async fn startup_refresh_reloads_codex_even_with_a_fresh_cache_and_emits_the_new_catalog(
+#[test]
+fn startup_refresh_reloads_codex_even_with_a_fresh_cache_and_emits_the_new_catalog(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock().lock().expect("env lock");
     let environment = TestEnvironment::new();
     environment.save_credential()?;
     let storage = crate::storage::Storage::new()?;
     storage.save_models("Codex", &[cached_model("cached-before-login")])?;
-    let server = fixture("200 OK", CATALOG).await?;
-    let mut refreshed = Vec::new();
-
-    refresh_all_models(&storage, |provider, models| {
-        refreshed.push((provider, models))
-    })
-    .await;
-    let _ = server.await??;
+    let refreshed = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            let server = fixture("200 OK", CATALOG).await?;
+            let mut refreshed = Vec::new();
+            refresh_all_models(&storage, |provider, models| {
+                refreshed.push((provider, models))
+            })
+            .await;
+            let _ = server.await??;
+            Ok::<_, Box<dyn std::error::Error>>(refreshed)
+        })?;
 
     assert_eq!(refreshed.len(), 1);
     assert_eq!(refreshed[0].0, "Codex");

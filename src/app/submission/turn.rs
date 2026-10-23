@@ -6,7 +6,7 @@ use thiserror::Error;
 use super::document::PendingDocuments;
 use crate::app::message::Message;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SubmissionId(u64);
 
 impl SubmissionId {

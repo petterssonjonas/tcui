@@ -18,4 +18,4 @@ pub(crate) use manager::VaultProfilePhase;
 
 #[cfg(test)]
 #[path = "vault_profile_ui/tests.rs"]
-mod vault_profile_ui;
+mod tests;
