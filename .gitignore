@@ -1,6 +1,8 @@
 .gitnexus
 .codegraph/
 target/
+tcui-chats/
+log
 .opencode/
 .omo/
 .sisyphus/
