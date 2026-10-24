@@ -2,19 +2,19 @@
 
 ## Scope and conclusion
 
-This reviews [Fable's report](2026-10-21-review.md) against the **current working tree**, not just its stated baseline, `de4c099`. HEAD is `2234c71`; `git rev-list --count de4c099..HEAD` reports **40 commits**. The working tree also contains ongoing terminal, command-block, Markdown, dependency, and documentation changes, including the new `markdown_shell.rs`. Those changes were included where relevant and left untouched.
+**Historical baseline:** the original assessment compared [Fable's report](2026-10-21-review.md) with the working tree at `2234c71`, 40 commits after the report's `de4c099` baseline. It included then-pending terminal, command-block, Markdown, dependency, and documentation changes. Later implementation follow-ups below have their own evidence; the original commit, line references, and runtime results are not a fresh assessment of every subsequent candidate.
 
 The earlier report is useful, but its work batches should not be executed verbatim. The settings workspace, credential backend, native Vault operations, search implementation, and notification handling have changed substantially. Several proposed fixes now duplicate working implementations or would remove live functionality.
 
-**Current priorities:** request-owned streaming is implemented under AR-01. The tag-safety follow-up closes the memory authorization bypass (AR-08), removes hidden title/memory commands (AR-13), and fixes Unicode title truncation in AR-04. Contextual memory and scoped metadata are now implemented under AR-15. Next, prevent destructive config rewrites and fix the remaining crash/terminal-cleanup paths. CI/CD is owned by a separate session (AR-14). Keep the current memory backend unless the owner chooses a replacement. App-wide password protection is planned under AR-17.
+**Current priorities:** AR-01 request ownership, AR-08 explicit memory authorization, AR-13 literal text, contextual memory, and AR-17 selective protection are implemented. Preserve these contracts. Next, prevent destructive config rewrites and finish crash/terminal-cleanup proof, or handle AR-14 if the owner prioritizes CI/CD alignment. Retain the current memory backend unless the owner chooses a replacement. Protection publication and exact-candidate hosted checks are tracked in PR #17.
 
 Evidence labels used below:
 
 - **Observed:** exercised in a local runtime probe described in §1.
-- **Source:** current source establishes the implementation; the complete user scenario was not executed.
+- **Source:** source inspected for that assessment establishes the implementation; the complete user scenario was not executed. Reconcile historical references with current source before editing.
 - **[INFERENCE]:** consequence or exploitability inferred from that implementation, not demonstrated end to end.
 
-This is a targeted reassessment, not a fresh exhaustive security audit. The initial assessment did not change production code or tests. The AR-01, AR-04, AR-08, AR-13, and AR-15 updates record subsequent requested implementation work. Other findings remain open unless stated otherwise. The SQLite credential vault and the complete memory system have not received a fresh exhaustive security audit.
+This is a targeted reassessment, not a fresh exhaustive security audit. The initial assessment did not change production code or tests. Follow-ups record subsequent requested implementation work. AR-17 has scoped independent security/data-integrity review and executed verification, not a claim that the entire repository or every credential/memory path has received an exhaustive audit. Other findings remain open unless stated otherwise.
 
 ## 1. Verification performed
 
@@ -316,6 +316,10 @@ Release only. The current release workflow is manual dispatch with an
 Release-creates-tag flow. A tag alone must not create a Release. These workflow
 changes and hosted protection settings are not implemented or verified by AR-17.
 
+AR-17 explicitly declares `rustfmt` and `clippy` in the shared mise Rust pin:
+hosted CI exposed that installing the version alone did not install the required
+components. This repairs existing check setup, not the pending tier/CD redesign.
+
 ### AR-15 — Review or replace the memory system
 
 **Contextual workflow and selective protection implemented · Current backend retained · Management and recall work remains**
@@ -508,7 +512,7 @@ Acceptance: unchanged long chats do not repeatedly parse/layout their contents; 
 - Remove the unused `_llm: Arc<LlmClient>` constructor parameter and its allocation if its lack of use remains confirmed at implementation time (`src/app.rs:86-90`; `src/main.rs:195-199`). Retire dead actions before making dispatch exhaustive; the current `_ => Ok(())` hides omissions (`src/app/runtime.rs:581`).
 - Narrow blanket dead-code/unused-import suppression module by module. Use compiler/reference evidence across both feature configurations; do not delete serialized fields or database tables merely because a text search finds no `SELECT`.
 - The DB's providers/models cache is not automatically a harmful second source of truth. Remove misleading unused mutators, then document ownership. Drop genuinely obsolete tables only through an explicit migration; that deletion is not a prerequisite for fixing current behavior.
-- Update `ARCHITECTURE.md` selectively. It still claims “47 source files,” documents `stream.rs`, and describes chats/settings as SQLite-backed (`10,87-113,347-355`), while other sections correctly describe newer auth/search behavior. Keep useful design history in `docs/ui-refactor-plan.md`, but label historical claims and replace the unsupported general renderer-cache assertion at line 82.
+- Update `ARCHITECTURE.md` selectively. AR-17 updates native storage/protection boundaries, but historical “47 source files” and `stream.rs` descriptions still need reconciliation with the current module graph. Keep useful design history in `docs/ui-refactor-plan.md`, label historical claims, and replace unsupported general renderer-cache assertions.
 - Do not standardize every test file layout just for consistency. Environment isolation and guards that restore state on panic matter more than inline versus sibling test modules. The old exact warning count and dead-code line count need a new compiler run before use as acceptance targets.
 
 ### CI coverage — P2, CI-1/2, TEST-1/2
@@ -574,86 +578,75 @@ Acceptance: CI exercises terminal teardown on failure, catches feature-specific 
 
 ## 5. Recommended implementation order
 
-**Completed:** AR-01 request ownership, cancellation, recovery, forks, and bounded cross-conversation recall; AR-08 explicit memory authorization; AR-13 literal text and action separation; Unicode title safety within AR-04. Preserve these contracts during later asynchronous or rendering changes.
+**Implemented:** AR-01 request ownership, cancellation, recovery, forks, and bounded cross-conversation recall; AR-08 explicit memory authorization; AR-13 literal text and action separation; Unicode title safety within AR-04; and AR-17 selective protection/native storage. Preserve these contracts. Final protection-candidate hosted evidence belongs to PR #17, not the historical checkpoints.
 
 1. **Configuration patch:** AR-02, AR-03, and remaining mutations in AR-05. Preserve the new settings workspace and existing migration semantics.
 2. **Crash and visible-error patch:** remaining AR-04 and AR-06 work. Include startup PTY teardown, real memory export, shortcut ownership, and separate operation notices from connectivity.
 3. **Model/host trust patch:** remaining AR-07, AR-09, and AR-10 work. Preserve explicit terminal-command approval, explicit memory authorization, and native Vault confinement. Treat local-file reads as authorization decisions, not prompt-engineering fixes.
 4. **Dependency/update patch:** AR-12 and immediate AR-11 hardening. Keep dependency churn separate from application fixes; design signing independently if desired.
-5. **Memory and storage:** finish AR-15 management/retrieval work while retaining the current backend. AR-17 is the separately approved plan for app-wide password protection; start with the data inventory and migration boundary, not a new login system. Backend replacement still requires the owner's choice.
+5. **Memory and storage:** finish AR-15 management/retrieval work while retaining the current backend and AR-17's independent native stores, protection choices, and migration guarantees. Backend replacement still requires the owner's choice.
 6. **Performance and cleanup:** §3, after the behavioral contracts above are protected. Measure first; delete only code proven obsolete. CI/CD remains separately owned under AR-14.
 
 The remaining batches overlap runtime dispatch and configuration publication. Use one integration owner or sequence shared-file changes. The original report's broad “independent” batches are no longer a reliable conflict map.
 
 ## 6. Next-session handoff
 
-Read this review before restarting work. The publication worktree is `/home/jp/Projects/.worktrees/tcui/contextual-memory` on `fix/contextual-memory`. It includes the completed accumulated baseline, not the paused session's future alignment changes. Preserve the original checkout and follow the publication boundary in §1. Preserve completed request-routing, temporary-chat, literal-text, and contextual explicit-save contracts.
+Read this review before restarting work. Selective protection is published in [PR #17](https://github.com/petterssonjonas/tcui/pull/17), from `/home/jp/Projects/.worktrees/tcui/app-protection` on `feat/app-protection`. Check the actual PR and exact-candidate CI status; publication or green CI is not merge authorization. Continue protection corrections in that worktree if needed. After publication is resolved, create the next feature worktree from refreshed `origin/development` under `~/Projects/.worktrees/tcui/<feature>`. The older contextual-memory handoff is historical; do not reapply the preserved original-checkout snapshot.
 
 - **AR-01 — Mostly complete:** request preparation is not independently cancellable. Live `/steer` needs a provider transport that supports it; current transports report the limit. Future scheduled tasks must use the existing origin/destination/request ownership contract.
 - **AR-02 — Open:** prevent config migration/serialization from dropping unsupported settings.
 - **AR-03 — Open:** harden temporary-file creation and atomic writes against symlinks.
-- **AR-04 — Partly complete:** Unicode title handling is fixed. Finish memory export, Ctrl+E ownership, and terminal teardown on startup failure.
+- **AR-04 — Partly complete:** Unicode title handling is fixed; AR-17 adds protected-editor consent and terminal lifecycle fixes. Finish direct memory-dialog export, complete shortcut ownership, and startup/draw/panic teardown proof.
 - **AR-05 — Open:** complete settings mutation, startup/live consistency, and sidebar persistence.
 - **AR-06 — Partly complete:** dispatch errors reach toasts; contextual saves/removals report partial index failure and retain host activity after provider failure. Connection-status misuse and other silent failures remain.
 - **AR-07 — Open:** enforce authority for URLs and local-media reads.
 - **AR-08 — Implemented:** preserve explicit host authorization for memory mutations.
-- **AR-09 — Open:** finish the legacy Vault filesystem cutover.
+- **AR-09 — Reassess remaining cutover:** AR-17 hardens native protected IO, copy/restore, and recovery. Verify the remaining legacy adapter/caller inventory against current source.
 - **AR-10 — Open:** bound network inputs and make insecure transport explicit.
 - **AR-11 — Open:** harden updater staging and checksum handling; coordinate release policy with CI/CD.
-- **AR-12 — Open:** update verified affected dependencies and check actual reachability.
+- **AR-12 — Reconciliation open:** listed version ranges are now met in Cargo.lock. Run a fresh advisory scan and feature/target reachability check, then add CI advisory coverage; do not blindly repeat the old upgrade list.
 - **AR-13 — Implemented:** preserve literal tags and keep assistant text separate from host actions.
-- **AR-14 — Other session:** PR and CI/CD enforcement. Do not duplicate that work.
-- **AR-15 — Partly implemented:** contextual skills, clarification, user/machine metadata, scoped search, and metadata preview work. Management consistency, automatic-recall controls, deduplication, and index efficiency remain. No replacement backend selected.
-- **AR-16 — Locally cleared:** strict Clippy passes for all features and no default features with Rust 1.99.1. Recheck the integrated candidate with the CI/CD session.
-- **AR-17 — Planned:** implement the optional app-wide password choice, startup unlock, protected memory/index storage, and safe data migration. Explicitly deferred from this run.
+- **AR-14 — Pending:** quicker local checks, broader CI, full main-promotion checks, Release-only packaging, and hosted enforcement. Existing-check Rust component setup is repaired in AR-17; the broader redesign is not.
+- **AR-15 — Partly implemented:** contextual skills, clarification, user/machine metadata, scoped search, native separation, selective encryption, and metadata preview work. Management consistency, automatic-recall controls, deduplication, and index efficiency remain. No replacement backend selected.
+- **AR-16 — Locally cleared:** strict Clippy passes for all features and no default features with Rust 1.99.1. Consult the exact protection-PR candidate for hosted evidence; development CI is not the full promotion tier.
+- **AR-17 — Implemented:** first-run/later selective protection, mandatory app/chat gating, mixed credentials, independent Memories and built-in Vault, explicit external-vault copying, and authenticated recoverable migration. Verification and limits are recorded above and in PR #17.
 
-Start with AR-02/AR-03 unless integration checks block work or the owner selects AR-17 next. Follow §5 for later batches. Retain the current memory backend unless the owner chooses a replacement.
+Next recommended item: AR-02/AR-03 after the protection publication is resolved, unless the owner selects CI/CD alignment first. Follow §5 for later batches. Retain the current memory backend unless the owner chooses a replacement.
 
 ### Copyable next-session prompt
 
 ```text
-Continue the TCUI actionable review in /home/jp/Projects/.worktrees/tcui/contextual-memory
-on branch fix/contextual-memory.
+Continue the TCUI actionable review. Read AGENTS.md and
+docs/2026-10-22-actionable-review.md first.
 
-Read repository instructions and docs/2026-10-22-actionable-review.md first.
-Use STE-100 simplified technical English for explanations, and use the
-rust-best-practices skill. Run project commands inside the tcui toolbox
-with mise and the pinned Rust 1.99.1 toolchain.
+Protection is PR #17 from feat/app-protection in
+~/Projects/.worktrees/tcui/app-protection. Inspect its actual status and
+exact-candidate checks. Green CI alone does not authorize merging.
+Continue any protection corrections there. Once publication is resolved,
+create the next feature worktree from refreshed origin/development under
+~/Projects/.worktrees/tcui/<feature>, and PR back to development.
+Never enable auto-merge or reapply the preserved original-checkout snapshot.
 
-This publication branch contains the completed accumulated baseline and
-contextual-memory work. The paused workflow-alignment session had made no
-source edits. The original /home/jp/Projects/tcui checkout is preserved.
-After this PR merges, create new feature worktrees from refreshed
-origin/development under ~/Projects/.worktrees/tcui/<feature>.
-Do not copy the original checkout's old pending snapshot into the new base.
+Run project commands inside the tcui toolbox with mise and the pinned
+toolchain. Follow the repository's skill, review, and verification rules.
 
-Preserve the memory contract: @remember, @memory, and @memorize interpret
-the entire prompt and current conversation. They select saving or recall
-from meaning and ask when required facts are missing. Plain replies can
-resume clarification after restart. @recall is host-enforced read-only.
-/skill name request works with one Enter. Never restore literal-suffix
-saving, automatic capture, or hidden response-tag actions.
+Preserve contextual memory: @remember, @memory, and @memorize interpret the
+entire prompt and conversation; @recall remains host-enforced read-only.
+Keep clarification across restart, scoped source metadata, truthful partial
+outcomes, and persisted host activity. Do not restore literal-suffix saving,
+automatic capture, or hidden response-tag actions.
 
-Keep user/machine scope, machine names and tags, source title/optional ID,
-pre-ranking scope filters, truthful partial outcomes, and persisted host
-activity. Keep the current backend unless I choose a replacement.
+AR-17 is implemented, not an encryption plan. Preserve independent native
+Memories and built-in Vault storage, selectable protection, mandatory app/chat
+startup gating, mixed provider connections, lifecycle quiescence, and
+authenticated recoverable migration. External vaults remain plaintext;
+explicit copies follow the destination's policy. Keep the privacy limits.
+Use AR-17 and the PR for current verification, not old checkpoint counts.
 
-The owner selected contextual memory now and encryption planning only.
-AR-17 describes a future single optional startup password unlock for all
-TCUI-owned private data, including memories and indexes. Current local-key
-encryption is not that protection. Do not claim it is implemented.
-
-Local checks passed: 1,214 unit + 13 integration tests with all features;
-1,170 unit + 13 integration tests with no default features; strict Clippy
-in both configurations; all-feature build; formatting check. A real TUI
-and controlled local provider exercised persistence, recall, clarification,
-restart, read-only rejection, provider failure, and metadata display.
-This was not a live-model intent evaluation or remote CI run.
-
-First reconcile the review with current code and restate the remaining
-concerns. Recommend one item to handle next, normally AR-02 before AR-03.
-Work on one agreed item at a time. Preserve completed streaming, forks,
-temporary chats, literal text, and contextual memory. After changes, run
-the affected real scenario and checks, update the review, then report the
-results and remaining concerns.
+First reconcile the remaining concerns against current source. Recommend one
+item next, normally AR-02 before AR-03, or AR-14 if the owner prioritizes CI/CD.
+Work on one agreed item at a time. Keep dependency upgrades separate and
+preserve the current memory backend unless I choose a replacement.
+Exercise the changed real scenario and relevant checks, update this review,
+then report results and remaining concerns.
 ```
