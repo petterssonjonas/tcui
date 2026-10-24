@@ -149,3 +149,251 @@ fn failed_unlock_clears_an_existing_unlock_key() {
     assert!(!KeyStore::vault_status(&config).expect("status").unlocked);
     assert!(KeyStore::get(&config, "OpenAI").is_err());
 }
+
+#[test]
+fn connection_defaults_never_convert_or_overwrite_other_records() {
+    let _guard = env_lock().lock().expect("env lock");
+    let env = TestEnv::new("mixed-connection-storage");
+    let config = env.initialized_config();
+    KeyStore::set(&config, "OpenAI", "encrypted-original").expect("encrypted connection");
+    KeyStore::set_storage_default(&config, CredentialStorage::Plaintext).expect("new default");
+    KeyStore::lock_vault(&config).expect("simulate restart");
+    KeyStore::set_with_storage(
+        &config,
+        "OpenAI::plaintext",
+        "plaintext-second",
+        CredentialStorage::Plaintext,
+    )
+    .expect("separate plaintext connection");
+    assert!(KeyStore::has_credential(&config, "OpenAI").expect("locked presence"));
+    assert_eq!(
+        KeyStore::provider_storage(&config, "OpenAI").expect("metadata"),
+        Some(CredentialStorage::Encrypted)
+    );
+    assert_eq!(
+        KeyStore::provider_storage(&config, "OpenAI::plaintext").expect("metadata"),
+        Some(CredentialStorage::Plaintext)
+    );
+    assert!(KeyStore::get(&config, "OpenAI").is_err());
+    assert!(KeyStore::set_with_storage(
+        &config,
+        "OpenAI",
+        "replacement",
+        CredentialStorage::Plaintext
+    )
+    .is_err());
+    assert!(KeyStore::set(&config, "OpenAI", "replacement").is_err());
+    assert!(KeyStore::set_with_storage(
+        &config,
+        "Gemini",
+        "new-encrypted",
+        CredentialStorage::Encrypted
+    )
+    .is_err());
+    assert_eq!(
+        KeyStore::get(&config, "OpenAI::plaintext")
+            .expect("plaintext available")
+            .as_deref(),
+        Some("plaintext-second")
+    );
+    KeyStore::unlock_vault(&config, "test-only-vault-password").expect("unlock");
+    assert_eq!(
+        KeyStore::get(&config, "OpenAI")
+            .expect("preserved encrypted")
+            .as_deref(),
+        Some("encrypted-original")
+    );
+    assert!(KeyStore::set_with_storage(
+        &config,
+        "OpenAI",
+        "replacement",
+        CredentialStorage::Plaintext
+    )
+    .is_err());
+    assert_eq!(
+        crate::ui::provider_display_name("OpenAI"),
+        "OpenAI (encrypted)"
+    );
+    assert_eq!(
+        crate::ui::provider_display_name("OpenAI::plaintext"),
+        "OpenAI"
+    );
+}
+
+#[test]
+fn app_data_key_stays_encrypted_across_credential_conversion_and_restart() {
+    let _guard = env_lock().lock().expect("env lock");
+    let env = TestEnv::new("application-master-key");
+    let config = env.initialized_config();
+    assert!(KeyStore::protection_key(false).is_err());
+    let key = KeyStore::protection_key(true).expect("create master");
+    KeyStore::set_storage_preference(&config, CredentialStorage::Plaintext)
+        .expect("convert providers only");
+    assert!(KeyStore::list_secrets(&config)
+        .expect("machine secrets")
+        .is_empty());
+    let connection = rusqlite::Connection::open(env.database_path()).expect("database");
+    let encrypted: bool = connection
+        .query_row(
+            "SELECT encrypted FROM tcui_credentials WHERE kind='app_data_key' AND id='master'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("master metadata");
+    assert!(encrypted);
+    drop(connection);
+    KeyStore::lock_vault(&config).expect("lock");
+    assert!(KeyStore::protection_key(false).is_err());
+    KeyStore::unlock_vault(&config, "test-only-vault-password").expect("unlock");
+    assert_eq!(*KeyStore::protection_key(false).expect("same master"), *key);
+}
+
+#[test]
+fn oauth_refresh_preserves_each_connections_storage_instead_of_current_default() {
+    let _guard = env_lock().lock().expect("env lock");
+    let env = TestEnv::new("oauth-mixed-storage");
+    let config = env.initialized_config();
+    let mut encrypted = OAuthCredential {
+        provider: "Codex".into(),
+        access_token: "initial-encrypted".into(),
+        refresh_token: Some("refresh-encrypted".into()),
+        expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        account_id: Some("encrypted-account".into()),
+        ownership: OAuthCredentialOwnership::Tcui,
+        source: OAuthCredentialSource::NativeOAuth,
+    };
+    KeyStore::set_storage_default(&config, CredentialStorage::Plaintext)
+        .expect("default changed during login");
+    KeyStore::upsert_oauth_with_storage(&config, &encrypted, CredentialStorage::Encrypted)
+        .expect("selected encryption survives changed default");
+    let mut plaintext = encrypted.clone();
+    plaintext.provider = "Codex::plaintext".into();
+    plaintext.access_token = "initial-plaintext".into();
+    KeyStore::upsert_oauth(&config, &plaintext).expect("plaintext OAuth");
+    encrypted.access_token = "refreshed-encrypted".into();
+    KeyStore::upsert_oauth(&config, &encrypted).expect("refresh remains encrypted");
+    KeyStore::set_storage_default(&config, CredentialStorage::Encrypted)
+        .expect("encrypted default");
+    KeyStore::lock_vault(&config).expect("lock");
+    plaintext.access_token = "refreshed-plaintext".into();
+    KeyStore::upsert_oauth(&config, &plaintext).expect("plaintext refresh while locked");
+    assert!(KeyStore::get_oauth(&config, "Codex").is_err());
+    assert_eq!(
+        KeyStore::get_oauth(&config, "Codex::plaintext").expect("plaintext retained"),
+        Some(plaintext)
+    );
+    assert_eq!(
+        KeyStore::provider_storage(&config, "Codex").expect("encrypted metadata"),
+        Some(CredentialStorage::Encrypted)
+    );
+    KeyStore::unlock_vault(&config, "test-only-vault-password").expect("unlock");
+    assert_eq!(
+        KeyStore::get_oauth(&config, "Codex").expect("encrypted retained"),
+        Some(encrypted)
+    );
+}
+
+#[test]
+fn adding_after_whole_store_conversion_keeps_every_existing_connection() {
+    let _guard = env_lock().lock().expect("env lock");
+    let env = TestEnv::new("connection-id-after-conversion");
+    let config = env.initialized_config();
+    KeyStore::set(&config, "OpenAI", "first-encrypted").expect("first");
+    KeyStore::set_with_storage(
+        &config,
+        "OpenAI::plaintext",
+        "second-plaintext",
+        CredentialStorage::Plaintext,
+    )
+    .expect("second");
+    KeyStore::set_storage_preference(&config, CredentialStorage::Encrypted)
+        .expect("whole-store encryption");
+    KeyStore::lock_vault(&config).expect("lock");
+    let id = KeyStore::connection_id(&config, "OpenAI", CredentialStorage::Plaintext)
+        .expect("new identity");
+    assert_eq!(id, "OpenAI::plaintext:2");
+    assert_eq!(provider_base_name(&id), "OpenAI");
+    KeyStore::set_with_storage(
+        &config,
+        &id,
+        "third-plaintext",
+        CredentialStorage::Plaintext,
+    )
+    .expect("third");
+    assert!(KeyStore::get(&config, "OpenAI::plaintext").is_err());
+    KeyStore::unlock_vault(&config, "test-only-vault-password").expect("unlock");
+    assert_eq!(
+        KeyStore::get(&config, "OpenAI")
+            .expect("first retained")
+            .as_deref(),
+        Some("first-encrypted")
+    );
+    assert_eq!(
+        KeyStore::get(&config, "OpenAI::plaintext")
+            .expect("second retained")
+            .as_deref(),
+        Some("second-plaintext")
+    );
+    assert_eq!(
+        KeyStore::get(&config, &id)
+            .expect("third retained")
+            .as_deref(),
+        Some("third-plaintext")
+    );
+}
+
+#[test]
+fn oauth_api_key_creation_keeps_explicit_storage_when_default_changes_mid_login() {
+    let _guard = env_lock().lock().expect("env lock");
+    let env = TestEnv::new("pkce-selected-storage");
+    let config = env.initialized_config();
+    let encrypted = Credential::ApiKey(
+        ApiKeyCredential::new(
+            "OpenRouter OAuth",
+            "encrypted-pkce",
+            ApiKeyCredentialOwnership::Tcui,
+            ApiKeyCredentialSource::OpenRouterPkce,
+        )
+        .expect("credential"),
+    );
+    KeyStore::set_storage_default(&config, CredentialStorage::Plaintext)
+        .expect("default changes during login");
+    KeyStore::upsert_credential_with_storage(&config, &encrypted, CredentialStorage::Encrypted)
+        .expect("selected encryption");
+    KeyStore::lock_vault(&config).expect("lock");
+    assert!(KeyStore::get_api_key_credential(&config, "OpenRouter OAuth").is_err());
+    let second_encrypted = Credential::ApiKey(
+        ApiKeyCredential::new(
+            "Other OAuth",
+            "new-encrypted-pkce",
+            ApiKeyCredentialOwnership::Tcui,
+            ApiKeyCredentialSource::OpenRouterPkce,
+        )
+        .expect("credential"),
+    );
+    assert!(KeyStore::upsert_credential_with_storage(
+        &config,
+        &second_encrypted,
+        CredentialStorage::Encrypted
+    )
+    .is_err());
+    assert!(!KeyStore::has_credential(&config, "Other OAuth").expect("not saved"));
+    let plaintext = Credential::ApiKey(
+        ApiKeyCredential::new(
+            "OpenRouter OAuth::plaintext",
+            "plaintext-pkce",
+            ApiKeyCredentialOwnership::Tcui,
+            ApiKeyCredentialSource::OpenRouterPkce,
+        )
+        .expect("credential"),
+    );
+    KeyStore::set_storage_default(&config, CredentialStorage::Encrypted)
+        .expect("default changes again");
+    KeyStore::upsert_credential_with_storage(&config, &plaintext, CredentialStorage::Plaintext)
+        .expect("explicit plaintext while locked");
+    assert!(
+        KeyStore::get_api_key_credential(&config, "OpenRouter OAuth::plaintext")
+            .expect("plaintext readable")
+            .is_some()
+    );
+}

@@ -38,7 +38,9 @@ async fn transport_retries_once_with_account_scoped_responses_headers(
         &reqwest::Client::new(),
         &request(endpoint),
         session("old-token"),
-        move || {
+        move |rejected| {
+            assert_eq!(rejected.access_token, "old-token");
+            assert_eq!(rejected.account_id, "account-123");
             refresh_count.fetch_add(1, Ordering::SeqCst);
             async move { Ok(refreshed) }
         },
@@ -106,7 +108,7 @@ async fn transport_stops_after_a_second_unauthorized_response(
         &reqwest::Client::new(),
         &request(endpoint),
         session("old-token"),
-        move || {
+        move |_| {
             refresh_count.fetch_add(1, Ordering::SeqCst);
             async move { Ok(session("new-token")) }
         },
@@ -141,7 +143,7 @@ async fn dropping_the_transport_future_cancels_a_stalled_stream(
             &reqwest::Client::new(),
             &request(endpoint),
             session("access-token"),
-            || async { Ok(session("access-token")) },
+            |_| async { Ok(session("access-token")) },
             &mut |_| {},
         ),
     )

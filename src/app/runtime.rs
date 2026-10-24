@@ -28,6 +28,7 @@ impl TuiApp {
     pub async fn run(
         &mut self,
         terminal: &mut ratatui::Terminal<crate::Backend>,
+        reader: &mut crossterm::event::EventStream,
     ) -> color_eyre::Result<()> {
         if !std::io::stdin().is_terminal() {
             terminal.draw(|f| {
@@ -36,10 +37,13 @@ impl TuiApp {
             return Ok(());
         }
 
-        let mut reader = crossterm::event::EventStream::new();
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(33));
 
         loop {
+            if self.security_restart.is_some() {
+                crate::clear_terminal_surface(terminal)?;
+                break;
+            }
             terminal.draw(|f| {
                 self.ui.render(f);
             })?;
@@ -47,6 +51,9 @@ impl TuiApp {
             tokio::select! {
                 _ = tick.tick() => {
                     self.poll_credential_login().await;
+                    if self.security_restart.is_some() {
+                        continue;
+                    }
                     self.poll_terminals();
                     for notice in self.ui.markdown_vault_workspaces.reconcile_tick() {
                         self.ui.show_toast(notice);
@@ -59,10 +66,10 @@ impl TuiApp {
                     if let Some(editor) = self.ui.editor_popup.as_mut() {
                         let done = editor.poll_output();
                         if done {
-                            let chat_draft_path = editor.take_chat_draft_path();
+                            let chat_draft = editor.take_chat_draft();
                             self.ui.editor_popup = None;
-                            if let Some(path) = chat_draft_path {
-                                self.apply_chat_draft_from_path(&path);
+                            if let Some(draft) = chat_draft {
+                                self.apply_chat_draft_from_path(draft.path());
                             }
                         }
                     }
@@ -141,18 +148,64 @@ impl TuiApp {
                 }
             }
         }
-        let ephemeral_result = self.close_ephemeral();
+        self.quiesce_for_security_restart().await
+    }
+
+    pub(crate) async fn quiesce_for_security_restart(&mut self) -> color_eyre::Result<()> {
+        // Producers must be joined before draining their final events or revoking shared keys.
+        self.stop_credential_login().await;
+        self.stop_background_tasks().await;
+        crate::llm::auth::cancel_all_refreshes().await;
+        let mut result = Ok(());
+        while let Ok(action) = self.action_rx.try_recv() {
+            let event_result = match action {
+                Action::StreamResponse(id, content) => {
+                    self.append_request_content(id, &content, false)
+                }
+                Action::StreamThinking(id, content) => {
+                    self.append_request_content(id, &content, true)
+                }
+                #[cfg(feature = "memory")]
+                Action::SetMemoryActivities(id, activities) => {
+                    self.set_request_memory_activities(id, &activities)
+                }
+                Action::FinalizeAssistantMessage(completion) => {
+                    self.finalize_assistant_message(completion)
+                }
+                Action::StopStream(id) => self.finish_request(id),
+                _ => Ok(()),
+            };
+            result = result.and(event_result);
+        }
         let ids: Vec<_> = self.requests.keys().copied().collect();
-        let mut result = ephemeral_result;
         for id in ids {
             result = result.and(self.cancel_request(id));
         }
+        // Ordinary save failures retain the application, keys, and every remaining snapshot.
+        result?;
+        self.close_ephemeral()?;
         self.shutdown_terminals();
-        result
+        Ok(())
     }
 
     pub async fn dispatch(&mut self, action: Action) -> color_eyre::Result<()> {
+        if self.security_restart.is_some() {
+            return Err(color_eyre::eyre::eyre!(
+                "Application protection transition is pending."
+            ));
+        }
         match action {
+            Action::OpenSecurity => {
+                self.request_security_restart(crate::protection::ui::SecurityRestart::Configure);
+                Ok(())
+            }
+            Action::UnlockApplication => {
+                self.request_security_restart(crate::protection::ui::SecurityRestart::Unlock);
+                Ok(())
+            }
+            Action::LockApplication => self
+                .lock_application()
+                .map_err(color_eyre::eyre::Error::msg),
             Action::OpenProviders => {
                 self.open_credential_manager(false);
                 Ok(())
@@ -360,6 +413,10 @@ impl TuiApp {
                 Ok(())
             }
             Action::ConfirmPendingDocumentDiscard => self.confirm_pending_document_discard(),
+            Action::ConfirmChatDraftExport => {
+                self.open_chat_draft_editor_after_consent();
+                Ok(())
+            }
             Action::AwaitSubmissionConfirmation(app_tab_id) => self.transition_submission(
                 app_tab_id,
                 crate::app::submission::SubmissionState::await_confirmation,
@@ -1091,6 +1148,7 @@ impl TuiApp {
         if let Some(request) = self.requests.get_mut(&submission_id) {
             request.abort = Some(handle.abort_handle());
         }
+        self.track_background_task(handle);
 
         self.transition_submission(app_tab_id, crate::app::submission::SubmissionState::launch)?;
         self.discard_pending_documents();

@@ -16,6 +16,7 @@ pub(crate) enum PendingDocumentDiscardAction {
     CloseConversation,
     SwitchTab(usize),
     RemoveTab(usize),
+    SecurityRestart(crate::protection::ui::SecurityRestart),
 }
 
 enum QueuePendingDocumentOutcome {
@@ -128,6 +129,21 @@ impl TuiApp {
         self.discard_pending_documents();
         self.ui.active_modal = None;
         match action {
+            PendingDocumentDiscardAction::SecurityRestart(restart) => {
+                self.pending_documents.clear();
+                for tab in &mut self.ui.tabs {
+                    tab.input_content.clear();
+                    tab.input_history_draft = None;
+                    tab.input_history_index = None;
+                    tab.input_cursor = 0;
+                    tab.input_scroll = 0;
+                    tab.pending_document_chips.clear();
+                    tab.pending_document_chip_hit_areas.clear();
+                }
+                self.security_restart = Some(restart);
+                self.ui.protection_blocked = true;
+                Ok(())
+            }
             PendingDocumentDiscardAction::Quit => {
                 if self.ui.terminals.has_running() {
                     self.ui.active_modal = Some(crate::ui::Modal::QuitConfirm);

@@ -2,7 +2,7 @@ use crate::config::vault_profiles::VaultCatalog;
 
 use super::backup::{BackupStore, LoadedBackup, StandaloneBackupId};
 use super::move_journal::{JournalStore, MoveJournalFileRef, MoveJournalV1};
-use super::move_recovery_fs::{remove_if_matches, remove_regular_if_present};
+use super::move_recovery_fs::{remove_if_matches, remove_private_stage, PrivateStage};
 #[cfg(test)]
 pub(crate) use super::move_rollback_support::inject_failure;
 use super::move_rollback_support::{fs_failure, maybe_fail, restore_destination, restore_source};
@@ -40,6 +40,9 @@ impl<'a> MoveRollback<'a> {
     }
 
     fn restore_sources(&self, journal: &mut MoveJournalV1) -> Result<(), RollbackFailure> {
+        if journal.plan.copy_only {
+            return Ok(());
+        }
         for index in (0..journal.artifacts.len()).rev() {
             if journal.artifacts[index].source_restored {
                 continue;
@@ -130,8 +133,29 @@ impl<'a> MoveRollback<'a> {
                     profile_id: pair.destination.profile_id.clone(),
                     path: staged,
                 };
-                remove_regular_if_present(self.catalog, &staged_ref)
-                    .map_err(|error| fs_failure(RecoveryFailurePoint::CleanStagedFile, error))?;
+                let identity = journal.artifacts[index].staged_identity;
+                let legacy = if identity.is_none() {
+                    self.source_bytes_optional(journal, index)?
+                } else {
+                    None
+                };
+                let owner = self
+                    .journals
+                    .operation_owner(&journal.operation_id)
+                    .map_err(|_| RollbackFailure::persist_progress())?;
+                remove_private_stage(
+                    self.catalog,
+                    PrivateStage {
+                        target: &staged_ref,
+                        destination: &pair.destination,
+                        operation_id: &journal.operation_id,
+                        index,
+                        identity,
+                        owner,
+                        legacy_contents: legacy.as_deref(),
+                    },
+                )
+                .map_err(|error| fs_failure(RecoveryFailurePoint::CleanStagedFile, error))?;
             }
             journal.artifacts[index].staged_file_cleaned = true;
             self.persist_progress(journal, RecoveryFailurePoint::CleanStagedFile, &report_path)?;

@@ -31,7 +31,8 @@ impl ImageBlockState {
             return None;
         }
         let path = resolve_local_path(source)?;
-        let image = image::ImageReader::open(path).ok()?.decode().ok()?;
+        let bytes = crate::vault::read_artifact_path(&path).ok()?;
+        let image = image::load_from_memory(&bytes).ok()?;
         let picker = picker_for(image_protocol, caps)?;
         Some(Self {
             image,

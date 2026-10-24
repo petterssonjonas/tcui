@@ -1,10 +1,11 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use rusqlite::{ffi::sqlite3_auto_extension, params, Connection};
 use thiserror::Error;
 
 use super::embedding::{DIMENSIONS, MODEL_ID};
+use crate::protection::{self, Domain};
 
 const SCHEMA_VERSION: &str = "3";
 static SQLITE_VEC_REGISTRATION: OnceLock<i32> = OnceLock::new();
@@ -17,27 +18,83 @@ pub(crate) enum IndexError {
     Sql(#[from] rusqlite::Error),
     #[error("sqlite-vec registration failed with code {0}")]
     Registration(i32),
+    #[error("memory cache protection failed: {0}")]
+    Protection(#[from] color_eyre::Report),
 }
 
 pub(crate) struct MemoryIndex {
-    pub(super) conn: Connection,
+    conn: Connection,
+    snapshot: Option<PathBuf>,
 }
 
 impl MemoryIndex {
     pub(crate) fn open(path: &Path) -> Result<Self, IndexError> {
+        protection::require(Domain::Memories)?;
         register_sqlite_vec()?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        let protected = protection::is_protected(Domain::Memories)?;
+        let mut conn = if protected {
+            Connection::open_in_memory()?
+        } else {
+            if let Some(parent) = path.parent() {
+                crate::storage::paths::ensure_directory(parent)?;
+            }
+            Connection::open(path)?
+        };
+        if protected && path.try_exists()? {
+            let bytes = zeroize::Zeroizing::new(protection::read(Domain::Memories, path)?);
+            conn.deserialize_read_exact(rusqlite::MAIN_DB, bytes.as_slice(), bytes.len(), false)?;
         }
-        let conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
-        let mut index = Self { conn };
+        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA temp_store = MEMORY;")?;
+        conn.execute_batch(if protected {
+            "PRAGMA journal_mode = MEMORY;"
+        } else {
+            "PRAGMA journal_mode = WAL;"
+        })?;
+        let mut index = Self {
+            conn,
+            snapshot: protected.then(|| path.to_path_buf()),
+        };
         index.ensure_schema()?;
         Ok(index)
     }
 
+    pub(super) fn fresh(path: &Path) -> Result<Self, IndexError> {
+        protection::require(Domain::Memories)?;
+        register_sqlite_vec()?;
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON; PRAGMA temp_store = MEMORY; PRAGMA journal_mode = MEMORY;",
+        )?;
+        let mut index = Self {
+            conn,
+            snapshot: Some(path.to_path_buf()),
+        };
+        index.ensure_schema()?;
+        Ok(index)
+    }
+
+    pub(super) fn connection(&self) -> Result<&Connection, IndexError> {
+        protection::require(Domain::Memories)?;
+        Ok(&self.conn)
+    }
+
+    pub(super) fn connection_mut(&mut self) -> Result<&mut Connection, IndexError> {
+        protection::require(Domain::Memories)?;
+        Ok(&mut self.conn)
+    }
+
+    pub(crate) fn persist(&self) -> Result<(), IndexError> {
+        protection::require(Domain::Memories)?;
+        if let Some(path) = &self.snapshot {
+            let bytes = self.conn.serialize(rusqlite::MAIN_DB)?;
+            protection::write(Domain::Memories, path, &bytes)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn meta(&self, key: &str) -> Result<Option<String>, IndexError> {
+        protection::require(Domain::Memories)?;
         let mut statement = self
             .conn
             .prepare("SELECT value FROM memory_meta WHERE key = ?1")?;
@@ -47,6 +104,7 @@ impl MemoryIndex {
 
     #[cfg(test)]
     pub(crate) fn set_meta_for_test(&self, key: &str, value: &str) -> Result<(), IndexError> {
+        protection::require(Domain::Memories)?;
         self.conn.execute(
             "INSERT INTO memory_meta(key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -56,6 +114,7 @@ impl MemoryIndex {
     }
 
     fn ensure_schema(&mut self) -> Result<(), IndexError> {
+        protection::require(Domain::Memories)?;
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS memory_meta(
                 key TEXT PRIMARY KEY,
@@ -150,10 +209,12 @@ mod tests {
 
     #[test]
     fn cache_rebuilds_when_model_metadata_changes() {
+        let _guard = crate::test_support::env_lock().lock().expect("env lock");
         // Given
         let root =
             std::env::temp_dir().join(format!("tcui-memory-index-{}", rand::random::<u64>()));
         fs::create_dir_all(&root).expect("temporary index root");
+        std::env::set_var("XDG_DATA_HOME", root.join("data-home"));
         let database = root.join("memory.sqlite3");
         let index = MemoryIndex::open(&database).expect("memory index");
         index
@@ -170,14 +231,17 @@ mod tests {
             Some(MODEL_ID)
         );
         fs::remove_dir_all(root).expect("temporary index cleanup");
+        std::env::remove_var("XDG_DATA_HOME");
     }
 
     #[test]
     #[ignore = "manual benchmark"]
     fn benchmark_knn_with_ten_thousand_chunks() {
+        let _guard = crate::test_support::env_lock().lock().expect("env lock");
         // Given
         let root = std::env::temp_dir().join(format!("tcui-memory-knn-{}", rand::random::<u64>()));
         fs::create_dir_all(&root).expect("temporary index root");
+        std::env::set_var("XDG_DATA_HOME", root.join("data-home"));
         let database = root.join("memory.sqlite3");
         let mut index = MemoryIndex::open(&database).expect("memory index");
         let embedding = crate::memory::embedding::as_blob(&vec![0.01_f32; super::DIMENSIONS]);
@@ -231,5 +295,6 @@ mod tests {
         // Then
         eprintln!("10,000-chunk KNN average: {average:?}");
         fs::remove_dir_all(root).expect("temporary index cleanup");
+        std::env::remove_var("XDG_DATA_HOME");
     }
 }

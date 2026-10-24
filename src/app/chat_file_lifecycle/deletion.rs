@@ -3,11 +3,9 @@ use super::*;
 #[test]
 fn deleting_chat_link_removes_canonical_file_and_both_listings() {
     // Given
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let root = unique_root("delete-chat-link");
-    configure_environment(&root);
-    let saved_dir = root.join("saved");
-    let mut app = app_with_saved_dir(&saved_dir);
+    let environment = Environment::new("delete-chat-link");
+    let saved_dir = environment.saved_dir();
+    let mut app = start_app();
     let handle = save_report(&mut app, "# Report");
 
     // When
@@ -17,17 +15,14 @@ fn deleting_chat_link_removes_canonical_file_and_both_listings() {
     assert!(app.ui.saved_artifacts.is_empty());
     assert!(app.ui.tabs[0].temporary_artifacts.is_empty());
     assert!(!saved_dir.join("report.md").exists());
-    reset_environment(&root);
 }
 
 #[test]
 fn deleting_saved_row_removes_canonical_file_and_chat_listing() {
     // Given
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let root = unique_root("delete-saved-row");
-    configure_environment(&root);
-    let saved_dir = root.join("saved");
-    let mut app = app_with_saved_dir(&saved_dir);
+    let environment = Environment::new("delete-saved-row");
+    let saved_dir = environment.saved_dir();
+    let mut app = start_app();
     save_report(&mut app, "# Report");
     let saved_handle = ArtifactHandle::Saved(saved_dir.join("report.md"));
 
@@ -38,17 +33,14 @@ fn deleting_saved_row_removes_canonical_file_and_chat_listing() {
     assert!(app.ui.saved_artifacts.is_empty());
     assert!(app.ui.tabs[0].temporary_artifacts.is_empty());
     assert!(!saved_dir.join("report.md").exists());
-    reset_environment(&root);
 }
 
 #[test]
 fn deleting_conversation_removes_links_but_preserves_saved_bytes() {
     // Given
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let root = unique_root("delete-conversation");
-    configure_environment(&root);
-    let saved_dir = root.join("saved");
-    let mut app = app_with_saved_dir(&saved_dir);
+    let environment = Environment::new("delete-conversation");
+    let saved_dir = environment.saved_dir();
+    let mut app = start_app();
     let conversation_id = app.ui.tabs[0].active_conversation;
     save_report(&mut app, "# Report\n\nKeep me.");
 
@@ -66,17 +58,14 @@ fn deleting_conversation_removes_links_but_preserves_saved_bytes() {
         std::fs::read_to_string(saved_dir.join("report.md")).expect("read preserved file"),
         "# Report\n\nKeep me."
     );
-    reset_environment(&root);
 }
 
 #[test]
 fn orphan_conversation_marker_retries_metadata_cleanup_on_restart() {
     // Given
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let root = unique_root("orphan-recovery");
-    configure_environment(&root);
-    let saved_dir = root.join("saved");
-    let mut app = app_with_saved_dir(&saved_dir);
+    let environment = Environment::new("orphan-recovery");
+    let saved_dir = environment.saved_dir();
+    let mut app = start_app();
     let conversation_id = app.ui.tabs[0].active_conversation;
     save_report(&mut app, "# Report");
     app.chat_files.fail_next_conversation_cleanup();
@@ -86,7 +75,8 @@ fn orphan_conversation_marker_retries_metadata_cleanup_on_restart() {
         .expect("conversation deletion stays committed");
 
     // Then
-    let marker = root
+    let marker = environment
+        .root
         .join("data/tcui/chat-file-links")
         .join(format!(".orphan-conversation-{conversation_id}"));
     assert!(marker.exists());
@@ -98,7 +88,7 @@ fn orphan_conversation_marker_retries_metadata_cleanup_on_restart() {
         1
     );
     drop(app);
-    let restarted = app_with_saved_dir(&saved_dir);
+    let restarted = start_app();
     assert!(!marker.exists());
     assert!(restarted
         .chat_files
@@ -109,5 +99,4 @@ fn orphan_conversation_marker_retries_metadata_cleanup_on_restart() {
         std::fs::read_to_string(saved_dir.join("report.md")).expect("read preserved file"),
         "# Report"
     );
-    reset_environment(&root);
 }

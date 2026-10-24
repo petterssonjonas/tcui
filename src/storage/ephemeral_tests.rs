@@ -32,7 +32,7 @@ impl Fixture {
         Storage::from_parts(
             Connection::open_in_memory().expect("open database"),
             paths.clone(),
-            key.clone(),
+            Some(key.clone()),
             false,
         )
         .expect("open storage")

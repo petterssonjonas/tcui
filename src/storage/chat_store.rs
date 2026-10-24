@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::message::Message;
 use crate::storage::crypto::{
-    decrypt_shared_text_with_key, read_encrypted_document, write_encrypted_document, SharedKey,
+    decrypt_shared_text_with_key, encrypt_serialized, read_encrypted_document,
+    write_encrypted_document, SharedKey,
 };
 use crate::storage::db::ConversationEntry;
 use crate::storage::paths::TcuiDataPaths;
@@ -51,7 +52,7 @@ impl ChatLineage {
 #[derive(Debug, Clone)]
 pub(crate) struct ChatStore {
     paths: TcuiDataPaths,
-    key: SharedKey,
+    key: Option<SharedKey>,
     ephemeral: Arc<Mutex<HashMap<i64, ChatDocument>>>,
 }
 
@@ -59,7 +60,15 @@ impl ChatStore {
     pub(crate) fn new(paths: TcuiDataPaths, key: SharedKey) -> Self {
         Self {
             paths,
-            key,
+            key: Some(key),
+            ephemeral: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub(crate) fn managed(paths: TcuiDataPaths) -> Self {
+        Self {
+            paths,
+            key: None,
             ephemeral: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -75,6 +84,7 @@ impl ChatStore {
         messages: &[Message],
         parent: Option<ChatLineage>,
     ) -> Result<ChatDocument> {
+        crate::protection::require(crate::protection::Domain::Chats)?;
         let document = snapshot_document(self.allocate_id(), tab_id, title, messages, parent);
         self.write_document(&document)?;
         Ok(document)
@@ -87,6 +97,7 @@ impl ChatStore {
         messages: &[Message],
         parent: ChatLineage,
     ) -> Result<i64> {
+        crate::protection::require(crate::protection::Domain::Chats)?;
         // Negative IDs never fall back to disk, even after deletion or reopening storage.
         static NEXT_EPHEMERAL_ID: AtomicI64 = AtomicI64::new(-1);
         let id = NEXT_EPHEMERAL_ID
@@ -153,6 +164,7 @@ impl ChatStore {
         &self,
         tab_id: i64,
     ) -> Result<(Vec<ConversationEntry>, usize)> {
+        crate::protection::require(crate::protection::Domain::Chats)?;
         let mut conversations = Vec::new();
         let mut skipped = 0_usize;
         if !self.paths.chats_dir.exists() {
@@ -192,6 +204,7 @@ impl ChatStore {
     }
 
     pub(crate) fn list_all_documents(&self) -> Result<Vec<ChatDocument>> {
+        crate::protection::require(crate::protection::Domain::Chats)?;
         let mut documents = Vec::new();
         if !self.paths.chats_dir.exists() {
             return Ok(documents);
@@ -238,6 +251,7 @@ impl ChatStore {
     }
 
     pub(crate) fn delete_conversation(&self, conversation_id: i64) -> Result<()> {
+        crate::protection::require(crate::protection::Domain::Chats)?;
         if conversation_id < 0 {
             self.ephemeral_documents()?
                 .remove(&conversation_id)
@@ -251,38 +265,80 @@ impl ChatStore {
         Ok(())
     }
 
-    pub(crate) fn archive_legacy_chats(&self, conn: &mut Connection) -> Result<()> {
+    pub(crate) fn archive_legacy_chats(&self, conn: &mut Connection) -> Result<bool> {
+        crate::protection::require(crate::protection::Domain::Chats)?;
         if !legacy_chat_tables_exist(conn)? {
-            return Ok(());
+            return Ok(false);
         }
-
+        let orphaned: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages m LEFT JOIN conversations c ON c.id=m.conversation_id WHERE c.id IS NULL)",
+            [], |row| row.get(0),
+        )?;
+        if orphaned {
+            return Err(eyre!("Legacy chat messages have no conversation; restore or repair the database before migration."));
+        }
         let conversations = legacy_conversations(conn)?;
         if conversations.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
-
-        std::fs::create_dir_all(&self.paths.chats_trash_dir)?;
-        let mut archived_paths = Vec::with_capacity(conversations.len());
+        let fallback;
+        let archive = if !crate::protection::configured()? && self.key.is_none() {
+            fallback = Self::new(
+                self.paths.clone(),
+                SharedKey::load_or_create_default(&self.paths)?.key,
+            );
+            &fallback
+        } else {
+            self
+        };
         for conversation in conversations {
-            let path = self.trash_path(conversation.id);
-            self.write_document_to_path(&path, &conversation)?;
-            let verified = self.read_document_from_path(&path)?;
-            if verified.id != conversation.id
-                || verified.messages.len() != conversation.messages.len()
-            {
-                cleanup_paths(&archived_paths);
-                let _ = std::fs::remove_file(&path);
-                return Err(eyre!("failed to verify archived legacy chat"));
+            let path = archive.trash_path(conversation.id);
+            let bytes = if crate::protection::configured()? {
+                crate::protection::encode(
+                    crate::protection::Domain::Chats,
+                    &serde_json::to_vec(&conversation)?,
+                )?
+            } else {
+                encrypt_serialized(
+                    archive
+                        .key
+                        .as_ref()
+                        .ok_or_else(|| eyre!("Missing legacy archive key"))?,
+                    CHAT_DOCUMENT_KIND,
+                    &conversation,
+                )?
+                .into_bytes()
+            };
+            match crate::protection::write_new_plain(&path, &bytes) {
+                Ok(()) => {}
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::AlreadyExists) =>
+                {
+                    sync_legacy_archive(&path)?;
+                }
+                Err(error) => return Err(error),
             }
-            archived_paths.push(path);
+            let verified = archive.read_document_from_path(&path)?;
+            if verified.id != conversation.id
+                || verified.tab_id != conversation.tab_id
+                || verified.title != conversation.title
+                || verified.pinned != conversation.pinned
+                || verified.parent.is_some()
+                || serde_json::to_value(&verified.messages)?
+                    != serde_json::to_value(&conversation.messages)?
+            {
+                return Err(eyre!("Legacy archive collision or verification failure; existing archive and database are preserved."));
+            }
         }
-
+        conn.execute_batch("PRAGMA secure_delete=ON; PRAGMA synchronous=FULL")?;
         let transaction = conn.transaction()?;
         transaction.execute("DELETE FROM messages", [])?;
         transaction.execute("DELETE FROM conversations", [])?;
         transaction.commit()?;
-        conn.execute_batch("VACUUM")?;
-        Ok(())
+        sanitize_legacy_database(conn)?;
+        Ok(true)
     }
 
     fn allocate_id(&self) -> i64 {
@@ -298,6 +354,7 @@ impl ChatStore {
     }
 
     pub(crate) fn read_document(&self, conversation_id: i64) -> Result<ChatDocument> {
+        crate::protection::require(crate::protection::Domain::Chats)?;
         if conversation_id < 0 {
             return self
                 .ephemeral_documents()?
@@ -313,6 +370,7 @@ impl ChatStore {
     }
 
     pub(crate) fn conversation_exists(&self, conversation_id: i64) -> Result<bool> {
+        crate::protection::require(crate::protection::Domain::Chats)?;
         if conversation_id < 0 {
             return Ok(self.ephemeral_documents()?.contains_key(&conversation_id));
         }
@@ -324,7 +382,10 @@ impl ChatStore {
                     .is_some_and(|error| {
                         matches!(error, crate::storage::crypto::StorageCryptoError::Io(io)
                             if io.kind() == std::io::ErrorKind::NotFound)
-                    }) =>
+                    })
+                    || error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
             {
                 Ok(false)
             }
@@ -360,11 +421,16 @@ impl ChatStore {
     }
 
     fn read_document_from_path(&self, path: &Path) -> Result<ChatDocument> {
-        Ok(read_encrypted_document(
-            path,
-            &self.key,
-            CHAT_DOCUMENT_KIND,
-        )?)
+        crate::protection::require(crate::protection::Domain::Chats)?;
+        if crate::protection::configured()? {
+            let bytes = crate::protection::read(crate::protection::Domain::Chats, path)?;
+            return Ok(serde_json::from_slice(&bytes)?);
+        }
+        let key = self
+            .key
+            .as_ref()
+            .ok_or_else(|| eyre!("legacy chat data requires its original storage key"))?;
+        Ok(read_encrypted_document(path, key, CHAT_DOCUMENT_KIND)?)
     }
 
     fn write_document(&self, document: &ChatDocument) -> Result<()> {
@@ -375,9 +441,20 @@ impl ChatStore {
         if document.id < 0 {
             return Err(eyre!("cannot persist an ephemeral conversation"));
         }
+        if crate::protection::configured()? {
+            return crate::protection::write(
+                crate::protection::Domain::Chats,
+                path,
+                &serde_json::to_vec(document)?,
+            );
+        }
+        let key = self
+            .key
+            .as_ref()
+            .ok_or_else(|| eyre!("legacy chat data requires its original storage key"))?;
         Ok(write_encrypted_document(
             path,
-            &self.key,
+            key,
             CHAT_DOCUMENT_KIND,
             document,
         )?)
@@ -427,13 +504,87 @@ fn snapshot_document(
     }
 }
 
+pub(crate) fn retire_legacy_database() -> Result<()> {
+    let paths = TcuiDataPaths::discover();
+    match std::fs::symlink_metadata(&paths.database) {
+        Ok(metadata) if metadata.is_file() && !metadata.is_symlink() => {}
+        Ok(_) => return Err(eyre!("Refusing unsafe legacy chat database path.")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    crate::protection::open_directory(&paths.root, false)?;
+    let mut connection = Connection::open_with_flags(
+        &paths.database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    if legacy_chat_tables_exist(&connection)?
+        && !ChatStore::managed(paths.clone()).archive_legacy_chats(&mut connection)?
+    {
+        // A previous attempt may have committed deletion but failed sanitization.
+        sanitize_legacy_database(&connection)?;
+    }
+    Ok(())
+}
+
+fn sanitize_legacy_database(connection: &Connection) -> Result<()> {
+    connection.execute_batch("PRAGMA secure_delete=ON; PRAGMA synchronous=FULL; VACUUM")?;
+    let busy: i64 =
+        connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+    if busy != 0 {
+        return Err(eyre!(
+            "Legacy chat database checkpoint is busy; close other TCUI processes and retry."
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) static FAIL_ARCHIVE_SYNC: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn sync_legacy_archive(path: &Path) -> Result<()> {
+    let directory = crate::protection::open_directory(
+        path.parent()
+            .ok_or_else(|| eyre!("Archive has no parent"))?,
+        false,
+    )?;
+    let descriptor = rustix::fs::openat(
+        &directory,
+        path.file_name()
+            .ok_or_else(|| eyre!("Archive has no filename"))?,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )?;
+    let file = std::fs::File::from(descriptor);
+    if !file.metadata()?.is_file() {
+        return Err(eyre!("Refusing a non-regular legacy archive"));
+    }
+    #[cfg(test)]
+    if FAIL_ARCHIVE_SYNC.swap(false, Ordering::SeqCst) {
+        return Err(std::io::Error::other("injected legacy archive sync failure").into());
+    }
+    file.sync_all()?;
+    rustix::fs::fsync(&directory)?;
+    Ok(())
+}
+
 fn legacy_chat_tables_exist(conn: &Connection) -> Result<bool> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('conversations', 'messages')",
         [],
         |row| row.get(0),
     )?;
-    Ok(count == 2)
+    match count {
+        0 => Ok(false),
+        2 => Ok(true),
+        _ => Err(eyre!(
+            "Legacy chat schema is incomplete; restore or repair it before protection migration."
+        )),
+    }
 }
 
 fn legacy_conversations(conn: &Connection) -> Result<Vec<ChatDocument>> {
@@ -468,7 +619,22 @@ fn legacy_conversations(conn: &Connection) -> Result<Vec<ChatDocument>> {
 }
 
 fn legacy_messages(conn: &Connection, conversation_id: i64) -> Result<Vec<Message>> {
-    let key = SharedKey::load_or_create_default(&TcuiDataPaths::discover())?.key;
+    let mut key = None;
+    let mut decrypt = |stored: String| -> Result<String> {
+        if !stored.starts_with("enc:v1:") {
+            return Ok(stored);
+        }
+        if key.is_none() {
+            key = Some(SharedKey::load_from_path(
+                &TcuiDataPaths::discover().chat_key,
+            )?);
+        }
+        Ok(decrypt_shared_text_with_key(
+            key.as_ref()
+                .ok_or_else(|| eyre!("Missing original legacy chat key"))?,
+            &stored,
+        )?)
+    };
     let mut statement = conn.prepare(
         "SELECT id, conversation_id, role, content, thinking_content, tool_calls, tool_result, tool_source, images, diff_data, token_count
          FROM messages WHERE conversation_id = ?1 ORDER BY id",
@@ -508,13 +674,13 @@ fn legacy_messages(conn: &Connection, conversation_id: i64) -> Result<Vec<Messag
             id: Some(id),
             conversation_id: stored_conversation_id,
             role,
-            content: decrypt_shared_text_with_key(&key, &content)?,
-            thinking_content: decrypt_optional(&key, thinking_content)?,
-            tool_calls: decrypt_optional(&key, tool_calls)?,
-            tool_result: decrypt_optional(&key, tool_result)?,
-            tool_source: decrypt_optional(&key, tool_source)?,
-            images: decrypt_optional(&key, images)?,
-            diff_data: decrypt_optional(&key, diff_data)?,
+            content: decrypt(content)?,
+            thinking_content: thinking_content.map(&mut decrypt).transpose()?,
+            tool_calls: tool_calls.map(&mut decrypt).transpose()?,
+            tool_result: tool_result.map(&mut decrypt).transpose()?,
+            tool_source: tool_source.map(&mut decrypt).transpose()?,
+            images: images.map(&mut decrypt).transpose()?,
+            diff_data: diff_data.map(&mut decrypt).transpose()?,
             token_count,
             request: None,
         });
@@ -523,25 +689,12 @@ fn legacy_messages(conn: &Connection, conversation_id: i64) -> Result<Vec<Messag
     Ok(messages)
 }
 
-fn decrypt_optional(key: &SharedKey, value: Option<String>) -> Result<Option<String>> {
-    value
-        .map(|stored| decrypt_shared_text_with_key(key, &stored))
-        .transpose()
-        .map_err(Into::into)
-}
-
 fn is_chat_document_path(path: &Path) -> bool {
     path.is_file()
         && path
             .extension()
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| extension == "tcui-chat")
-}
-
-fn cleanup_paths(paths: &[PathBuf]) {
-    for path in paths {
-        let _ = std::fs::remove_file(path);
-    }
 }
 
 fn now_ms() -> i64 {

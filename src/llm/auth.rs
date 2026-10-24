@@ -50,7 +50,10 @@ mod secret_hygiene_tests;
 
 pub(crate) use credential::Credential;
 pub(crate) use policy::{canonical_provider_name, trusted_provider_endpoint};
-pub(crate) use resolver::{resolve_provider_credential, CredentialRequest};
+pub(crate) use resolver::{
+    cancel_all_refreshes, invalidate_provider_refreshes, refresh_rejected_codex_credential,
+    resolve_provider_credential, CredentialRequest,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CredentialSource {

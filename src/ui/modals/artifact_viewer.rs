@@ -73,6 +73,34 @@ impl ArtifactViewerState {
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect, props: ArtifactViewerProps<'_>) {
+        let access = crate::protection::require_app().and_then(|()| match &self.artifact.handle {
+            ArtifactHandle::Memory(_) => {
+                crate::protection::require(crate::protection::Domain::Memories)
+            }
+            ArtifactHandle::ChatFile { .. } | ArtifactHandle::Saved(_) => {
+                crate::protection::require(crate::protection::Domain::Vault)
+            }
+            _ => {
+                if let Some(path) = &self.artifact.path {
+                    crate::vault::require_root(path)?;
+                }
+                Ok(())
+            }
+        });
+        if let Err(error) = access {
+            let popup = popup_area(area);
+            f.render_widget(Clear, popup);
+            f.render_widget(
+                Paragraph::new(format!("{error}\nUse /unlock to view this artifact.")).block(
+                    Block::default()
+                        .title("Locked artifact")
+                        .borders(Borders::ALL),
+                ),
+                popup,
+            );
+            self.hit_areas = ArtifactViewerHitAreas::default();
+            return;
+        }
         let theme = crate::theme::active_theme();
         let popup_area = popup_area(area);
         let block = Block::default().style(Style::default().bg(theme.code_bg));

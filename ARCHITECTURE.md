@@ -14,7 +14,7 @@ The codebase consists of **47 source files** organized into 7 major functional a
 | **UI** | 20 | Terminal rendering, layout, widgets, modals, components |
 | **App** | 4 | Event loop, action dispatch, state management |
 | **Config** | 4 | App settings, API key storage, soul/agent configs |
-| **Storage** | 2 | SQLite database (messages, conversations, settings) |
+| **Storage** | 2 | Persistent SQLite metadata and authoritative chat documents |
 | **LLM** | 5 | Provider abstraction, HTTP client, streaming, tools |
 | **MCP** | 4 | Model Context Protocol client, registry, transport |
 | **Obsidian** | 5 | Vault file integration, diff safety, file watcher |
@@ -86,23 +86,43 @@ delivery. Detached reminders preserve only the explicit SSH/Herdr routing contex
 
 ### 3. Storage (`src/storage/`)
 
-SQLite persistence via `rusqlite` (bundled). The `Storage` struct manages:
+`Storage::new` opens the persistent `tcui.db` through `rusqlite` (bundled).
+Provider/model/settings and credential metadata remain in that on-disk database;
+the whole application database is **not** an in-RAM SQLite database.
+`tcui_credential_vault` holds password derivation/wrapping metadata and preferences,
+while `tcui_credentials` holds mixed plaintext/encrypted provider and search
+records plus always-encrypted machine secrets.
 
-- `messages` — Chat messages with metadata (thinking, tool calls, images, diffs)
-- `conversations` — Conversation groups per tab
-- `tabs` — Tab configuration (provider, model, endpoint, API key refs)
-- `settings` — Non-secret application preferences
-- `mcp_servers` — MCP server configurations
-- `file_backups` — Backup entries for file modifications
-- `tcui_credential_vault` — Password derivation metadata, authenticated verifier, and provider storage preference
-- `tcui_credentials` — Explicit provider/search credentials and encrypted machine passwords/SSH keys
+Authoritative chat history is stored as per-conversation documents in
+`$XDG_DATA_HOME/tcui/chats`, not the legacy `messages`/`conversations` SQL rows.
+Documents are encrypted only when chat protection is selected. Migration archives
+legacy SQL chat content to Trash, deletes migrated rows, and runs `VACUUM`;
+archives and prior backups may remain readable. The legacy `chat.key` remains
+for legacy content/reminders and cannot unlock new protection envelopes.
 
-Database path: `~/.local/share/tcui/tcui.db` (Linux) or platform equivalent.
+Native Memory lives independently in `$XDG_DATA_HOME/tcui/memories`, with chat
+and Memory Trash under each store's `.trash`. When protected, its serialized
+SQLite search index is encrypted on disk and loaded into an in-RAM query database
+without plaintext SQLite sidecars. Corrupt caches do not prevent source reads or
+listing; explicit repair rebuilds the index without changing source records.
+
+The built-in **TCUI Internal** profile is the fresh-configuration default, rooted at
+`$XDG_DATA_HOME/tcui/vault` and owns canonical Saved files and downloaded/chat
+artifacts. Vault protection covers its content, backups, link manifests, journals,
+and stages; external profiles are ordinary plaintext folders. Native confirmed
+copies preserve source files and chat links, including exact binary bytes.
+Protected shared journals defer startup recovery while locked and reject
+journal-backed mutations, including external-only operations, until unlock.
+Policy migration recovers pending operations under the old policy first.
+
+On Linux `$XDG_DATA_HOME` defaults to `~/.local/share`; the database is therefore
+normally `~/.local/share/tcui/tcui.db`. Filenames, paths, configuration, profile
+names, logs, and general database metadata are not covered by content protection.
 
 ### 4. Config (`src/config/`)
 
 - `app_config.rs` — `AppConfig` (TOML serialized), default provider/model, vault path, tab configs. Stored at `~/.config/tcui/config.toml`.
-- `key_store.rs` — Explicit SQLite credential storage, password-vault lifecycle, API/OAuth records, and opt-in legacy import. Encrypted records use Argon2id and AES-256-GCM; provider plaintext storage is an explicit global choice. Machine secrets always remain encrypted.
+- `key_store.rs` — Explicit per-record SQLite credential storage, shared password lifecycle, API/OAuth records, and opt-in legacy import. Argon2id protects the random master secret; selected content uses domain-separated AES-GCM envelopes. Plaintext/encrypted provider and search records coexist; machine secrets always remain encrypted.
 - `soul.rs` — Soul/agent personality configuration loading
 
 ### 5. LLM (`src/llm/`)
@@ -160,7 +180,9 @@ File-based knowledge vault integration:
 ```
 main (src/main.rs)
   → setup_terminal (crossterm raw mode, alternate screen)
-  → TuiApp::new(storage, config, llm, vault)
+  → create one EventStream shared by security screens and app restarts
+  → first-run protection selection; mandatory unlock gate when required
+  → open config/stores and construct TuiApp
   → TuiApp::run
       → terminal.draw(|f| UI::render(f))
       → tokio::select!
@@ -168,6 +190,15 @@ main (src/main.rs)
           ├─ crossterm events   → handle_key / handle_mouse
           └─ action_rx          → dispatch(action)
 ```
+
+The mandatory gate runs before config/stores when app-entry or chat protection
+is selected; cancelling exits. Optional-domain unlock cancellation keeps those
+domains locked without closing usable surfaces. `/security`, `/unlock`, and
+`/lock` use the outer restart loop rather than constructing competing terminal
+event readers. The old app/session is dropped and its frame cleared before the
+next security screen. Voluntary transitions confirm disposal of running
+terminals, unsaved editors, and drafts, quiesce tracked producers, and persist
+state; cancellation preserves the session. Forced revocation fails closed.
 
 This is the primary cross-community flow spanning **App → UI**.
 
@@ -224,7 +255,7 @@ Each frame rebuilds the layout tree and renders all visible widgets.
 handle_key → Enter
   → Action::SendMessage(content)
       → dispatch
-          → storage.save_message(&msg)
+          → persist authoritative conversation document
           → UI::add_message
           → (first message?) generate_title
               → UI::add_chat_to_active_tab(title)
@@ -243,9 +274,14 @@ Successful refreshes replace stale selections while preserving session-local
 manual overrides; failures retain the last saved catalog. Credential resolution
 reads the XDG-scoped vault without taking the unrelated configuration-file lock.
 
-At launch, an initialized credential vault requests its password. Cancelling
-leaves encrypted provider records unavailable; `/vault` allows a later unlock.
-No environment or external-login scan occurs.
+Connection storage is explicit per record; encrypted and plaintext records may
+coexist and resolve by exact IDs. `/vault` defaults affect new records without
+silently converting old ones. Changing the credentials checkbox in `/security`
+intentionally converts provider/search records and updates the default;
+unchanged selection preserves explicit exceptions. First encrypted enrollment
+after plaintext-only setup requires the shared password before reopening
+`/connect`. `/unlock` unlocks all selected domains. No environment or external-login
+scan occurs. See [Authentication](docs/auth.md).
 
 ---
 
@@ -349,12 +385,13 @@ flowchart TB
 | Flow | Direction | Persistence |
 |------|-----------|-------------|
 | User input → Action → UI update | In-memory | None |
-| Chat messages | App → Storage | SQLite (`messages` table) |
-| Conversations | App → Storage | SQLite (`conversations` table) |
-| API keys / settings | App ↔ Storage | SQLite (`settings` table) |
+| Chat messages and conversations | App ↔ document store | Per-conversation files under `tcui/chats`, optionally encrypted |
+| Provider/model/settings metadata | App ↔ Storage | Persistent `tcui.db` |
+| Credentials | App ↔ KeyStore | Per-record plaintext/encrypted SQLite records; machine secrets encrypted |
 | App config (provider, model, theme) | Disk → App | TOML (`~/.config/tcui/config.toml`) |
-| LLM streaming | LLM → UI | None (real-time) |
-| Obsidian file ops | Vault → UI | Disk (vault path) |
+| Memory sources / search | App ↔ native Memory | `tcui/memories`; protected serialized index encrypted on disk, queried in RAM |
+| LLM streaming | LLM → UI | Saved response content follows destination chat policy |
+| Vault file operations | App ↔ configured profile | Optional encryption for TCUI Internal; external folders plaintext |
 
 ---
 
@@ -364,7 +401,7 @@ flowchart TB
 
 2. **Frame-based rendering** — The entire UI is redrawn every 33ms (30 FPS) via `terminal.draw`. No widget retains internal rendering state; all layout is computed from `UI` and `ChatTabState`.
 
-3. **SQLite for runtime state, TOML for static config** — Transient chat data (messages, conversations, keys) lives in SQLite. Static user preferences (theme, default provider) live in TOML.
+3. **Separate content stores and metadata** — Authoritative chat documents and native Memory records are independent of persistent SQLite provider/model/settings metadata. Protection is selective, not whole-config or whole-database encryption; copies into chats, exports, or LLM requests follow destination rules and cannot recall provider-sent data.
 
 4. **Provider abstraction** — The `Provider` enum maps display names to base URLs. Custom providers are supported via free-form endpoint + key inputs.
 

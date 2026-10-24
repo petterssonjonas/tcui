@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 
 use super::atomic::ConfigError;
 use crate::config::app_config::AppConfig;
-use crate::config::vault_profiles::{VaultCatalog, VaultProfile, VaultProfileId};
+use crate::config::vault_profiles::{normalize_name, VaultCatalog, VaultProfile, VaultProfileId};
 
 pub(super) fn deserialize_config(value: Value) -> Result<AppConfig> {
     let mut config: AppConfig = serde_json::from_value(value)?;
@@ -46,7 +46,7 @@ pub(super) fn migrate_value(value: &mut Value) -> Result<()> {
     if !has_new_catalog {
         migrate_legacy_vault(object, legacy_vault)?;
     }
-    add_default_vault_fallback(object);
+    install_internal_profile(object)?;
     if !object.contains_key("saved_files_dir") {
         if let Some(saved_files_dir) = legacy_artifacts {
             object.insert("saved_files_dir".to_string(), saved_files_dir);
@@ -97,19 +97,40 @@ fn expand_tilde(path: &str) -> PathBuf {
     }
 }
 
-fn add_default_vault_fallback(object: &mut Map<String, Value>) {
-    if object
-        .get("default_vault_id")
-        .is_some_and(|value| !value.is_null())
-    {
-        return;
+fn install_internal_profile(object: &mut Map<String, Value>) -> Result<()> {
+    let mut profile = VaultProfile::internal();
+    let mut id = profile.id.to_string();
+    let root = serde_json::to_value(&profile.root)?;
+    let vaults = object
+        .entry("vaults")
+        .or_insert_with(|| Value::Object(Map::new()));
+    if vaults.is_null() {
+        *vaults = Value::Object(Map::new());
     }
-    let first_id = object
-        .get("vaults")
-        .and_then(Value::as_object)
-        .and_then(|vaults| vaults.keys().next())
-        .cloned();
-    if let Some(first_id) = first_id {
-        object.insert("default_vault_id".to_string(), Value::String(first_id));
+    if let Some(vaults) = vaults.as_object_mut() {
+        if let Some((existing_id, _)) = vaults
+            .iter()
+            .find(|(_, value)| value.get("root") == Some(&root))
+        {
+            id = existing_id.clone();
+        } else {
+            let mut suffix = 2;
+            while vaults
+                .values()
+                .filter_map(|value| value.get("display_name").and_then(Value::as_str))
+                .any(|name| normalize_name(name) == profile.name_key)
+            {
+                profile.display_name = format!("TCUI Internal {suffix}");
+                profile.name_key = normalize_name(&profile.display_name);
+                suffix += 1;
+            }
+            vaults
+                .entry(id.clone())
+                .or_insert(serde_json::to_value(profile)?);
+        }
     }
+    if object.get("default_vault_id").is_none_or(Value::is_null) {
+        object.insert("default_vault_id".to_string(), Value::String(id));
+    }
+    Ok(())
 }

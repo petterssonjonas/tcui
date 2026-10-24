@@ -167,7 +167,7 @@ impl TuiApp {
                 .try_read()
                 .map(|config| config.clone())
                 .unwrap_or_default();
-            tokio::spawn(async move {
+            self.track_background_task(tokio::spawn(async move {
                 let Ok(probe) = crate::llm::local::probe(&config_snapshot.local_inference).await
                 else {
                     return;
@@ -193,7 +193,7 @@ impl TuiApp {
                     crate::config::LOCAL_PROVIDER_NAME.to_string(),
                     probe.models,
                 ));
-            });
+            }));
             return;
         }
 
@@ -202,7 +202,7 @@ impl TuiApp {
         };
         let action_tx = self.action_tx.clone();
 
-        tokio::task::spawn_blocking(move || {
+        self.track_background_task(tokio::task::spawn_blocking(move || {
             let Ok(storage) = crate::storage::Storage::new() else {
                 return;
             };
@@ -222,7 +222,7 @@ impl TuiApp {
                 Err(message) => Action::ShowToast(format!("{provider}: {message}")),
             };
             let _ = action_tx.send(action);
-        });
+        }));
     }
 }
 

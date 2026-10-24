@@ -1,7 +1,8 @@
 // allow: SIZE_OK - the versioned envelope, transition graph, and durable codec form one boundary.
 #![allow(dead_code)]
 
-use std::fs::{self, File, OpenOptions};
+use cap_std::fs::MetadataExt as _;
+use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -9,7 +10,6 @@ use std::time::UNIX_EPOCH;
 use serde::{Deserialize, Serialize};
 
 use crate::config::vault_profiles::VaultProfileId;
-use crate::storage::paths::{ensure_directory, set_unix_mode};
 
 use super::backup::StandaloneBackupId;
 use super::move_plan::{MoveCollision, MoveFileKind, MovePlan};
@@ -153,6 +153,8 @@ pub(crate) struct MoveJournalPlan {
     pub(crate) pairs: Vec<MoveJournalPair>,
     pub(crate) preconditions: Vec<MoveJournalPrecondition>,
     pub(crate) collisions: Vec<MoveJournalCollision>,
+    #[serde(default)]
+    pub(crate) copy_only: bool,
     pub(crate) total_size: u64,
 }
 
@@ -193,6 +195,7 @@ impl MoveJournalPlan {
             pairs,
             preconditions,
             collisions,
+            copy_only: plan.copy_only(),
             total_size: plan.total_size(),
         }
     }
@@ -211,12 +214,30 @@ impl From<MoveCollision> for MoveJournalCollision {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct StageIdentity {
+    pub(crate) device: u64,
+    pub(crate) inode: u64,
+    pub(crate) owner: u32,
+}
+
+impl StageIdentity {
+    pub(crate) fn capture(metadata: &cap_std::fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            owner: metadata.uid(),
+        }
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct MoveJournalArtifact {
     pub(crate) source_backup_id: Option<StandaloneBackupId>,
     pub(crate) destination_backup_id: Option<StandaloneBackupId>,
     #[serde(with = "optional_relative_path_serde")]
     pub(crate) staged_path: Option<VaultRelativePath>,
+    #[serde(default)]
+    pub(crate) staged_identity: Option<StageIdentity>,
     pub(crate) destination_committed: bool,
     pub(crate) source_removed: bool,
     #[serde(default)]
@@ -235,6 +256,7 @@ impl MoveJournalArtifact {
             source_backup_id: None,
             destination_backup_id: None,
             staged_path: None,
+            staged_identity: None,
             destination_committed: false,
             source_removed: false,
             source_restored: false,
@@ -304,23 +326,19 @@ impl JournalStore {
         }
     }
 
+    pub(crate) fn operation_owner(
+        &self,
+        operation_id: &MoveOperationId,
+    ) -> Result<u32, MoveJournalError> {
+        let path = self.root.join(operation_id.as_str());
+        open_directory(&path, false)?
+            .metadata(".")
+            .map(|metadata| metadata.uid())
+            .map_err(|source| io_error("identify operation owner", &path, source))
+    }
     pub(crate) fn ensure_mutation_allowed(&self) -> Result<(), MoveJournalError> {
-        let entries = match fs::read_dir(&self.root) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(source) => return Err(io_error("list", &self.root, source)),
-        };
-        for entry in entries {
-            let entry = entry.map_err(|source| io_error("list", &self.root, source))?;
-            let metadata = entry
-                .file_type()
-                .map_err(|source| io_error("inspect", &entry.path(), source))?;
-            if !metadata.is_dir() || metadata.is_symlink() {
-                return Err(MoveJournalError::Corrupt {
-                    reason: "operation entry is not a directory",
-                });
-            }
-            let journal = self.load_path(&entry.path())?;
+        for operation_root in self.operation_roots()? {
+            let journal = self.load_path(&operation_root)?;
             if journal.state.blocks_mutation() {
                 return Err(MoveJournalError::RecoveryPending {
                     operation_id: journal.operation_id,
@@ -334,10 +352,13 @@ impl JournalStore {
     pub(crate) fn create(&self, journal: &MoveJournalV1) -> Result<(), MoveJournalError> {
         self.ensure_root()?;
         let operation_root = self.root.join(journal.operation_id.as_str());
-        fs::create_dir(&operation_root)
-            .map_err(|source| io_error("create operation", &operation_root, source))?;
-        set_unix_mode(&operation_root, 0o700)
-            .map_err(|source| io_error("set permissions on", &operation_root, source))?;
+        let directory = open_directory(&self.root, false)?;
+        rustix::fs::mkdirat(
+            &directory,
+            journal.operation_id.as_str(),
+            rustix::fs::Mode::from_bits_truncate(0o700),
+        )
+        .map_err(|error| io_error("create operation", &operation_root, error.into()))?;
         write_new_synced(
             &operation_root.join(JOURNAL_FILE),
             &serde_json::to_vec(journal)?,
@@ -360,23 +381,45 @@ impl JournalStore {
     }
 
     pub(crate) fn operation_roots(&self) -> Result<Vec<PathBuf>, MoveJournalError> {
-        let entries = match fs::read_dir(&self.root) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(source) => return Err(io_error("list", &self.root, source)),
+        crate::protection::require(crate::protection::Domain::Vault).map_err(|error| {
+            io_error(
+                "unlock before listing",
+                &self.root,
+                io::Error::other(error.to_string()),
+            )
+        })?;
+        let directory = match crate::protection::open_directory(&self.root, false) {
+            Ok(directory) => directory,
+            Err(error)
+                if error
+                    .downcast_ref::<io::Error>()
+                    .is_some_and(|error| error.kind() == io::ErrorKind::NotFound) =>
+            {
+                return Ok(Vec::new())
+            }
+            Err(error) => {
+                return Err(io_error(
+                    "list",
+                    &self.root,
+                    io::Error::other(error.to_string()),
+                ))
+            }
         };
         let mut roots = Vec::new();
-        for entry in entries {
+        for entry in directory
+            .entries()
+            .map_err(|source| io_error("list", &self.root, source))?
+        {
             let entry = entry.map_err(|source| io_error("list", &self.root, source))?;
-            let metadata = entry
-                .file_type()
-                .map_err(|source| io_error("inspect", &entry.path(), source))?;
+            let metadata = entry.file_type().map_err(|source| {
+                io_error("inspect", &self.root.join(entry.file_name()), source)
+            })?;
             if !metadata.is_dir() || metadata.is_symlink() {
                 return Err(MoveJournalError::Corrupt {
                     reason: "operation entry is not a directory",
                 });
             }
-            roots.push(entry.path());
+            roots.push(self.root.join(entry.file_name()));
         }
         roots.sort();
         Ok(roots)
@@ -395,8 +438,10 @@ impl JournalStore {
         age: std::time::Duration,
     ) -> Result<bool, MoveJournalError> {
         let journal_path = operation_root.join(JOURNAL_FILE);
-        let modified = fs::metadata(&journal_path)
-            .and_then(|metadata| metadata.modified())
+        let directory = open_directory(operation_root, false)?;
+        let modified = directory
+            .symlink_metadata(JOURNAL_FILE)
+            .and_then(|metadata| metadata.modified().map(|time| time.into_std()))
             .map_err(|source| io_error("inspect", &journal_path, source))?;
         Ok(std::time::SystemTime::now()
             .duration_since(modified)
@@ -407,7 +452,14 @@ impl JournalStore {
         &self,
         operation_root: &Path,
     ) -> Result<(), MoveJournalError> {
-        fs::remove_dir_all(operation_root)
+        self.load_path(operation_root)?;
+        let name = operation_root
+            .file_name()
+            .ok_or(MoveJournalError::Corrupt {
+                reason: "missing operation directory name",
+            })?;
+        open_directory(&self.root, false)?
+            .remove_dir_all(name)
             .map_err(|source| io_error("remove", operation_root, source))?;
         sync_directory(&self.root)
     }
@@ -424,7 +476,15 @@ impl JournalStore {
             rand::random::<u128>()
         ));
         write_new_synced(&temporary, &serde_json::to_vec(journal)?)?;
-        fs::rename(&temporary, operation_root.join(JOURNAL_FILE))
+        let directory = open_directory(&operation_root, false)?;
+        directory
+            .rename(
+                temporary.file_name().ok_or(MoveJournalError::Corrupt {
+                    reason: "missing temporary filename",
+                })?,
+                &directory,
+                JOURNAL_FILE,
+            )
             .map_err(|source| io_error("replace", &operation_root, source))?;
         sync_directory(&operation_root)
     }
@@ -450,14 +510,18 @@ impl JournalStore {
     }
 
     fn ensure_root(&self) -> Result<(), MoveJournalError> {
-        ensure_directory(&self.root).map_err(|source| io_error("create", &self.root, source))?;
-        set_unix_mode(&self.root, 0o700)
-            .map_err(|source| io_error("set permissions on", &self.root, source))
+        open_directory(&self.root, true).map(|_| ())
     }
 
     fn load_path(&self, operation_root: &Path) -> Result<MoveJournalV1, MoveJournalError> {
+        if operation_root.parent() != Some(self.root.as_path()) {
+            return Err(MoveJournalError::Corrupt {
+                reason: "operation directory escaped journal root",
+            });
+        }
         let path = operation_root.join(JOURNAL_FILE);
-        let bytes = fs::read(&path).map_err(|source| io_error("read", &path, source))?;
+        let bytes = crate::protection::read(crate::protection::Domain::Vault, &path)
+            .map_err(|error| io_error("read", &path, io::Error::other(error.to_string())))?;
         let version = serde_json::from_slice::<VersionProbe>(&bytes)?.version;
         if version != u64::from(JOURNAL_VERSION) {
             return Err(MoveJournalError::UnknownVersion { version });
@@ -500,26 +564,42 @@ fn system_time_nanos(time: std::time::SystemTime) -> i128 {
 }
 
 fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), MoveJournalError> {
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(path)
-        .map_err(|source| io_error("create", path, source))?;
-    set_unix_mode(path, 0o600).map_err(|source| io_error("set permissions on", path, source))?;
-    file.write_all(bytes)
+    let bytes = crate::protection::encode(crate::protection::Domain::Vault, bytes)
+        .map_err(|error| io_error("encrypt", path, io::Error::other(error.to_string())))?;
+    let parent = path.parent().ok_or(MoveJournalError::Corrupt {
+        reason: "missing parent",
+    })?;
+    let directory = open_directory(parent, false)?;
+    let name = path.file_name().ok_or(MoveJournalError::Corrupt {
+        reason: "missing filename",
+    })?;
+    let descriptor = rustix::fs::openat(
+        &directory,
+        name,
+        rustix::fs::OFlags::WRONLY
+            | rustix::fs::OFlags::CREATE
+            | rustix::fs::OFlags::EXCL
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::from_bits_truncate(0o600),
+    )
+    .map_err(|error| io_error("create", path, error.into()))?;
+    let mut file = File::from(descriptor);
+    file.write_all(&bytes)
         .map_err(|source| io_error("write", path, source))?;
     file.sync_all()
         .map_err(|source| io_error("sync", path, source))
 }
 
 fn sync_directory(path: &Path) -> Result<(), MoveJournalError> {
-    #[cfg(unix)]
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|source| io_error("sync", path, source))?;
-    #[cfg(not(unix))]
-    let _ = path;
+    rustix::fs::fsync(open_directory(path, false)?)
+        .map_err(|error| io_error("sync", path, error.into()))?;
     Ok(())
+}
+
+fn open_directory(path: &Path, create: bool) -> Result<cap_std::fs::Dir, MoveJournalError> {
+    crate::protection::open_directory(path, create)
+        .map_err(|error| io_error("open directory", path, io::Error::other(error.to_string())))
 }
 
 fn io_error(operation: &'static str, path: &Path, source: io::Error) -> MoveJournalError {

@@ -13,12 +13,6 @@ pub(crate) enum PathError {
     Io(#[from] std::io::Error),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ConfinedPath {
-    pub(crate) relative: PathBuf,
-    pub(crate) absolute: PathBuf,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct MemoryPaths {
     vault: PathBuf,
@@ -28,14 +22,15 @@ pub(crate) struct MemoryPaths {
 }
 
 impl MemoryPaths {
+    #[cfg(test)]
     pub(crate) fn new(vault: &Path) -> Result<Self, PathError> {
-        std::fs::create_dir_all(vault)?;
         let vault = std::fs::canonicalize(vault)?;
         let legacy_memories = vault.join("memories");
-        std::fs::create_dir_all(&legacy_memories)?;
-        let legacy_memories = std::fs::canonicalize(legacy_memories)?;
-        if !legacy_memories.starts_with(&vault) {
-            return Err(PathError::Escape);
+        if legacy_memories.exists() {
+            let canonical = std::fs::canonicalize(&legacy_memories)?;
+            if !canonical.starts_with(&vault) {
+                return Err(PathError::Escape);
+            }
         }
         let storage = TcuiDataPaths::discover();
         ensure_directory(&storage.memories_dir)?;
@@ -48,16 +43,24 @@ impl MemoryPaths {
         })
     }
 
+    pub(crate) fn open_default() -> Result<Self, PathError> {
+        let storage = TcuiDataPaths::discover();
+        ensure_directory(&storage.memories_dir)?;
+        ensure_directory(&storage.memories_trash_dir)?;
+        Ok(Self {
+            vault: storage.root.clone(),
+            legacy_memories: storage.memories_dir.clone(),
+            memories: storage.memories_dir,
+            trash: storage.memories_trash_dir,
+        })
+    }
+
     pub(crate) fn vault(&self) -> &Path {
         &self.vault
     }
 
     pub(crate) fn root(&self) -> &Path {
         &self.memories
-    }
-
-    pub(crate) fn legacy_root(&self) -> &Path {
-        &self.legacy_memories
     }
 
     pub(crate) fn logical_path(&self, path: &Path) -> Result<PathBuf, PathError> {
@@ -90,16 +93,6 @@ impl MemoryPaths {
         Ok(relative.to_path_buf())
     }
 
-    pub(crate) fn legacy_target(&self, path: &Path) -> Result<ConfinedPath, PathError> {
-        let relative = self.logical_path(path)?;
-        let absolute = self.legacy_memories.join(&relative);
-        let canonical = std::fs::canonicalize(&absolute)?;
-        if !canonical.starts_with(&self.legacy_memories) {
-            return Err(PathError::Escape);
-        }
-        Ok(ConfinedPath { relative, absolute })
-    }
-
     pub(crate) fn active_document_path(&self, id: u64) -> PathBuf {
         self.memories.join(format!("{id:016x}.tcui-memory"))
     }
@@ -124,6 +117,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("tcui-memory-paths-{}", rand::random::<u64>()));
         fs::create_dir_all(&root).expect("temporary vault");
+        std::env::set_var("XDG_DATA_HOME", root.join("data-home"));
         let paths = MemoryPaths::new(&root).expect("memory paths");
 
         // When / Then
@@ -140,6 +134,7 @@ mod tests {
             .logical_path(std::path::Path::new("nested/note.md"))
             .is_ok());
         fs::remove_dir_all(root).expect("temporary vault cleanup");
+        std::env::remove_var("XDG_DATA_HOME");
     }
 
     #[cfg(unix)]
@@ -155,6 +150,7 @@ mod tests {
         let outside =
             std::env::temp_dir().join(format!("tcui-memory-outside-{}", rand::random::<u64>()));
         fs::create_dir_all(root.join("memories")).expect("memory root");
+        std::env::set_var("XDG_DATA_HOME", root.join("data-home"));
         fs::create_dir_all(&outside).expect("outside root");
         symlink(&outside, root.join("memories/escaped")).expect("escape symlink");
         let paths = MemoryPaths::new(&root).expect("memory paths");
@@ -166,5 +162,6 @@ mod tests {
         fs::remove_dir_all(&root).expect("root cleanup");
         fs::remove_dir_all(&outside).expect("outside cleanup");
         assert!(result.is_err());
+        std::env::remove_var("XDG_DATA_HOME");
     }
 }

@@ -170,10 +170,21 @@ where
     ) -> Result<Self, VaultWriteError> {
         let mut profiles = HashMap::new();
         for registration in registrations {
-            let canonical_root = std::fs::canonicalize(&registration.root)
-                .map_err(|source| io_error("canonicalize profile", &registration.root, source))?;
-            let directory = Dir::open_ambient_dir(&canonical_root, cap_std::ambient_authority())
-                .map_err(|source| io_error("open profile", &canonical_root, source))?;
+            let canonical_root = if registration.root.is_absolute() {
+                registration.root.clone()
+            } else {
+                std::env::current_dir()
+                    .map_err(|source| io_error("resolve profile", &registration.root, source))?
+                    .join(&registration.root)
+            };
+            let directory =
+                crate::protection::open_directory(&canonical_root, false).map_err(|error| {
+                    io_error(
+                        "open profile",
+                        &canonical_root,
+                        io::Error::other(error.to_string()),
+                    )
+                })?;
             profiles.insert(
                 registration.profile_id,
                 ProfileHandle {
@@ -197,8 +208,14 @@ where
         replacement: &str,
     ) -> Result<VaultDiff, VaultWriteError> {
         let profile = self.profile(profile_id)?;
+        super::require_root(&profile.canonical_root.join(path.as_path()))
+            .map_err(|source| io_error("unlock before accessing", path.as_path(), source))?;
         let (parent, name) = open_parent(&profile.directory, path.as_path())?;
-        let original = read_existing(&parent, &name, path.as_path())?.unwrap_or_default();
+        let original = read_existing(&parent, &name, path.as_path())?
+            .map(|bytes| super::decode_root(&profile.canonical_root.join(path.as_path()), bytes))
+            .transpose()
+            .map_err(|source| io_error("decrypt", path.as_path(), source))?
+            .unwrap_or_default();
         let original = String::from_utf8(original).map_err(|_| VaultWriteError::InvalidUtf8 {
             path: path.as_path().to_path_buf(),
         })?;
@@ -220,6 +237,17 @@ where
         self.ensure_journal_mutation_allowed()?;
         self.backups.prune_terminal(BACKUP_RETENTION_DAYS)?;
         self.write_with_guard(&guard, profile_id, path, replacement)
+    }
+
+    pub fn remove(
+        &self,
+        profile_id: &ProfileId,
+        path: &VaultRelativePath,
+    ) -> Result<VaultWriteOutcome, VaultWriteError> {
+        let guard = self.mutation_lock.try_acquire()?;
+        self.ensure_journal_mutation_allowed()?;
+        self.backups.prune_terminal(BACKUP_RETENTION_DAYS)?;
+        self.remove_with_guard(&guard, profile_id, path)
     }
 
     pub fn restore(
@@ -256,13 +284,25 @@ where
         replacement: &[u8],
     ) -> Result<VaultWriteOutcome, VaultWriteError> {
         let profile = self.profile(profile_id)?;
+        super::require_root(&profile.canonical_root.join(path.as_path()))
+            .map_err(|source| io_error("unlock before accessing", path.as_path(), source))?;
         let (parent, name) = open_parent(&profile.directory, path.as_path())?;
         let original = read_existing(&parent, &name, path.as_path())?;
+        let decoded_original = original
+            .as_ref()
+            .map(|bytes| {
+                super::decode_root(&profile.canonical_root.join(path.as_path()), bytes.clone())
+            })
+            .transpose()
+            .map_err(|source| io_error("decrypt original", path.as_path(), source))?;
+        let replacement =
+            super::encode_root(&profile.canonical_root.join(path.as_path()), replacement)
+                .map_err(|source| io_error("encrypt replacement", path.as_path(), source))?;
         let (mut temporary, mut cleanup) = create_temporary(&parent, path.as_path())?;
         let prepared = (|| {
             maybe_fail(FailurePoint::Write)?;
             temporary
-                .write_all(replacement)
+                .write_all(&replacement)
                 .map_err(|source| io_error("write temporary for", path.as_path(), source))?;
             temporary
                 .flush()
@@ -274,7 +314,7 @@ where
             maybe_fail(FailurePoint::Backup)?;
             let profile_key = profile_id.to_string();
             self.backups
-                .create_prepared(&profile_key, path, original.as_deref())
+                .create_prepared(&profile_key, path, decoded_original.as_deref())
                 .map_err(VaultWriteError::from)
         })();
         drop(temporary);
@@ -308,6 +348,23 @@ where
         path: &VaultRelativePath,
     ) -> Result<ValidatedEditorTarget, VaultWriteError> {
         let profile = self.profile(profile_id)?;
+        if super::is_internal_root(&profile.canonical_root.join(path.as_path()))
+            && crate::protection::is_protected(crate::protection::Domain::Vault).map_err(
+                |error| {
+                    io_error(
+                        "check protection",
+                        path.as_path(),
+                        io::Error::other(error.to_string()),
+                    )
+                },
+            )?
+        {
+            return Err(io_error(
+                "open encrypted file; explicitly export plaintext first",
+                path.as_path(),
+                io::Error::other("Protected files cannot be opened in an external editor"),
+            ));
+        }
         editor::validate_editor_target(&profile.canonical_root, &profile.directory, path)
             .map_err(VaultWriteError::from)
     }
@@ -319,12 +376,21 @@ where
         path: &VaultRelativePath,
     ) -> Result<VaultWriteOutcome, VaultWriteError> {
         let profile = self.profile(profile_id)?;
+        super::require_root(&profile.canonical_root.join(path.as_path()))
+            .map_err(|source| io_error("unlock before accessing", path.as_path(), source))?;
         let (parent, name) = open_parent(&profile.directory, path.as_path())?;
         let original = read_existing(&parent, &name, path.as_path())?;
+        let decoded_original = original
+            .as_ref()
+            .map(|bytes| {
+                super::decode_root(&profile.canonical_root.join(path.as_path()), bytes.clone())
+            })
+            .transpose()
+            .map_err(|source| io_error("decrypt original", path.as_path(), source))?;
         let profile_key = profile_id.to_string();
-        let backup_id = self
-            .backups
-            .create_prepared(&profile_key, path, original.as_deref())?;
+        let backup_id =
+            self.backups
+                .create_prepared(&profile_key, path, decoded_original.as_deref())?;
         if original.is_none() {
             let _ = self.backups.mark_state(&backup_id, BackupState::Complete);
             return Ok(VaultWriteOutcome { backup_id });
@@ -361,11 +427,20 @@ where
     }
 
     fn profile(&self, id: &ProfileId) -> Result<&ProfileHandle, VaultWriteError> {
-        self.profiles
+        let profile = self
+            .profiles
             .get(id)
             .ok_or_else(|| VaultWriteError::UnknownProfile {
                 profile_id: id.to_string(),
-            })
+            })?;
+        super::require_root(&profile.canonical_root).map_err(|source| {
+            io_error(
+                "unlock with /unlock before accessing",
+                &profile.canonical_root,
+                source,
+            )
+        })?;
+        Ok(profile)
     }
 
     fn ensure_journal_mutation_allowed(&self) -> Result<(), VaultWriteError> {

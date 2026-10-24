@@ -18,9 +18,12 @@ catalog is not an automatically connected provider list.
 - **Anthropic Agent SDK**: an Anthropic Console API key, using the official
   Claude CLI subprocess interface described below.
 
-Choose credential storage before entering a key or starting OAuth. Escape
-cancels the modal and any pending authorization. Authorization URLs appear
-only in the login modal, not in conversation history.
+Choose credential storage before entering a key or starting OAuth. Encrypted
+and plaintext connections can coexist; encrypted entries carry an encrypted
+suffix in their labels. Storage is explicit per record: saving cannot replace
+an existing record in the opposite storage mode, and lookups use exact
+connection identities. Escape cancels the modal and any pending authorization.
+Authorization URLs appear only in the login modal, not in conversation history.
 
 Select a connection and press `m` to enter a model ID, or use `/model <id>`.
 This supports custom endpoints without a model-list API. Press `d` in the
@@ -71,11 +74,12 @@ with `Ctrl+P`. Select Exa, Tavily, or Firecrawl, choose storage, and enter its A
 key. Saving enables that MCP profile without adding a chat/model connection.
 The automatic search source is selected separately in Web search settings.
 
-Search keys use the same global encrypted/plaintext preference as provider
-credentials. Environment API keys are never imported. Encrypted search keys
-require an unlocked vault; plaintext keys do not. In the manager, `e` toggles
-the profile, `h` explicitly restores its hosted HTTP preset, `d` removes the key
-and disables the profile, and `v` opens the credential vault.
+Search keys use the same per-record encrypted/plaintext choices and default as
+provider credentials; both modes can coexist. Environment API keys are never
+imported. Encrypted search keys require the shared password to be unlocked;
+plaintext keys do not, unless app-entry protection also gates access. In the
+manager, `e` toggles the profile, `h` explicitly restores its hosted HTTP preset,
+`d` removes the key and disables the profile, and `v` opens the credential vault.
 
 `Exa Search`, `Tavily Search`, and `Firecrawl Search` are reserved credential
 identities, not chat-provider names. An existing chat connection with a
@@ -91,32 +95,54 @@ Provider and web search keys, OAuth access/refresh tokens, machine passwords, an
 keys use tables in the application database, normally
 `$XDG_DATA_HOME/tcui/tcui.db` (or `~/.local/share/tcui/tcui.db` on Linux).
 
-The storage choice is **global for provider and web search credentials**:
+### Selective protection and storage
 
-- **Encrypted vault**: Argon2id derives an in-memory key from your password,
-  using a random 16-byte salt, 64 MiB memory, three iterations, and one lane.
-  AES-256-GCM encrypts records with fresh 12-byte nonces and authenticates their
-  kind, identity, and label. The unlock key is not saved to disk.
+On first run, and later through `/security`, choose independent protection for
+app entry, provider/search credentials, chats, Memories, and the internal
+Markdown Vault. App-entry protection alone does not encrypt unchecked stores.
+`/unlock` uses one shared password to unlock all selected domains. `/lock`
+quiesces tracked app activity, persists pending state, and clears the app's
+unlocked state. Voluntary transitions ask before discarding running terminals,
+unsaved editors, or drafts; cancelling preserves the current session. Forced
+revocation fails closed.
+
+Encrypted chats or protected app entry require a startup password gate before
+configuration and stores open; cancelling exits. With only other domains
+selected, unprotected surfaces remain usable while protected stores are locked,
+and cancelling an optional unlock returns to the app. `/security` remains
+available for later changes.
+
+Provider/search records have two explicit storage modes:
+
+- **Encrypted vault**: Argon2id protects a random shared master key using your
+  password, a random 16-byte salt, 64 MiB memory, three iterations, and one lane.
+  The plaintext master key is not saved to disk. Domain-separated AES-256-GCM
+  protects selected content; credential records use fresh 12-byte nonces and
+  authenticate their kind, identity, and label.
 - **Plaintext SQLite**: an explicit opt-in. Anyone who can read the database can
-  read these provider/search keys and tokens. Plaintext credentials remain
-  usable while the password vault is locked.
+  read these provider/search keys and tokens. They remain usable while
+  credentials are locked, subject to any app-entry gate.
 
-Machine passwords and SSH keys **always remain encrypted**, independently of
-provider/search storage preference. Connection names, secret labels, and record types
-are database metadata, not encrypted secrets.
+The `/vault` provider/search storage preference sets the default for **new**
+records, not a bulk conversion. Changing the credentials checkbox in
+`/security` intentionally converts existing provider and search records and
+sets that default; leaving it unchanged preserves explicit per-record
+exceptions. Machine passwords and SSH keys **always remain encrypted**,
+independently of this default or checkbox.
 
-An initialized vault prompts for its password on launch. Cancel to continue
-without encrypted credentials; `/vault` reopens its controls. Wrong passwords
-and modified encrypted records fail closed. Locking removes the cached unlock
-key; it does not recall credentials already handed to an in-flight request.
-There is no password recovery. Keep your password and backups safe.
+If you initially chose plaintext, the first encrypted record requires shared
+password enrollment; reopen `/connect` afterward to add the connection. A
+failed protection migration does not reset an already initialized password:
+correct the reported prerequisite and retry with the same password.
+
+Wrong passwords and modified encrypted records fail closed. Locking clears
+cached unlock material, but cannot recall credentials already handed to a
+request or data already sent to a provider. There is no password rotation or
+password recovery feature. Keep your password and backups safe.
 
 `/vault` supports:
 
-- Initialize, unlock, and lock.
-- Convert all provider and search records between encrypted and plaintext storage. Unlock
-  first when converting existing encrypted records. The plaintext option is
-  explicitly labeled **NOT encrypted**.
+- Initialize, unlock, and lock; choose the default storage for new credentials.
 - Add/edit/delete labeled machine passwords and SSH private keys. Paste the
   complete multiline SSH key into the masked field; Shift+Enter inserts a
   newline and Ctrl+U clears it.
@@ -124,14 +150,19 @@ There is no password recovery. Keep your password and backups safe.
   managers and terminal clipboard integrations may retain copied secrets.
 - Explicitly import legacy `keys.toml` credentials after unlocking.
 
-Converting plaintext records to encrypted storage uses SQLite secure deletion,
-WAL checkpoint/truncation, and database compaction. This cannot erase filesystem
-snapshots, prior backups, or copies outside TCUI. File permissions restrict the
-app directory and database to the user on Unix, but encryption does not protect
-against a compromised running account.
+Converting plaintext credentials uses SQLite secure deletion, WAL
+checkpoint/truncation, and database compaction, not guaranteed secure erasure.
+Flags do not encrypt configuration, connection/profile names, paths, filenames,
+secret labels, record types, or logs. Content copied into chats, exports, or
+provider requests follows the destination's protection. External originals and
+user-kept archives or backups may remain readable; TCUI does not silently rewrite
+or delete them. Unix permissions restrict app files to the user, but
+these controls do not protect against a compromised account, root, swap, or
+filesystem snapshots.
 
-The credential vault is separate from **Markdown Vault**. Search Markdown files
-with `/vault-search <query>`; existing `@vault` workflows are unchanged.
+The credential controls in `/vault` are distinct from **Markdown Vault**
+content protection. Search Markdown files with `/vault-search <query>`;
+existing `@vault` workflows are unchanged.
 
 ## Anthropic Agent SDK and Console credits
 
@@ -175,6 +206,23 @@ CLI authentication supports `codex` and `openrouter` without opening the TUI.
 Successful login registers the corresponding OAuth connection in configuration.
 Codex login always uses TCUI's native flow; the old `--native` switch is removed.
 
+The global `--unlock-password-stdin` reads one UTF-8 password line from
+redirected input, not an interactive terminal. Alternatively,
+`--unlock-password-fd N` reads from a dedicated inherited descriptor with
+`N >= 3` on supported Unix platforms. These options unlock existing shared
+protection without selecting credential storage, and cannot be combined with
+each other. Never pass passwords as argument values or environment variables.
+MCP reserves stdin for JSON-RPC: use the inherited-descriptor option only.
+
+The original inherited password descriptor is marked close-on-exec before any
+helper can launch; the separately opened reader is not inherited either.
+Password transports are rejected for interactive startup, upgrades, and external
+Codex logout rather than ignored. Use the TUI's masked prompt for interactive entry.
+
+App-entry protection applies to auth commands even with `--plaintext`; supply
+the shared password to pass that gate. The explicit external Codex logout
+described below is exempt because it does not access TCUI's stores.
+
 By default, both providers print a URL and accept the complete final response
 URL on stdin, while also accepting a reachable loopback callback. They do not
 launch a browser. Add `--open-browser` only when you explicitly want to launch
@@ -196,13 +244,14 @@ tcui auth --vault-password-stdin login codex --headless
 tcui auth --vault-password-stdin login openrouter --headless
 ```
 
-The password flag is pipe-only to avoid terminal echo. It initializes or unlocks
-the vault and selects encrypted storage. Do not put passwords in shell command
-arguments or shell history. Supply the final response URL on the next stdin
-line when using the default manual callback flow. `--headless` selects Codex's
-device-code flow or OpenRouter's manual code/redirect flow; Codex prints a device
-verification URL and user code. The TUI provides masked interactive input when
-piped password handling is not appropriate.
+The auth-specific `--vault-password-stdin` is pipe-only to avoid terminal echo.
+It initializes or unlocks the shared password and selects encrypted credential
+storage. It cannot be combined with `--plaintext` or either global unlock flag.
+Supply the final response URL on the next stdin line when using the default
+manual callback flow. `--headless` selects Codex's device-code flow or
+OpenRouter's manual code/redirect flow; Codex prints a device verification URL
+and user code. The TUI provides masked interactive input when piped password
+handling is not appropriate.
 
 Inspect or remove TCUI-owned credentials:
 
@@ -212,10 +261,11 @@ tcui auth logout codex
 tcui auth logout openrouter
 ```
 
-Pass `--vault-password-stdin` for operations requiring encrypted credentials.
-Previously selected plaintext storage does not require an unlock. Status never
-prints keys or tokens. OpenRouter logout removes the local OAuth credential;
-Codex logout also attempts native token revocation.
+Use a global unlock option for existing protection, or
+`--vault-password-stdin` when encrypted credential storage is also intended.
+Plaintext credentials need no credential unlock, but do not bypass app-entry
+protection. Status never prints keys or tokens. OpenRouter logout removes the
+local OAuth credential; Codex logout also attempts native token revocation.
 
 `tcui auth logout codex --external` is a separate, explicit request to invoke
 `codex logout`. It affects other tools using that external login. Ordinary TCUI
@@ -237,3 +287,11 @@ Legacy import is explicit and transactional. Conflicting records stop the
 import without overwriting current credentials. The original legacy file and
 its machine key remain untouched; protect those old copies separately. New
 credentials are never written to the legacy `keys.toml` store.
+
+The legacy local `chat.key` remains for legacy documents and reminders; it
+cannot unlock new shared-master envelopes. With protection configured,
+explicit `--decrypt <path>` uses the shared password, including for archived
+master-encrypted copies after their managed-domain flag has been disabled.
+`--key` is rejected once protection is configured; it applies only to legacy
+documents before that cutover. Disabling a managed flag does not make old
+encrypted archives readable without the password.

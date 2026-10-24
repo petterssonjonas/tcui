@@ -103,28 +103,70 @@ pub enum VaultFsError {
     },
 }
 
-pub struct VaultFs(Dir);
+pub struct VaultFs(Dir, PathBuf);
 
 impl VaultFs {
     pub fn open_profile(root: &Path) -> Result<Self, VaultFsError> {
-        Dir::open_ambient_dir(root, cap_std::ambient_authority())
-            .map(Self)
-            .map_err(|source| VaultFsError::OpenProfile {
+        let absolute = if root.is_absolute() {
+            root.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|source| VaultFsError::OpenProfile {
+                    path: root.to_path_buf(),
+                    source,
+                })?
+                .join(root)
+        };
+        crate::protection::open_directory(&absolute, false)
+            .map(|directory| Self(directory, absolute))
+            .map_err(|error| VaultFsError::OpenProfile {
                 path: root.to_path_buf(),
-                source,
+                source: io::Error::other(error.to_string()),
             })
     }
 
-    pub fn read_text(&self, path: &VaultRelativePath) -> Result<String, VaultFsError> {
+    pub fn read_bytes(&self, path: &VaultRelativePath) -> Result<Vec<u8>, VaultFsError> {
         let path = path.as_path();
         let mut file = self.open_file_nofollow(path)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)
             .map_err(|source| io_error("read", path, source))?;
-        String::from_utf8(bytes).map_err(|source| VaultFsError::InvalidUtf8 {
-            path: path.to_path_buf(),
+        super::decode_root(&self.1.join(path), bytes)
+            .map_err(|source| io_error("decrypt", path, source))
+    }
+
+    pub fn read_text(&self, path: &VaultRelativePath) -> Result<String, VaultFsError> {
+        String::from_utf8(self.read_bytes(path)?).map_err(|source| VaultFsError::InvalidUtf8 {
+            path: path.as_path().to_path_buf(),
             source,
         })
+    }
+
+    pub(crate) fn create_parent_directories(
+        &self,
+        path: &VaultRelativePath,
+    ) -> Result<(), VaultFsError> {
+        super::require_root(&self.1.join(path.as_path())).map_err(|source| {
+            io_error("unlock before creating directories", path.as_path(), source)
+        })?;
+        let mut directory = self
+            .0
+            .try_clone()
+            .map_err(|source| io_error("clone root", path.as_path(), source))?;
+        if let Some(parent) = path.as_path().parent() {
+            let mut traversed = PathBuf::new();
+            for component in parent.components() {
+                let name = normal_component(component, path.as_path())?;
+                traversed.push(name);
+                match directory.create_dir(name) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(source) => return Err(io_error("create directory", &traversed, source)),
+                }
+                directory = open_dir_component(&directory, name, &traversed)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn read_text_limited(
@@ -132,22 +174,8 @@ impl VaultFs {
         path: &VaultRelativePath,
         max_bytes: u64,
     ) -> Result<VaultTextRead, VaultFsError> {
+        let (bytes, partial) = self.read_limited_bytes(path, max_bytes)?;
         let path = path.as_path();
-        let mut file = self.open_file_nofollow(path)?;
-        let initial_size = file
-            .metadata()
-            .map_err(|source| io_error("read metadata for", path, source))?
-            .len();
-        let mut bytes = Vec::new();
-        file.by_ref()
-            .take(max_bytes.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|source| io_error("read", path, source))?;
-        let max_length = usize::try_from(max_bytes).unwrap_or(usize::MAX);
-        let partial = initial_size > max_bytes || bytes.len() > max_length;
-        if bytes.len() > max_length {
-            bytes.truncate(max_length);
-        }
         let text = match String::from_utf8(bytes) {
             Ok(text) => text,
             Err(error) if partial && error.utf8_error().error_len().is_none() => {
@@ -175,6 +203,40 @@ impl VaultFs {
             Vec::new()
         };
         Ok(VaultTextRead { text, limits })
+    }
+
+    fn read_limited_bytes(
+        &self,
+        path: &VaultRelativePath,
+        max_bytes: u64,
+    ) -> Result<(Vec<u8>, bool), VaultFsError> {
+        let path = path.as_path();
+        let mut file = self.open_file_nofollow(path)?;
+        let protected = super::is_internal_root(&self.1.join(path))
+            && crate::protection::is_protected(crate::protection::Domain::Vault).map_err(
+                |error| {
+                    io_error(
+                        "check protection",
+                        path,
+                        io::Error::other(error.to_string()),
+                    )
+                },
+            )?;
+        let overhead = if protected { 4096 } else { 0 };
+        let mut bytes = Vec::new();
+        file.by_ref()
+            .take(max_bytes.saturating_add(overhead).saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|source| io_error("read", path, source))?;
+        if protected && bytes.len() as u64 > max_bytes.saturating_add(overhead) {
+            return Ok((Vec::new(), true));
+        }
+        let mut bytes = super::decode_root(&self.1.join(path), bytes)
+            .map_err(|source| io_error("decrypt", path, source))?;
+        let bound = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+        let partial = bytes.len() > bound;
+        bytes.truncate(bound);
+        Ok((bytes, partial))
     }
 
     pub(crate) fn entry_kind(
@@ -205,6 +267,21 @@ impl VaultFs {
         canonical_root: &Path,
         path: &VaultRelativePath,
     ) -> Result<ValidatedEditorTarget, EditorTargetError> {
+        if super::is_internal_root(&self.1.join(path.as_path()))
+            && crate::protection::is_protected(crate::protection::Domain::Vault).map_err(
+                |error| EditorTargetError::Io {
+                    operation: "check protection for",
+                    path: path.as_path().to_path_buf(),
+                    source: io::Error::other(error.to_string()),
+                },
+            )?
+        {
+            return Err(EditorTargetError::Io {
+                operation: "open encrypted file; explicitly export plaintext first",
+                path: path.as_path().to_path_buf(),
+                source: io::Error::other("Protected files cannot be opened in an external editor"),
+            });
+        }
         super::editor::validate_editor_target(canonical_root, &self.0, path)
     }
 
@@ -213,6 +290,9 @@ impl VaultFs {
         start: Option<&VaultRelativePath>,
         limits: VaultWalkLimits,
     ) -> Result<VaultListing, VaultFsError> {
+        super::require_root(&self.1).map_err(|source| {
+            io_error("unlock with /unlock before listing", Path::new("."), source)
+        })?;
         let (directory, prefix) = match start {
             Some(path) => (
                 self.open_directory(path.as_path())?,
@@ -259,59 +339,29 @@ impl VaultFs {
                 break;
             }
             result.files_scanned += 1;
-            let mut file = self.open_file_nofollow(&entry.path)?;
-            let metadata = file
-                .metadata()
-                .map_err(|source| io_error("read metadata for", &entry.path, source))?;
-            if metadata.len() > limits.max_file_bytes {
-                record_limit(
-                    &mut result.limits,
-                    VaultLimitKind::FileBytes,
-                    Some(entry.path),
-                );
-                continue;
-            }
             let remaining = limits
                 .max_total_bytes
                 .saturating_sub(result.total_bytes_read);
-            if metadata.len() > remaining {
-                record_limit(
-                    &mut result.limits,
-                    VaultLimitKind::TotalBytes,
-                    Some(entry.path),
-                );
-                break;
-            }
-
-            let mut bytes =
-                Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(1024 * 1024));
-            file.by_ref()
-                .take(remaining)
-                .read_to_end(&mut bytes)
-                .map_err(|source| io_error("search", &entry.path, source))?;
-            result.total_bytes_read += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-
-            let final_size = file
-                .metadata()
-                .map_err(|source| io_error("recheck metadata for", &entry.path, source))?
-                .len();
-            if final_size > limits.max_file_bytes {
-                record_limit(
-                    &mut result.limits,
-                    VaultLimitKind::FileBytes,
-                    Some(entry.path),
-                );
+            let bound = limits.max_file_bytes.min(remaining);
+            let relative = VaultRelativePath::parse(&entry.path).map_err(|_| {
+                VaultFsError::InvalidRelativePath {
+                    path: entry.path.clone(),
+                }
+            })?;
+            let (bytes, partial) = self.read_limited_bytes(&relative, bound)?;
+            if partial {
+                let kind = if remaining < limits.max_file_bytes {
+                    VaultLimitKind::TotalBytes
+                } else {
+                    VaultLimitKind::FileBytes
+                };
+                record_limit(&mut result.limits, kind, Some(entry.path));
+                if kind == VaultLimitKind::TotalBytes {
+                    break;
+                }
                 continue;
             }
-            if final_size > u64::try_from(bytes.len()).unwrap_or(u64::MAX) {
-                record_limit(
-                    &mut result.limits,
-                    VaultLimitKind::TotalBytes,
-                    Some(entry.path),
-                );
-                break;
-            }
-
+            result.total_bytes_read += bytes.len() as u64;
             let Ok(text) = String::from_utf8(bytes) else {
                 continue;
             };
@@ -335,6 +385,8 @@ impl VaultFs {
     }
 
     fn open_directory(&self, path: &Path) -> Result<Dir, VaultFsError> {
+        super::require_root(&self.1.join(path))
+            .map_err(|source| io_error("unlock before listing", path, source))?;
         let mut directory = self
             .0
             .try_clone()
@@ -349,6 +401,8 @@ impl VaultFs {
     }
 
     fn open_file_nofollow(&self, path: &Path) -> Result<File, VaultFsError> {
+        super::require_root(&self.1.join(path))
+            .map_err(|source| io_error("unlock with /unlock before reading", path, source))?;
         let (directory, name) = self.open_parent(path)?;
         let mut options = OpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);
@@ -367,6 +421,8 @@ impl VaultFs {
     }
 
     fn open_parent(&self, path: &Path) -> Result<(Dir, OsString), VaultFsError> {
+        super::require_root(&self.1.join(path))
+            .map_err(|source| io_error("unlock with /unlock before accessing", path, source))?;
         let mut directory = self
             .0
             .try_clone()
@@ -394,6 +450,8 @@ impl VaultFs {
         depth: usize,
         state: &mut WalkState,
     ) -> Result<(), VaultFsError> {
+        super::require_root(&self.1.join(prefix))
+            .map_err(|source| io_error("unlock before listing", prefix, source))?;
         if depth >= state.limits.max_depth {
             state.record(VaultLimitKind::Depth, Some(prefix.to_path_buf()));
             return Ok(());

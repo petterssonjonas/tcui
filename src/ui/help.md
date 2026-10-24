@@ -14,6 +14,9 @@ Type any slash command in the message box:
 - `/cancel` — stop this chat's response and keep its partial text
 - `/steer <instruction>` — request live steering; current connections report that it is unsupported and keep the draft
 - `/settings` — open the dedicated Settings tab
+- `/security` — choose app entry password and at-rest encryption independently
+- `/unlock` — unlock all protected data with the shared password
+- `/lock` — save/cancel active requests, close terminals, clear application caches and lock
 - `/terminal` — open a persistent terminal session
 - `/providers`, `/connect` — manage added providers, choose a preset or add a custom endpoint
 - `/vault` — unlock, initialize or lock the credential vault; choose credential storage; manage machine passwords and SSH keys
@@ -62,6 +65,32 @@ Type any slash command in the message box:
 - Notifications use Herdr, a reachable local desktop service, or supported
   Kitty/Ghostty/WezTerm terminal delivery over SSH. Unsupported routes are off;
   SSH never sends desktop notifications to the server's D-Bus.
+
+## Application protection
+
+First interactive launch asks which data to protect. Reopen this screen with
+`/security` or **Settings → Privacy → Application protection**. Credentials,
+chats, memories and the internal vault are independent choices. Unchecked data
+remains plaintext; an entry password alone does not encrypt it. External
+Markdown vaults remain plaintext. Existing encrypted credential connections
+remain available alongside explicitly plaintext connections.
+
+Protected chats or an entry password require unlock before application stores
+or chat titles load. Cancelling this startup screen exits. Other protected
+domains stay unavailable until `/unlock`; unprotected parts remain usable.
+The existing credential-vault password is reused, never replaced. Changing
+protection or locking cancels and saves active requests, closes terminals and
+reconstructs the application without its old plaintext caches.
+Inserted documents require discard confirmation before restarting; cancelling
+that confirmation preserves the current session and pending documents.
+If setup is interrupted, use Ctrl+U on the protection screen to unlock and
+recover the saved setup. Cancelling leaves recovery pending for the next launch;
+application data stays unavailable until recovery succeeds.
+
+Headless content commands require the same session unlock. Supply a password
+line through redirected `--unlock-password-stdin`, never through arguments or
+environment variables. For `memory-mcp`, stdin belongs to JSON-RPC: use a
+dedicated inherited descriptor with `--unlock-password-fd N` (N ≥ 3).
 
 ## Conversation ownership and recall
 

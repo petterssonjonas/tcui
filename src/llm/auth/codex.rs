@@ -8,7 +8,7 @@ pub(crate) use cli::{logout_external_cli, CodexCliError};
 pub(crate) use credential::{
     external_metadata_is_safe, read_external_credential, CodexCredentialError,
 };
-pub(crate) use credential::{resolve_credential, CodexCredential, CodexCredentialSource};
+pub(crate) use credential::{resolve_connection, CodexCredential, CodexCredentialSource};
 #[cfg(test)]
 pub(crate) use native::CodexRevocationFailure;
 pub(crate) use native::{CodexNativeAdapter, CodexNativeError, CodexNativeLogout};

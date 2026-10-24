@@ -5,8 +5,8 @@ use color_eyre::eyre::eyre;
 use secrecy::ExposeSecret;
 
 use crate::config::AppConfig;
-use crate::llm::auth::codex::{resolve_credential, CodexCredentialSource, CodexNativeAdapter};
-use crate::llm::auth::oauth::oauth_cancellation;
+use crate::llm::auth::codex::{resolve_connection, CodexCredentialSource};
+use crate::llm::auth::refresh_rejected_codex_credential;
 use crate::llm::chat::{ensure_not_empty, ChatRequest, ChatStreamEvent, ChatStreamOutput};
 
 mod request;
@@ -26,10 +26,17 @@ pub(crate) fn validate_request(request: &ChatRequest) -> color_eyre::Result<()> 
     validate_reasoning_effort(request)
 }
 
-pub(crate) fn prepare_session() -> color_eyre::Result<PreparedCodexSession> {
+pub(crate) fn prepare_session(connection: &str) -> color_eyre::Result<PreparedCodexSession> {
     let config = AppConfig::load()?;
-    let session = load_session(&config)?;
-    Ok(PreparedCodexSession { session, config })
+    let base = crate::config::key_store::provider_base_name(connection);
+    let mut connection_id = crate::llm::auth::canonical_provider_name(base);
+    connection_id.push_str(&connection[base.len()..]);
+    let session = load_session(&config, &connection_id)?;
+    Ok(PreparedCodexSession {
+        session,
+        config,
+        connection: connection_id,
+    })
 }
 
 #[derive(Clone)]
@@ -42,6 +49,7 @@ pub(crate) struct CodexSession {
 pub(crate) struct PreparedCodexSession {
     session: CodexSession,
     config: AppConfig,
+    connection: String,
 }
 
 pub(crate) async fn stream_prepared_codex_responses<F>(
@@ -54,14 +62,13 @@ pub(crate) async fn stream_prepared_codex_responses<F>(
 where
     F: FnMut(ChatStreamEvent) + Send,
 {
-    let source = prepared.session.source;
     let config = prepared.config;
     stream_prepared_with_one_refresh(
         client,
         request,
         body,
         prepared.session,
-        || async { refresh_session(&config, source).await },
+        |session| async move { refresh_session(&config, session, &prepared.connection).await },
         on_event,
     )
     .await
@@ -76,7 +83,7 @@ async fn stream_with_one_refresh<F, Fut, H>(
     on_event: &mut H,
 ) -> color_eyre::Result<ChatStreamOutput>
 where
-    F: FnOnce() -> Fut,
+    F: FnOnce(CodexSession) -> Fut,
     Fut: Future<Output = color_eyre::Result<CodexSession>>,
     H: FnMut(ChatStreamEvent) + Send,
 {
@@ -93,13 +100,13 @@ async fn stream_prepared_with_one_refresh<F, Fut, H>(
     on_event: &mut H,
 ) -> color_eyre::Result<ChatStreamOutput>
 where
-    F: FnOnce() -> Fut,
+    F: FnOnce(CodexSession) -> Fut,
     Fut: Future<Output = color_eyre::Result<CodexSession>>,
     H: FnMut(ChatStreamEvent) + Send,
 {
     let response = send_serialized_request(client, request, body.clone(), &session).await?;
     let response = if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-        session = refresh().await?;
+        session = refresh(session).await?;
         send_serialized_request(client, request, body, &session).await?
     } else {
         response
@@ -179,8 +186,8 @@ async fn send_serialized_request(
         .map_err(Into::into)
 }
 
-fn load_session(config: &AppConfig) -> color_eyre::Result<CodexSession> {
-    let credential = resolve_credential(config)
+fn load_session(config: &AppConfig, connection: &str) -> color_eyre::Result<CodexSession> {
+    let credential = resolve_connection(config, connection)
         .map_err(|_| eyre!("Cannot open the saved OpenAI OAuth credential. Use /vault to unlock, then /connect."))?
         .ok_or_else(|| eyre!("No saved OpenAI OAuth connection. Use /connect, or `tcui auth login codex`."))?;
     let account_id = credential
@@ -196,15 +203,14 @@ fn load_session(config: &AppConfig) -> color_eyre::Result<CodexSession> {
 
 async fn refresh_session(
     config: &AppConfig,
-    source: CodexCredentialSource,
+    rejected_session: CodexSession,
+    connection: &str,
 ) -> color_eyre::Result<CodexSession> {
-    if source == CodexCredentialSource::TcuiNative {
-        let (cancellation, _) = oauth_cancellation();
-        CodexNativeAdapter::production()?
-            .refresh(config, &cancellation)
+    if rejected_session.source == CodexCredentialSource::TcuiNative {
+        refresh_rejected_codex_credential(config, connection, &rejected_session.access_token)
             .await?;
     }
-    load_session(config)
+    load_session(config, connection)
 }
 
 async fn codex_http_error<T>(

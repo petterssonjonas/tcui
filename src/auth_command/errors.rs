@@ -37,11 +37,11 @@ pub(super) fn map_native(error: CodexNativeError) -> AuthCommandError {
                 provider: AuthProvider::Codex,
             }
         }
-        CodexNativeError::Store(_) | CodexNativeError::LocalRemoval => {
-            AuthCommandError::CredentialStore {
-                provider: AuthProvider::Codex,
-            }
-        }
+        CodexNativeError::Store(_)
+        | CodexNativeError::LocalRemoval
+        | CodexNativeError::StaleRefresh => AuthCommandError::CredentialStore {
+            provider: AuthProvider::Codex,
+        },
         CodexNativeError::Configuration
         | CodexNativeError::MissingAccount
         | CodexNativeError::MissingExpiry

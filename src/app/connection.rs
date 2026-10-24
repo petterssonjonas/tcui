@@ -28,7 +28,7 @@ impl TuiApp {
         let provider = tab.tab.provider.clone();
         let provider_config = self.provider_config(&provider);
         let action_tx = self.action_tx.clone();
-        tokio::spawn(async move {
+        self.track_background_task(tokio::spawn(async move {
             let _ = action_tx.send(Action::SetConnectionState(
                 crate::ui::status_bar::ConnectionStatus::Checking,
                 Some("Checking connection...".to_string()),
@@ -111,7 +111,7 @@ impl TuiApp {
                     ));
                 }
             }
-        });
+        }));
     }
 
     pub(crate) fn local_probe_state(

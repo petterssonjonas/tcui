@@ -2,6 +2,7 @@
 use color_eyre::Result;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
+#[cfg(test)]
 use std::path::PathBuf;
 
 use crate::config::vault_profiles::{VaultProfile, VaultProfileId};
@@ -366,8 +367,11 @@ impl Default for AppConfig {
             disabled_models: Vec::new(),
             key_file: None,
             image_protocol: "auto".to_string(),
-            vaults: HashMap::new(),
-            default_vault_id: None,
+            vaults: {
+                let profile = VaultProfile::internal();
+                HashMap::from([(profile.id.clone(), profile)])
+            },
+            default_vault_id: Some(VaultProfileId::internal()),
             vault_operation_retention_days: 7,
             saved_files_dir: Some(default_artifact_save_dir()),
             show_saved_files: true,
@@ -415,10 +419,7 @@ impl Default for LocalInferenceConfig {
 }
 
 pub(crate) fn default_artifact_save_dir() -> String {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("tcui")
-        .join("artifacts")
+    crate::protection::internal_vault_root()
         .display()
         .to_string()
 }

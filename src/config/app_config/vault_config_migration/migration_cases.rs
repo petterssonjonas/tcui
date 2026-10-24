@@ -29,20 +29,33 @@ fn vault_config_migration_toml_and_json_legacy_inputs_produce_identical_stable_c
         AppConfig::load().expect("migrate JSON")
     };
 
-    assert_eq!(toml_config.vaults, json_config.vaults);
+    let external_profiles = |config: &AppConfig| {
+        config
+            .vaults
+            .iter()
+            .filter(|(id, _)| **id != VaultProfileId::internal())
+            .map(|(id, profile)| (id.clone(), profile.clone()))
+            .collect::<HashMap<_, _>>()
+    };
+    assert_eq!(
+        external_profiles(&toml_config),
+        external_profiles(&json_config)
+    );
+    assert!(toml_config.vaults.contains_key(&VaultProfileId::internal()));
+    assert!(json_config.vaults.contains_key(&VaultProfileId::internal()));
     assert_eq!(toml_config.default_vault_id, json_config.default_vault_id);
     assert_eq!(toml_config.saved_files_dir, json_config.saved_files_dir);
     std::fs::remove_dir_all(vault_root).expect("cleanup vault root");
 }
 
 #[test]
-fn vault_config_migration_first_profile_fallback_rewrites_only_once() {
+fn vault_config_migration_missing_default_selects_internal_and_rewrites_only_once() {
     let _guard = env_lock().lock().expect("env lock poisoned");
     let home = ConfigHome::new("vault-config-default-fallback");
     let vault_root = home.root.join("vault");
     std::fs::create_dir_all(&vault_root).expect("create vault root");
     let config = profile_config("First", &vault_root);
-    let expected_id = config.default_vault_id.clone();
+    let expected_id = Some(VaultProfileId::internal());
     let mut value: toml::Value = toml::from_str(&serialized_config(&config)).expect("parse TOML");
     value
         .as_table_mut()
@@ -80,6 +93,12 @@ fn vault_config_migration_visibility_flags_default_true() {
     assert!(config.show_saved_files);
     assert!(config.show_memories);
     assert!(config.show_markdown_vault);
+    assert_eq!(config.default_vault_id, Some(VaultProfileId::internal()));
+    assert_eq!(
+        config.vaults[&VaultProfileId::internal()].root,
+        crate::protection::internal_vault_root()
+    );
+    assert!(crate::protection::internal_vault_root().is_dir());
 }
 
 #[test]
@@ -168,5 +187,5 @@ fn vault_config_migration_nonempty_new_catalog_and_saved_dir_win_over_legacy() {
 
     assert_eq!(loaded.default_vault_id, expected_id);
     assert_eq!(loaded.saved_files_dir.as_deref(), Some("/new/saved"));
-    assert_eq!(loaded.vaults.len(), 1);
+    assert_eq!(loaded.vaults.len(), 2);
 }

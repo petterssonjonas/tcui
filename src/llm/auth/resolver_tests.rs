@@ -22,6 +22,7 @@ pub(super) struct NativeTestEnvironment {
     original_home: Option<OsString>,
     original_data_home: Option<OsString>,
     original_config_home: Option<OsString>,
+    original_cache_home: Option<OsString>,
 }
 
 impl NativeTestEnvironment {
@@ -35,9 +36,11 @@ impl NativeTestEnvironment {
         let original_home = std::env::var_os("HOME");
         let original_data_home = std::env::var_os("XDG_DATA_HOME");
         let original_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        let original_cache_home = std::env::var_os("XDG_CACHE_HOME");
         std::env::set_var("HOME", &root);
         std::env::set_var("XDG_DATA_HOME", root.join("data"));
         std::env::set_var("XDG_CONFIG_HOME", root.join("config"));
+        std::env::set_var("XDG_CACHE_HOME", root.join("cache"));
         KeyStore::initialize_vault(&AppConfig::default(), "resolver fixture password")
             .expect("initialize encrypted fixture vault");
         Self {
@@ -45,6 +48,7 @@ impl NativeTestEnvironment {
             original_home,
             original_data_home,
             original_config_home,
+            original_cache_home,
         }
     }
 
@@ -58,6 +62,7 @@ impl NativeTestEnvironment {
 
 impl Drop for NativeTestEnvironment {
     fn drop(&mut self) {
+        let _ = crate::protection::lock();
         match self.original_home.take() {
             Some(home) => std::env::set_var("HOME", home),
             None => std::env::remove_var("HOME"),
@@ -69,6 +74,10 @@ impl Drop for NativeTestEnvironment {
         match self.original_config_home.take() {
             Some(config_home) => std::env::set_var("XDG_CONFIG_HOME", config_home),
             None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match self.original_cache_home.take() {
+            Some(cache_home) => std::env::set_var("XDG_CACHE_HOME", cache_home),
+            None => std::env::remove_var("XDG_CACHE_HOME"),
         }
         let _ = std::fs::remove_dir_all(&self.root);
     }
