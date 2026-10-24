@@ -1,11 +1,9 @@
 #![allow(dead_code)]
 use color_eyre::Result;
 use serde::{Deserialize, Deserializer, Serialize};
-use std::collections::HashMap;
 #[cfg(test)]
 use std::path::PathBuf;
 
-use crate::config::vault_profiles::{VaultProfile, VaultProfileId};
 use crate::config::{McpServerConfig, WebSearchConfig};
 
 mod persistence;
@@ -271,17 +269,12 @@ pub struct AppConfig {
     pub disabled_models: Vec<String>,
     pub key_file: Option<String>,
     pub image_protocol: String,
-    pub vaults: HashMap<VaultProfileId, VaultProfile>,
-    pub default_vault_id: Option<VaultProfileId>,
-    pub vault_operation_retention_days: u64,
+    /// Legacy Saved directory used only by the one-time, source-preserving migration.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub saved_files_dir: Option<String>,
-    pub show_saved_files: bool,
     pub show_memories: bool,
-    pub show_markdown_vault: bool,
-    #[serde(skip)]
-    pub vault_path: Option<String>,
-    #[serde(skip)]
-    pub artifact_save_dir: Option<String>,
+    #[serde(alias = "show_markdown_vault")]
+    pub show_vault: bool,
     pub notifications: NotificationConfig,
     pub local_inference: LocalInferenceConfig,
     pub web_search: WebSearchConfig,
@@ -349,8 +342,6 @@ impl AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        let profile = VaultProfile::internal();
-        let saved_files_dir = profile.root.display().to_string();
         Self {
             theme: "system".to_string(),
             default_model: "gpt-4o".to_string(),
@@ -369,15 +360,9 @@ impl Default for AppConfig {
             disabled_models: Vec::new(),
             key_file: None,
             image_protocol: "auto".to_string(),
-            vaults: HashMap::from([(profile.id.clone(), profile)]),
-            default_vault_id: Some(VaultProfileId::internal()),
-            vault_operation_retention_days: 7,
-            saved_files_dir: Some(saved_files_dir.clone()),
-            show_saved_files: true,
+            saved_files_dir: None,
             show_memories: true,
-            show_markdown_vault: true,
-            vault_path: None,
-            artifact_save_dir: Some(saved_files_dir),
+            show_vault: true,
             notifications: NotificationConfig::default(),
             local_inference: LocalInferenceConfig::default(),
             web_search: WebSearchConfig::default(),

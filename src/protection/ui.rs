@@ -16,6 +16,7 @@ pub(crate) enum SecurityRestart {
     Unlock,
     InitializePassword,
     Lock,
+    Transfer(super::Domain),
 }
 
 fn password_required(policy: ProtectionPolicy, initialized: bool) -> bool {
@@ -69,6 +70,35 @@ pub(crate) async fn configure(
             && status.storage == crate::config::key_store::CredentialStorage::Encrypted,
         ..ProtectionPolicy::default()
     });
+    if !super::configured()? {
+        for domain in [super::Domain::Vault, super::Domain::Memories] {
+            #[cfg(not(feature = "memory"))]
+            if domain == super::Domain::Memories {
+                continue;
+            }
+            let inspection =
+                crate::storage::native_transfer::native_root(domain).and_then(|root| {
+                    crate::storage::native_transfer::NativeTransferService::prepare(
+                        domain,
+                        &root,
+                        crate::storage::native_transfer::TransferMode::Add,
+                    )
+                });
+            if let Ok(prepared) = inspection {
+                let encrypted = prepared.files.iter().chain(&prepared.adoption_files).any(|file| file.encrypted)
+                    || prepared.requirements.iter().any(|requirement| matches!(
+                        requirement, crate::storage::native_transfer::TransferRequirement::LegacySourceWrapping { .. }
+                    ));
+                if encrypted {
+                    match domain {
+                        super::Domain::Vault => policy.vault = true,
+                        super::Domain::Memories => policy.memories = true,
+                        super::Domain::Chats => {}
+                    }
+                }
+            }
+        }
+    }
     let mut password = Zeroizing::new(String::new());
     let mut confirmation = Zeroizing::new(String::new());
     let mut cursor = 0;
@@ -80,7 +110,7 @@ pub(crate) async fn configure(
                 "Unchecked data remains plaintext. An entry password alone does NOT encrypt it.",
             ),
             Line::from(
-                "External Markdown vaults remain plaintext; only the internal vault is selectable.",
+                "Vault and Memories are separate, app-owned stores. There are no external vaults.",
             ),
             Line::from(""),
         ];
@@ -165,12 +195,56 @@ pub(crate) async fn configure(
                             confirmation.zeroize();
                             cursor = 6;
                         } else {
-                            match super::configure(policy, password.as_str()) {
+                            let setup = match super::transfer_ui::prepare_configuration_sources(
+                                terminal,
+                                events,
+                                policy,
+                                password.as_str(),
+                            )
+                            .await
+                            {
+                                Ok(Some(_)) => super::configure(policy, password.as_str()),
+                                Ok(None) => {
+                                    error = "Source adoption cancelled. No new protection choices were applied.".into();
+                                    continue;
+                                }
+                                Err(failure) => Err(failure),
+                            };
+                            match setup {
                                 Ok(()) => return Ok(true),
                                 Err(failure) => {
                                     status = crate::config::KeyStore::vault_status(
                                         &crate::config::AppConfig::default(),
                                     )?;
+                                    if let Some(domain) = failure.chain().find_map(|cause| {
+                                        cause
+                                            .downcast_ref::<super::PortableUnlockNeeded>()
+                                            .map(|needed| needed.domain)
+                                    }) {
+                                        let local_ready = !super::configured()?
+                                            || super::is_unlocked()?
+                                            || super::unlock(password.as_str()).is_ok();
+                                        if local_ready {
+                                            match super::transfer_ui::unlock_native_sources(
+                                                terminal, events, domain,
+                                            )
+                                            .await
+                                            {
+                                                Ok(true) => {
+                                                    error = "Source files unlocked. Save the selected protection choices to continue.".into();
+                                                    continue;
+                                                }
+                                                Ok(false) => {}
+                                                Err(source_error) => {
+                                                    error = format!("Source unlock did not complete: {source_error}");
+                                                    password.zeroize();
+                                                    confirmation.zeroize();
+                                                    cursor = 5;
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                    }
                                     error = format!("Protection setup did not complete; unlock to recover if prompted: {failure}");
                                     password.zeroize();
                                     confirmation.zeroize();

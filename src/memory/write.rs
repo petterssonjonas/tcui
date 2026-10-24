@@ -31,6 +31,7 @@ impl MemoryStore {
         metadata: Option<MemoryMetadata>,
     ) -> Result<WriteOutcome, MemoryError> {
         crate::protection::require(crate::protection::Domain::Memories)?;
+        let _guard = self.lock_mutations()?;
         validate_markdown(markdown)?;
         if let Some(metadata) = &metadata {
             metadata.validate()?;
@@ -97,7 +98,7 @@ impl MemoryStore {
         markdown: &str,
         metadata: MemoryMetadata,
     ) -> Result<WriteOutcome, MemoryError> {
-        crate::protection::require(crate::protection::Domain::Memories)?;
+        self.require_native_policy()?;
         validate_markdown(markdown)?;
         metadata.validate()?;
         if likely_secret(markdown) {
@@ -121,18 +122,61 @@ impl MemoryStore {
 
     pub(crate) fn forget(&self, path: &Path) -> Result<PathBuf, MemoryError> {
         crate::protection::require(crate::protection::Domain::Memories)?;
+        let _guard = self.lock_mutations()?;
         let logical = self.paths.logical_path(path)?;
         let document = self
             .find_document_by_logical_path(&logical)?
             .ok_or_else(|| MemoryError::Invalid("memory path is unavailable".to_string()))?;
         let source = self.paths.active_document_path(document.id);
-        let destination = available_trash_path(self.paths.trash_document_path(document.id));
-        std::fs::rename(source, &destination)?;
-        self.sync()
-            .map_err(|error| MemoryError::RemovedButNotIndexed {
-                path: logical.to_string_lossy().into_owned(),
-                reason: error.to_string(),
-            })?;
+        self.trash_document(&source, &document)
+    }
+
+    pub(super) fn trash_document(
+        &self,
+        source: &Path,
+        document: &MemoryDocument,
+    ) -> Result<PathBuf, MemoryError> {
+        if source.parent() != Some(self.paths.root()) {
+            return Err(MemoryError::Invalid(
+                "memory source is outside the native root".to_string(),
+            ));
+        }
+        let name = source
+            .file_name()
+            .ok_or_else(|| MemoryError::Invalid("memory source has no filename".to_string()))?;
+        let (root, trash) = self.paths.directories()?;
+        if !root.symlink_metadata(name)?.is_file() {
+            return Err(MemoryError::Invalid(
+                "memory source is not a regular file".to_string(),
+            ));
+        }
+        let mut suffix = 0u64;
+        let destination_name = loop {
+            let candidate = if suffix == 0 {
+                format!("{:016x}.tcui-memory", document.id)
+            } else {
+                format!("{:016x}-{suffix}.tcui-memory", document.id)
+            };
+            match publish_trash(&root, name, &trash, std::ffi::OsStr::new(&candidate)) {
+                Ok(()) => break candidate,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    suffix = suffix.checked_add(1).ok_or_else(|| {
+                        MemoryError::Invalid("memory Trash name space is exhausted".to_string())
+                    })?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        let destination = self.paths.root().join(".trash").join(destination_name);
+        let repair = || -> Result<(), MemoryError> {
+            rustix::fs::fsync(&trash).map_err(std::io::Error::from)?;
+            rustix::fs::fsync(&root).map_err(std::io::Error::from)?;
+            self.sync()
+        };
+        repair().map_err(|error| MemoryError::RemovedButNotIndexed {
+            path: document.logical_path.to_string_lossy().into_owned(),
+            reason: error.to_string(),
+        })?;
         Ok(destination)
     }
 
@@ -183,7 +227,7 @@ impl MemoryStore {
     }
 }
 
-fn validate_markdown(markdown: &str) -> Result<(), MemoryError> {
+pub(super) fn validate_markdown(markdown: &str) -> Result<(), MemoryError> {
     if markdown.len() > 1024 * 1024 {
         return Err(MemoryError::Invalid(
             "memory Markdown exceeds the 1 MiB input limit".to_string(),
@@ -195,19 +239,29 @@ fn validate_markdown(markdown: &str) -> Result<(), MemoryError> {
     Ok(())
 }
 
-fn available_trash_path(path: PathBuf) -> PathBuf {
-    if !path.exists() {
-        return path;
+fn publish_trash(
+    root: &cap_std::fs::Dir,
+    name: &std::ffi::OsStr,
+    trash: &cap_std::fs::Dir,
+    destination: &std::ffi::OsStr,
+) -> std::io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    rustix::fs::renameat_with(
+        root,
+        name,
+        trash,
+        destination,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )?;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        // A hard link publishes without replacing any existing Trash entry.
+        // Persist that recovery copy before removing the active directory entry.
+        rustix::fs::linkat(root, name, trash, destination, rustix::fs::AtFlags::empty())?;
+        rustix::fs::fsync(trash)?;
+        rustix::fs::unlinkat(root, name, rustix::fs::AtFlags::empty())?;
     }
-    let stem = path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("memory");
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("md");
-    path.with_file_name(format!("{stem}-{:016x}.{extension}", rand::random::<u64>()))
+    Ok(())
 }
 
 fn memory_body(markdown: &str) -> &str {
@@ -280,6 +334,52 @@ pub(crate) fn likely_secret(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::likely_secret;
+
+    #[test]
+    fn concurrent_trash_publication_never_replaces_the_winner_or_removes_the_loser() {
+        use std::ffi::OsStr;
+
+        let path =
+            std::env::temp_dir().join(format!("tcui-memory-trash-race-{}", rand::random::<u64>()));
+        let root = crate::protection::open_native_directory(&path, true).expect("native root");
+        let trash =
+            crate::protection::open_native_directory(&path.join(".trash"), true).expect("Trash");
+        std::fs::write(path.join("first"), b"first source").expect("first source");
+        std::fs::write(path.join("second"), b"second source").expect("second source");
+        let gate = std::sync::Barrier::new(2);
+        let (first, second) = std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                gate.wait();
+                super::publish_trash(&root, OsStr::new("first"), &trash, OsStr::new("shared"))
+            });
+            let second = scope.spawn(|| {
+                gate.wait();
+                super::publish_trash(&root, OsStr::new("second"), &trash, OsStr::new("shared"))
+            });
+            (
+                first.join().expect("first publisher"),
+                second.join().expect("second publisher"),
+            )
+        });
+        let (winner, loser, failure) = match (first, second) {
+            (Ok(()), Err(error)) => ("first", "second", error),
+            (Err(error), Ok(())) => ("second", "first", error),
+            results => panic!("expected one winner: {results:?}"),
+        };
+        assert_eq!(failure.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(path.join(".trash/shared")).expect("winning recovery body"),
+            format!("{winner} source").as_bytes()
+        );
+        assert_eq!(
+            std::fs::read(path.join(loser)).expect("losing source retained"),
+            format!("{loser} source").as_bytes()
+        );
+        assert!(!path.join(winner).exists());
+        drop(trash);
+        drop(root);
+        std::fs::remove_dir_all(path).expect("fixture cleanup");
+    }
 
     #[test]
     fn credential_patterns_are_rejected_without_rejecting_preferences() {

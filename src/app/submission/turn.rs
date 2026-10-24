@@ -59,8 +59,14 @@ pub struct PreparedUserTurn {
 
 impl PreparedUserTurn {
     pub fn prepare(submission: &InputSubmission) -> Result<Self, PreparedUserTurnError> {
+        let document_count = submission.documents.iter().len();
+        let separators = if submission.instruction.is_empty() {
+            document_count.saturating_sub(1)
+        } else {
+            document_count
+        };
         let mut content = String::with_capacity(
-            submission.instruction.len() + submission.documents.total_bytes(),
+            submission.instruction.len() + submission.documents.total_bytes() + separators * 2,
         );
         if !submission.instruction.is_empty() {
             content.push_str(&submission.instruction);
@@ -72,7 +78,15 @@ impl PreparedUserTurn {
             if !content.is_empty() {
                 content.push_str("\n\n");
             }
+            if document.context_reference().is_some() {
+                content.push_str(document.display_name());
+                content.push('\n');
+            }
             content.push_str(document.content());
+            if let Some(reference) = document.context_reference() {
+                content.push('\n');
+                content.push_str(reference.closing_tag());
+            }
         }
         if content.is_empty() {
             return Err(PreparedUserTurnError::EmptyContent);

@@ -10,9 +10,6 @@ use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::OpenOptionsExt as _;
 use cap_std::fs::{Dir, OpenOptions};
 
-use crate::config::vault_profiles::{VaultCatalog, VaultProfileId};
-use crate::storage::paths::TcuiDataPaths;
-
 use super::backup::{BackupError, BackupState, BackupStore};
 use super::move_journal::{
     JournalStore, MoveJournalError, MoveJournalState, MoveJournalV1, MoveOperationId,
@@ -70,20 +67,16 @@ impl From<MoveJournalError> for MoveExecuteError {
 }
 
 pub(crate) struct MoveExecutor<'a> {
-    catalog: &'a VaultCatalog,
+    data_root: &'a Path,
     mutation_lock: VaultMutationLock,
     journals: JournalStore,
     backups: BackupStore,
 }
 
 impl<'a> MoveExecutor<'a> {
-    pub(crate) fn new(catalog: &'a VaultCatalog) -> Self {
-        Self::at_data_root(catalog, &TcuiDataPaths::discover().root)
-    }
-
-    pub(crate) fn at_data_root(catalog: &'a VaultCatalog, data_root: &Path) -> Self {
+    pub(crate) fn at_data_root(data_root: &'a Path) -> Self {
         Self {
-            catalog,
+            data_root,
             mutation_lock: VaultMutationLock::at_data_root(data_root),
             journals: JournalStore::at_data_root(data_root),
             backups: BackupStore::new(data_root.join("vault-backups")),
@@ -93,11 +86,41 @@ impl<'a> MoveExecutor<'a> {
     pub(crate) fn execute(&self, plan: MovePlan) -> Result<MoveExecutionOutcome, MoveExecuteError> {
         clear_test_events();
         let guard = self.mutation_lock.try_acquire()?;
+        self.item_store()
+            .require_native_adoption()
+            .map_err(|error| {
+                io_error(
+                    "adopt protected native store",
+                    self.data_root,
+                    io::Error::other(error),
+                )
+            })?;
         self.journals.ensure_mutation_allowed()?;
-        plan.revalidate(self.catalog)?;
+        plan.revalidate(self.data_root)?;
         self.reject_unapproved_collisions(&plan)?;
         maybe_fail(FailurePoint::JournalCreate)?;
         let mut journal = MoveJournalV1::planned(&plan);
+        if !plan.copy_only() {
+            let pairs = plan
+                .pairs()
+                .iter()
+                .map(|pair| {
+                    (
+                        pair.source().path().as_path().to_path_buf(),
+                        pair.destination().path().as_path().to_path_buf(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            journal.native_move = Some(self.item_store().prepare_native_moves(&pairs).map_err(
+                |error| {
+                    io_error(
+                        "prepare Vault item identities",
+                        self.data_root,
+                        io::Error::other(error.to_string()),
+                    )
+                },
+            )?);
+        }
         self.create_journal(&guard, &journal)?;
         match self.execute_guarded(&guard, &plan, &mut journal) {
             Ok(()) => Ok(MoveExecutionOutcome {
@@ -109,7 +132,7 @@ impl<'a> MoveExecutor<'a> {
                     return Err(error);
                 }
                 let operation_id = journal.operation_id.clone();
-                let rollback = MoveRollback::new(self.catalog, &self.journals, &self.backups)
+                let rollback = MoveRollback::new(self.data_root, &self.journals, &self.backups)
                     .rollback_guarded(&guard, &mut journal)
                     .and_then(|()| {
                         self.journals
@@ -153,7 +176,26 @@ impl<'a> MoveExecutor<'a> {
             }
         }
         self.complete_backups(guard, journal)?;
+        if let Some(snapshot) = &journal.native_move {
+            self.item_store()
+                .commit_native_moves(snapshot)
+                .map_err(|error| {
+                    io_error(
+                        "update Vault item identities",
+                        self.data_root,
+                        io::Error::other(error.to_string()),
+                    )
+                })?;
+            maybe_fail(FailurePoint::IdentityCommitted)?;
+        }
         self.transition(guard, journal, MoveJournalState::Complete)
+    }
+
+    fn item_store(&self) -> crate::storage::chat_files::ChatSavedFileStore {
+        crate::storage::chat_files::ChatSavedFileStore::new(
+            self.data_root.join("vault"),
+            crate::storage::paths::TcuiDataPaths::from_root(self.data_root.to_path_buf()),
+        )
     }
 
     fn reject_unapproved_collisions(&self, plan: &MovePlan) -> Result<(), MoveExecuteError> {
@@ -244,22 +286,18 @@ impl<'a> MoveExecutor<'a> {
             .into());
         }
         maybe_fail(FailurePoint::Backup)?;
-        let source_backup = self.backups.create_prepared(
-            &pair.source().profile_id().to_string(),
-            pair.source().path(),
-            Some(&source_bytes),
-        )?;
+        let source_backup = self
+            .backups
+            .create_prepared(pair.source().path(), Some(&source_bytes))?;
         journal.artifacts[index].source_backup_id = Some(source_backup);
         self.persist_artifacts(guard, journal)?;
 
         if plan.collisions()[index] == MoveCollision::ExplicitOverwrite {
             let destination_bytes = self.read_required(pair.destination())?;
             maybe_fail(FailurePoint::Backup)?;
-            let destination_backup = self.backups.create_prepared(
-                &pair.destination().profile_id().to_string(),
-                pair.destination().path(),
-                Some(&destination_bytes),
-            )?;
+            let destination_backup = self
+                .backups
+                .create_prepared(pair.destination().path(), Some(&destination_bytes))?;
             journal.artifacts[index].destination_backup_id = Some(destination_backup);
             self.persist_artifacts(guard, journal)?;
         }
@@ -278,14 +316,8 @@ impl<'a> MoveExecutor<'a> {
         let staged_path = staged_path(pair.destination().path(), &journal.operation_id, index)?;
         journal.artifacts[index].staged_path = Some(staged_path.clone());
         self.persist_artifacts(guard, journal)?;
-        let root = self.open_profile(pair.destination().profile_id())?;
-        let destination_root = &self
-            .catalog
-            .get(pair.destination().profile_id())
-            .ok_or_else(|| VaultWriteError::UnknownProfile {
-                profile_id: pair.destination().profile_id().to_string(),
-            })?
-            .root;
+        let root = self.open_root()?;
+        let destination_root = self.data_root.join("vault");
         let source_bytes = super::encode_root(
             &destination_root.join(pair.destination().path().as_path()),
             &source_bytes,
@@ -335,7 +367,7 @@ impl<'a> MoveExecutor<'a> {
                 .ok_or(MoveJournalError::Corrupt {
                     reason: "missing staged path",
                 })?;
-        let root = self.open_profile(pair.destination().profile_id())?;
+        let root = self.open_root()?;
         let (parent, staged_name) = open_parent(&root, staged_path.as_path(), false)?;
         let destination_name = final_name(pair.destination().path())?;
         maybe_fail(FailurePoint::DestinationRename)?;
@@ -363,7 +395,7 @@ impl<'a> MoveExecutor<'a> {
         index: usize,
     ) -> Result<(), MoveExecuteError> {
         let source = plan.pairs()[index].source();
-        let root = self.open_profile(source.profile_id())?;
+        let root = self.open_root()?;
         let (parent, name) = open_parent(&root, source.path().as_path(), false)?;
         record_event(TestEvent::SourceRemoveStarted);
         maybe_fail(FailurePoint::SourceRemove)?;
@@ -393,7 +425,7 @@ impl<'a> MoveExecutor<'a> {
     }
 
     fn read_required(&self, file: &VaultFileRef) -> Result<Vec<u8>, MoveExecuteError> {
-        let root = self.open_profile(file.profile_id())?;
+        let root = self.open_root()?;
         let (parent, name) = open_parent(&root, file.path().as_path(), false)?;
         let mut options = OpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);
@@ -413,32 +445,19 @@ impl<'a> MoveExecutor<'a> {
         opened
             .read_to_end(&mut bytes)
             .map_err(|source| io_error("read", file.path().as_path(), source))?;
-        let profile =
-            self.catalog
-                .get(file.profile_id())
-                .ok_or_else(|| VaultWriteError::UnknownProfile {
-                    profile_id: file.profile_id().to_string(),
-                })?;
-        super::decode_root(&profile.root.join(file.path().as_path()), bytes)
-            .map_err(|source| io_error("decrypt", file.path().as_path(), source))
+        super::decode_root(
+            &self.data_root.join("vault").join(file.path().as_path()),
+            bytes,
+        )
+        .map_err(|source| io_error("decrypt", file.path().as_path(), source))
     }
 
-    fn open_profile(&self, profile_id: &VaultProfileId) -> Result<Dir, MoveExecuteError> {
-        let profile =
-            self.catalog
-                .get(profile_id)
-                .ok_or_else(|| VaultWriteError::UnknownProfile {
-                    profile_id: profile_id.to_string(),
-                })?;
-        super::require_root(&profile.root)
-            .map_err(|source| io_error("unlock before accessing", &profile.root, source))?;
-        crate::protection::open_directory(&profile.root, false).map_err(|error| {
-            io_error(
-                "open profile",
-                &profile.root,
-                io::Error::other(error.to_string()),
-            )
-        })
+    fn open_root(&self) -> Result<Dir, MoveExecuteError> {
+        let root = self.data_root.join("vault");
+        super::require_root(&root)
+            .map_err(|source| io_error("unlock before accessing", &root, source))?;
+        crate::protection::open_directory(&root, false)
+            .map_err(|error| io_error("open Vault", &root, io::Error::other(error.to_string())))
     }
 }
 
@@ -565,6 +584,7 @@ enum FailurePoint {
     DestinationDirectorySync,
     SourceRemove,
     SourceDirectorySync,
+    IdentityCommitted,
 }
 
 #[cfg(not(test))]
@@ -607,6 +627,7 @@ impl FailurePoint {
             Self::DestinationDirectorySync => "destination directory sync",
             Self::SourceRemove => "source remove",
             Self::SourceDirectorySync => "source directory sync",
+            Self::IdentityCommitted => "identity committed",
         }
     }
 }
@@ -623,6 +644,7 @@ pub(crate) enum TestFailurePoint {
     DestinationDirectorySync,
     SourceRemove,
     SourceDirectorySync,
+    IdentityCommitted,
 }
 
 #[cfg(test)]
@@ -638,6 +660,7 @@ impl TestFailurePoint {
             Self::DestinationDirectorySync => "destination-directory-sync",
             Self::SourceRemove => "source-remove",
             Self::SourceDirectorySync => "source-directory-sync",
+            Self::IdentityCommitted => "identity-committed",
         }
     }
 }
@@ -654,6 +677,7 @@ pub(crate) fn inject_failure(point: TestFailurePoint) {
         TestFailurePoint::DestinationDirectorySync => FailurePoint::DestinationDirectorySync,
         TestFailurePoint::SourceRemove => FailurePoint::SourceRemove,
         TestFailurePoint::SourceDirectorySync => FailurePoint::SourceDirectorySync,
+        TestFailurePoint::IdentityCommitted => FailurePoint::IdentityCommitted,
     };
     FAILURE_POINT.with(|configured| *configured.borrow_mut() = Some(point));
 }

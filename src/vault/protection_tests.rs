@@ -3,10 +3,7 @@ use std::path::{Path, PathBuf};
 use super::move_execute::MoveExecutor;
 use super::move_journal::JournalStore;
 use super::move_plan::{MovePair, MovePlan, VaultFileRef};
-use super::{
-    VaultFs, VaultProfileRegistration, VaultRelativePath, VaultWalkLimits, VaultWriteService,
-};
-use crate::config::vault_profiles::{VaultCatalog, VaultProfile, VaultProfileId};
+use super::{VaultFs, VaultRelativePath, VaultWalkLimits, VaultWriteService};
 use crate::protection::{self, Domain, ProtectionPolicy};
 use crate::storage::chat_files::ChatSavedFileStore;
 
@@ -56,32 +53,20 @@ fn relative(path: &str) -> VaultRelativePath {
 }
 
 #[test]
-fn internal_vault_migration_saved_media_backups_and_cross_profile_moves_obey_protection() {
+fn native_saved_media_backups_and_moves_obey_protection() {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock");
     let environment = Environment::new();
-    let legacy = environment.root.join("legacy-saved");
+    let root = protection::internal_vault_root();
+    std::fs::create_dir_all(&root).expect("native root");
+    std::fs::write(root.join("existing.md"), b"existing native content").expect("native file");
     let external = environment.root.join("external-vault");
-    std::fs::create_dir_all(&legacy).expect("legacy saved root");
-    std::fs::create_dir_all(&external).expect("external vault");
-    std::fs::write(legacy.join("existing.md"), b"existing saved content").expect("old file");
-    std::fs::write(external.join("ordinary.md"), b"external plaintext").expect("external fixture");
-    std::fs::create_dir_all(legacy.join("nested")).expect("old nested directory");
-    std::fs::write(legacy.join("nested/download.bin"), b"nested saved bytes")
-        .expect("old nested file");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(external.join("ordinary.md"), legacy.join("escape.md"))
-        .expect("source symlink");
-    let external_profile = VaultProfile::new("External", &external).expect("external profile");
-    let mut config = crate::config::AppConfig {
-        saved_files_dir: Some(legacy.display().to_string()),
-        ..crate::config::AppConfig::default()
-    };
-    config
-        .vaults
-        .insert(external_profile.id.clone(), external_profile.clone());
-    config.save().expect("isolated config");
+    std::fs::create_dir_all(&external).expect("external fixture");
+    std::fs::write(external.join("ordinary.md"), b"external plaintext").expect("external sentinel");
+    crate::config::AppConfig::default()
+        .save()
+        .expect("isolated config");
     protection::configure(
         ProtectionPolicy {
             vault: true,
@@ -90,35 +75,17 @@ fn internal_vault_migration_saved_media_backups_and_cross_profile_moves_obey_pro
         "vault-test-password",
     )
     .expect("configure");
-    let root = protection::internal_vault_root();
     assert_eq!(
-        protection::read(Domain::Vault, &root.join("existing.md")).expect("migrated data"),
-        b"existing saved content"
+        protection::read(Domain::Vault, &root.join("existing.md")).expect("native data"),
+        b"existing native content"
     );
     assert_ne!(
-        std::fs::read(root.join("existing.md")).expect("encrypted old file"),
-        b"existing saved content"
+        std::fs::read(root.join("existing.md")).expect("ciphertext"),
+        b"existing native content"
     );
     assert_eq!(
-        std::fs::read(legacy.join("existing.md")).expect("external saved source retained"),
-        b"existing saved content"
-    );
-    assert_eq!(
-        std::fs::read(external.join("ordinary.md")).expect("external untouched"),
+        std::fs::read(external.join("ordinary.md")).expect("external sentinel"),
         b"external plaintext"
-    );
-    assert_eq!(
-        protection::read(Domain::Vault, &root.join("nested/download.bin"))
-            .expect("nested migration"),
-        b"nested saved bytes"
-    );
-    assert_ne!(
-        std::fs::read(root.join("nested/download.bin")).expect("nested ciphertext"),
-        b"nested saved bytes"
-    );
-    assert!(
-        !root.join("escape.md").exists(),
-        "migration never follows source symlinks"
     );
 
     let saved = ChatSavedFileStore::discover();
@@ -132,30 +99,65 @@ fn internal_vault_migration_saved_media_backups_and_cross_profile_moves_obey_pro
         payload
     );
     let data = crate::storage::paths::TcuiDataPaths::discover();
-    let manifest = std::fs::read(&data.chat_file_links_manifest).expect("link manifest");
-    assert!(serde_json::from_slice::<serde_json::Value>(&manifest).is_err());
+    assert!(serde_json::from_slice::<serde_json::Value>(
+        &std::fs::read(&data.chat_file_links_manifest).expect("manifest ciphertext")
+    )
+    .is_err());
 
-    let id = VaultProfileId::internal();
-    let service = VaultWriteService::new([
-        VaultProfileRegistration::new(id.clone(), root.clone()),
-        VaultProfileRegistration::new(external_profile.id.clone(), external.clone()),
-    ])
-    .expect("service");
+    let trash_payload = b"private Trash media bytes";
+    let trash_item = saved
+        .create_item("trash.bin", trash_payload, Some(9))
+        .expect("Trash fixture");
+    saved
+        .trash_item(trash_item.id)
+        .expect("move item to protected Trash");
+    assert!(!trash_item.path.exists());
+    let manifest_bytes =
+        protection::read(Domain::Vault, &data.chat_file_links_manifest).expect("decoded manifest");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest_bytes).expect("manifest JSON");
+    let archived = manifest["items"]
+        .as_array()
+        .expect("item index")
+        .iter()
+        .find(|item| item["id"].as_u64() == Some(trash_item.id.get()))
+        .expect("stable trashed ID");
+    assert_eq!(archived["state"]["status"], "trashed");
+    assert_eq!(archived["archived_links"][0]["conversation_id"], 9);
+    let trash_path = root.join(
+        archived["state"]["trash_path"]
+            .as_str()
+            .expect("Trash path"),
+    );
+    assert_ne!(
+        std::fs::read(&trash_path).expect("Trash ciphertext"),
+        trash_payload
+    );
+    assert_eq!(
+        protection::read(Domain::Vault, &trash_path).expect("decoded Trash body"),
+        trash_payload
+    );
+    assert!(serde_json::from_slice::<serde_json::Value>(
+        &std::fs::read(&data.chat_file_links_manifest).expect("protected Trash manifest")
+    )
+    .is_err());
+
+    let service = VaultWriteService::new().expect("service");
     let first = service
-        .write(&id, &relative("existing.md"), b"replacement")
+        .write(&relative("existing.md"), b"replacement")
         .expect("protected write");
     assert!(service
-        .validate_editor_target(&id, &relative("existing.md"))
+        .validate_editor_target(&relative("existing.md"))
         .is_err());
     service
-        .restore(&id, &relative("existing.md"), &first.backup_id)
+        .restore(&relative("existing.md"), &first.backup_id)
         .expect("restore decoded backup");
     assert_eq!(
-        VaultFs::open_profile(&root)
-            .expect("vault")
+        VaultFs::open(&root)
+            .expect("Vault")
             .read_text(&relative("existing.md"))
             .expect("restored"),
-        "existing saved content"
+        "existing native content"
     );
     let backup = data
         .root
@@ -163,69 +165,51 @@ fn internal_vault_migration_saved_media_backups_and_cross_profile_moves_obey_pro
         .join(first.backup_id.as_str());
     assert_ne!(
         std::fs::read(backup.join("original.bin")).expect("backup ciphertext"),
-        b"existing saved content"
+        b"existing native content"
     );
     assert!(serde_json::from_slice::<serde_json::Value>(
         &std::fs::read(backup.join("envelope.json")).expect("metadata ciphertext")
     )
     .is_err());
 
-    let catalog = VaultCatalog {
-        profiles: config.vaults,
-        default_id: Some(id.clone()),
-    };
-    let outgoing = MovePlan::build(
+    let transfer = MovePlan::build(
         vec![MovePair::new(
-            VaultFileRef::new(id.clone(), relative("existing.md")),
-            VaultFileRef::new(external_profile.id.clone(), relative("exported.md")),
+            VaultFileRef::new(relative("existing.md")),
+            VaultFileRef::new(relative("archive/moved.md")),
             false,
         )],
-        &catalog,
+        &data.root,
         |_| false,
     )
-    .expect("outgoing move plan");
-    let outcome = MoveExecutor::new(&catalog)
-        .execute(outgoing)
-        .expect("decode external move");
-    assert_eq!(
-        std::fs::read(external.join("exported.md")).expect("explicit plaintext destination"),
-        b"existing saved content"
-    );
+    .expect("native plan");
+    let outcome = MoveExecutor::at_data_root(&data.root)
+        .execute(transfer)
+        .expect("protected native move");
     assert!(!root.join("existing.md").exists());
-    let journal_path = data
+    assert_eq!(
+        protection::read(Domain::Vault, &root.join("archive/moved.md"))
+            .expect("moved native content"),
+        b"existing native content"
+    );
+    assert_ne!(
+        std::fs::read(root.join("archive/moved.md")).expect("moved ciphertext"),
+        b"existing native content"
+    );
+    let journal = data
         .root
-        .join("vault-ops")
+        .join("vault-native-ops")
         .join(outcome.operation_id.as_str())
         .join("journal.json");
     assert!(serde_json::from_slice::<serde_json::Value>(
-        &std::fs::read(journal_path).expect("journal ciphertext")
+        &std::fs::read(journal).expect("journal ciphertext")
     )
     .is_err());
-    let incoming = MovePlan::build(
-        vec![MovePair::new(
-            VaultFileRef::new(external_profile.id.clone(), relative("ordinary.md")),
-            VaultFileRef::new(id.clone(), relative("imported.md")),
-            false,
-        )],
-        &catalog,
-        |_| false,
-    )
-    .expect("incoming move plan");
-    MoveExecutor::new(&catalog)
-        .execute(incoming)
-        .expect("encode internal move");
-    assert_ne!(
-        std::fs::read(root.join("imported.md")).expect("encrypted imported file"),
-        b"external plaintext"
-    );
-    assert_eq!(
-        protection::read(Domain::Vault, &root.join("imported.md")).expect("decoded import"),
-        b"external plaintext"
-    );
 
-    let open_handle = VaultFs::open_profile(&root).expect("open handle");
+    let open_handle = VaultFs::open(&root).expect("open handle");
     protection::lock().expect("lock");
-    assert!(open_handle.read_text(&relative("imported.md")).is_err());
+    assert!(open_handle
+        .read_text(&relative("archive/moved.md"))
+        .is_err());
     assert!(open_handle.list(None, VaultWalkLimits::default()).is_err());
     assert!(saved.open_link(7, link.id).is_err());
     assert!(saved.list_saved().is_err());
@@ -233,67 +217,18 @@ fn internal_vault_migration_saved_media_backups_and_cross_profile_moves_obey_pro
         .load(&outcome.operation_id)
         .is_err());
     assert!(service
-        .restore(&id, &relative("existing.md"), &first.backup_id)
+        .restore(&relative("existing.md"), &first.backup_id)
         .is_err());
     assert!(protection::unlock("wrong-password").is_err());
     assert!(saved.open_link(7, link.id).is_err());
     assert_eq!(
-        VaultFs::open_profile(&external)
-            .expect("external handle")
-            .read_text(&relative("exported.md"))
-            .expect("external remains available"),
-        "existing saved content"
+        std::fs::read(external.join("ordinary.md")).expect("external untouched"),
+        b"external plaintext"
     );
     protection::unlock("vault-test-password").expect("unlock");
     assert_eq!(
         saved.open_link(7, link.id).expect("binary round trip"),
         payload
-    );
-}
-
-#[test]
-fn saved_file_relocation_preserves_conflicts_and_restarts_without_deleting_sources() {
-    let _guard = crate::test_support::env_lock()
-        .lock()
-        .expect("environment lock");
-    let environment = Environment::new();
-    let mut config = crate::config::AppConfig::load().expect("isolated config");
-    let source = environment.root.join("old-saved");
-    std::fs::create_dir_all(&source).expect("old saved directory");
-    std::fs::write(source.join("note.md"), b"source data").expect("old saved file");
-    let destination = protection::internal_vault_root().join("note.md");
-    std::fs::write(&destination, b"different destination").expect("conflict");
-    config.saved_files_dir = Some(source.display().to_string());
-    let result = crate::storage::saved_file_migration::migrate_saved_files(&config);
-    assert!(matches!(
-        result,
-        Err(crate::storage::saved_file_migration::MigrationError::Conflict { .. })
-    ));
-    assert_eq!(
-        std::fs::read(source.join("note.md")).expect("source retained"),
-        b"source data"
-    );
-    assert_eq!(
-        std::fs::read(&destination).expect("destination retained"),
-        b"different destination"
-    );
-    let marker = crate::storage::paths::TcuiDataPaths::discover()
-        .migrations_dir
-        .join("saved-internal-vault-v1.done");
-    assert!(
-        !marker.exists(),
-        "conflicts must not publish migration completion"
-    );
-    std::fs::remove_file(&destination).expect("resolve isolated fixture conflict");
-    crate::storage::saved_file_migration::migrate_saved_files(&config).expect("retry");
-    crate::storage::saved_file_migration::migrate_saved_files(&config).expect("idempotent restart");
-    assert_eq!(
-        std::fs::read(&destination).expect("copied file"),
-        b"source data"
-    );
-    assert_eq!(
-        std::fs::read(source.join("note.md")).expect("original still retained"),
-        b"source data"
     );
 }
 

@@ -4,9 +4,8 @@ use std::sync::Mutex;
 
 mod chat_file_sidebar;
 mod insert_to_chat;
-mod markdown_vault_workspace_ui;
 mod model_catalog;
-mod vault_profile_picker_mouse;
+mod vault_workspace_ui;
 
 fn env_lock() -> &'static Mutex<()> {
     crate::test_support::env_lock()
@@ -53,16 +52,8 @@ impl Drop for AppFixtureEnvironment {
     }
 }
 
-pub(crate) fn with_test_app_config(
-    label: &str,
-    mut config: AppConfig,
-    test: impl FnOnce(&mut TuiApp),
-) {
+pub(crate) fn with_test_app_config(label: &str, config: AppConfig, test: impl FnOnce(&mut TuiApp)) {
     let _guard = env_lock().lock().expect("env lock poisoned");
-    let previous_internal = config
-        .vaults
-        .get(&crate::config::vault_profiles::VaultProfileId::internal())
-        .map(|profile| profile.root.clone());
     let root = unique_temp_dir(label);
     let data_home = root.join("data-home");
     let config_home = root.join("config-home");
@@ -81,22 +72,6 @@ pub(crate) fn with_test_app_config(
     std::env::set_var("XDG_CONFIG_HOME", &config_home);
     std::env::set_var("XDG_CACHE_HOME", &cache_home);
     std::env::set_var("HOME", &home);
-    let internal = crate::config::vault_profiles::VaultProfile::internal();
-    if config.saved_files_dir.as_deref().map(std::path::Path::new) == previous_internal.as_deref() {
-        config.saved_files_dir = Some(internal.root.display().to_string());
-    }
-    if config.vault_path.as_deref().map(std::path::Path::new) == previous_internal.as_deref() {
-        config.vault_path = Some(internal.root.display().to_string());
-    }
-    if config
-        .artifact_save_dir
-        .as_deref()
-        .map(std::path::Path::new)
-        == previous_internal.as_deref()
-    {
-        config.artifact_save_dir = Some(internal.root.display().to_string());
-    }
-    config.vaults.insert(internal.id.clone(), internal);
 
     let storage = Storage::new().expect("create storage");
     if !config.providers.is_empty() {
@@ -114,7 +89,6 @@ pub(crate) fn with_test_app_config(
         storage,
         Arc::new(tokio::sync::RwLock::new(config)),
         Arc::new(LlmClient::new()),
-        None,
     );
     test(&mut app);
 }
@@ -226,55 +200,9 @@ fn mouse_wheel_over_sidebar_reaches_bottom_conversation() {
 }
 
 #[test]
-fn top_bar_add_control_opens_placeholder_tab() {
-    with_test_app("app-tab-add", |app| {
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24))
-            .expect("test terminal");
-        terminal
-            .draw(|frame| app.ui.render(frame))
-            .expect("render top bar");
-        let add_area = app
-            .ui
-            .mouse_hit_areas
-            .iter()
-            .find_map(|(area, action)| {
-                matches!(action, crate::ui::MouseAction::AppTabAdd).then_some(*area)
-            })
-            .expect("app tab add hit area");
-
-        let action = app.handle_mouse_click(add_area.x, add_area.y);
-
-        assert!(action.is_none());
-        assert_eq!(
-            app.ui.app_tabs.active_view(),
-            crate::ui::app_tabs::AppView::Placeholder { number: 1 }
-        );
-    });
-}
-
-#[test]
-fn ctrl_t_creates_visible_placeholder_without_changing_chat_sessions() {
-    with_test_app("app-tab-shortcut", |app| {
-        let chat_session_count = app.ui.tabs.len();
-
-        let action = app.handle_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('t'),
-            crossterm::event::KeyModifiers::CONTROL,
-        ));
-
-        assert!(action.is_none());
-        assert_eq!(app.ui.tabs.len(), chat_session_count);
-        assert_eq!(
-            app.ui.app_tabs.active_view(),
-            crate::ui::app_tabs::AppView::Placeholder { number: 1 }
-        );
-    });
-}
-
-#[test]
 fn ctrl_w_closes_placeholder_but_never_chat_app_tab() {
     with_test_app("app-tab-close-shortcut", |app| {
-        app.ui.app_tabs.add_placeholder();
+        app.ui.app_tabs.add_launcher();
 
         app.handle_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char('w'),
@@ -345,7 +273,7 @@ fn focus_input_command_restores_chat_focus_from_sidebar() {
 #[test]
 fn focus_input_command_returns_placeholder_to_chat() {
     with_test_app("focus-input-placeholder", |app| {
-        app.ui.app_tabs.add_placeholder();
+        app.ui.app_tabs.add_launcher();
         app.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
         for c in "focus input".chars() {
             app.handle_key(crossterm::event::KeyEvent::new(
@@ -643,69 +571,6 @@ fn local_media_sources_finds_file_links_and_skips_duplicates() {
 }
 
 #[test]
-fn find_artifact_searches_all_catalogs() {
-    with_test_app("find-artifact", |app| {
-        // Given
-        let root = unique_temp_dir("artifact-catalog");
-        let saved = root.join("saved.md");
-        let memory = root.join("memory.md");
-        let vault_root = root.join("vault");
-        let vault_file = vault_root.join("notes/vault.md");
-        std::fs::create_dir_all(vault_file.parent().expect("vault parent"))
-            .expect("create vault dirs");
-        std::fs::write(&saved, "# Saved").expect("write saved artifact");
-        std::fs::write(&memory, "# Memory").expect("write memory artifact");
-        std::fs::write(&vault_file, "# Vault").expect("write vault artifact");
-
-        let temporary = crate::ui::artifact_sidebar::ArtifactEntry::temp_markdown(
-            42,
-            "temp.md".to_string(),
-            "# Temp".to_string(),
-        );
-        let saved_entry = crate::ui::artifact_sidebar::ArtifactEntry::saved_file(saved.clone());
-        let memory_entry = crate::ui::artifact_sidebar::ArtifactEntry::memory_file(
-            std::path::PathBuf::from("memory.md"),
-            "Memory note".to_string(),
-            "# Memory".to_string(),
-            memory,
-        );
-        let vault_entry =
-            crate::ui::artifact_sidebar::ArtifactEntry::vault_file(&vault_root, &vault_file);
-
-        app.ui.tabs[app.ui.active_tab]
-            .temporary_artifacts
-            .push(temporary.clone());
-        app.ui.saved_artifacts.push(saved_entry.clone());
-        app.ui.memory_artifacts.push(memory_entry.clone());
-        app.ui.vault_artifacts.push(vault_entry.clone());
-
-        // When / Then
-        assert_eq!(
-            app.find_artifact(&temporary.handle)
-                .map(|artifact| artifact.name),
-            Some("temp.md".to_string())
-        );
-        assert_eq!(
-            app.find_artifact(&saved_entry.handle)
-                .map(|artifact| artifact.name),
-            Some("saved.md".to_string())
-        );
-        assert_eq!(
-            app.find_artifact(&memory_entry.handle)
-                .map(|artifact| artifact.name),
-            Some("Memory note".to_string())
-        );
-        assert_eq!(
-            app.find_artifact(&vault_entry.handle)
-                .map(|artifact| artifact.name),
-            Some("notes/vault.md".to_string())
-        );
-
-        std::fs::remove_dir_all(root).expect("cleanup artifact catalog");
-    });
-}
-
-#[test]
 fn startup_uses_saved_default_provider_and_model() {
     let _guard = env_lock().lock().expect("env lock poisoned");
     let root = unique_temp_dir("startup-defaults");
@@ -742,7 +607,6 @@ default_model = "deepseek-v4-flash"
         storage,
         Arc::new(tokio::sync::RwLock::new(config)),
         Arc::new(LlmClient::new()),
-        None,
     );
 
     assert_eq!(app.ui.tabs[0].tab.provider, "OpenCode Go");
@@ -824,7 +688,6 @@ selected_model = "llama3.1"
             AppConfig::load().expect("load config"),
         )),
         Arc::new(LlmClient::new()),
-        None,
     );
 
     assert!(app
@@ -844,54 +707,53 @@ selected_model = "llama3.1"
 }
 
 #[test]
-fn startup_expands_tilde_vault_path_with_spaces_and_trailing_slash() {
+fn startup_ignores_legacy_external_vault_path_without_importing_or_mutating_notes() {
     let _guard = env_lock().lock().expect("env lock poisoned");
-    let root = unique_temp_dir("startup-vault-tilde");
+    let root = unique_temp_dir("startup-native-vault");
     let home = root.join("home");
     let data_home = root.join("data-home");
     let config_home = root.join("config-home");
-    let vault = home.join("Documents/Obsidian Vault");
-    std::fs::create_dir_all(&vault).expect("create vault dir");
-    std::fs::create_dir_all(&data_home).expect("create data dir");
-    std::fs::create_dir_all(&config_home).expect("create config dir");
-    std::fs::create_dir_all(config_home.join("tcui")).expect("create tcui config dir");
-    std::fs::write(vault.join("index.md"), "# Index").expect("write vault note");
-    std::env::set_var("HOME", &home);
-    std::env::set_var("XDG_DATA_HOME", &data_home);
-    std::env::set_var("XDG_CONFIG_HOME", &config_home);
-
+    let cache_home = root.join("cache-home");
+    let _environment = AppFixtureEnvironment {
+        root,
+        previous: ["XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "HOME"]
+            .map(|name| (name, std::env::var_os(name))),
+    };
+    let external = home.join("Documents/External Vault");
+    std::fs::create_dir_all(&external).expect("create external directory");
+    std::fs::create_dir_all(config_home.join("tcui")).expect("create config directory");
+    std::fs::create_dir_all(&data_home).expect("create data directory");
+    std::fs::create_dir_all(&cache_home).expect("create cache directory");
+    std::fs::write(external.join("index.md"), b"external note").expect("write external sentinel");
+    for (name, path) in [
+        ("HOME", &home),
+        ("XDG_DATA_HOME", &data_home),
+        ("XDG_CONFIG_HOME", &config_home),
+        ("XDG_CACHE_HOME", &cache_home),
+    ] {
+        std::env::set_var(name, path);
+    }
     std::fs::write(
-        config_home.join("tcui").join("config.toml"),
-        "vault_path = \"~/Documents/Obsidian Vault/\"\n",
+        config_home.join("tcui/config.toml"),
+        "vault_path = \"~/Documents/External Vault/\"\n",
     )
-    .expect("write config");
+    .expect("write legacy config");
 
-    let storage = Storage::new().expect("create storage");
-    let config = AppConfig::load().expect("load config");
-    let vault_handle = config.vault_path.as_ref().and_then(|path| {
-        let expanded = crate::app::generated_file::expand_user_path(
-            std::path::Path::new(path),
-            dirs::home_dir().as_deref(),
-        );
-        let vault = crate::obsidian::Vault::new(expanded);
-        vault.exists().then(|| Arc::new(vault))
-    });
-
+    let config = AppConfig::load().expect("load migrated config");
     let app = TuiApp::new(
-        storage,
+        Storage::new().expect("create storage"),
         Arc::new(tokio::sync::RwLock::new(config)),
         Arc::new(LlmClient::new()),
-        vault_handle,
     );
 
-    assert!(app.vault.is_some());
-    assert_eq!(app.ui.vault_artifacts.len(), 1);
-    assert_eq!(app.ui.vault_artifacts[0].name, "index.md");
-
-    std::fs::remove_dir_all(&root).expect("cleanup temp dir");
-    std::env::remove_var("HOME");
-    std::env::remove_var("XDG_DATA_HOME");
-    std::env::remove_var("XDG_CONFIG_HOME");
+    assert_eq!(
+        std::fs::read(external.join("index.md")).expect("external note retained"),
+        b"external note"
+    );
+    assert!(!crate::protection::internal_vault_root()
+        .join("index.md")
+        .exists());
+    drop(app);
 }
 
 #[test]
@@ -1297,7 +1159,6 @@ fn startup_loads_persisted_conversation_history() {
         storage,
         Arc::new(tokio::sync::RwLock::new(AppConfig::default())),
         Arc::new(LlmClient::new()),
-        None,
     );
 
     assert_eq!(app.ui.tabs[0].active_conversation, conversation_id);
@@ -1355,7 +1216,6 @@ fn closing_active_chat_deletes_it_and_loads_the_next_persisted_conversation() {
         storage,
         Arc::new(tokio::sync::RwLock::new(AppConfig::default())),
         Arc::new(LlmClient::new()),
-        None,
     );
     assert_eq!(app.ui.tabs[0].active_conversation, second);
 
@@ -1707,29 +1567,25 @@ fn move_input_cursor_respects_content_bounds() {
 }
 
 #[test]
-fn refresh_vault_artifacts_uses_configured_path_without_runtime_vault() {
+fn refresh_vault_artifacts_uses_only_native_vault() {
     let _guard = env_lock().lock().expect("env lock poisoned");
     let root = unique_temp_dir("configured-vault-sidebar");
     let data_home = root.join("data-home");
     let config_home = root.join("config-home");
-    let vault = root.join("My Vault");
     std::fs::create_dir_all(&data_home).expect("create data dir");
     std::fs::create_dir_all(&config_home).expect("create config dir");
-    std::fs::create_dir_all(&vault).expect("create vault dir");
-    std::fs::write(vault.join("note.md"), "# Note").expect("write vault note");
     std::env::set_var("XDG_DATA_HOME", &data_home);
     std::env::set_var("XDG_CONFIG_HOME", &config_home);
+    let vault = crate::protection::internal_vault_root();
+    std::fs::create_dir_all(&vault).expect("create native Vault");
+    std::fs::write(vault.join("note.md"), "# Note").expect("write native note");
 
-    let config = AppConfig {
-        vault_path: Some(vault.to_string_lossy().to_string()),
-        ..AppConfig::default()
-    };
+    let config = AppConfig::default();
     let storage = Storage::new().expect("create storage");
     let mut app = TuiApp::new(
         storage,
         Arc::new(tokio::sync::RwLock::new(config)),
         Arc::new(crate::llm::LlmClient::new()),
-        None,
     );
 
     app.refresh_vault_artifacts();
@@ -1744,7 +1600,7 @@ fn refresh_vault_artifacts_uses_configured_path_without_runtime_vault() {
 
 #[cfg(feature = "memory")]
 #[test]
-fn refresh_memory_artifacts_uses_independent_store_with_external_vault_selected() {
+fn refresh_memory_artifacts_uses_independent_store_and_preserves_external_files() {
     let _guard = env_lock().lock().expect("env lock poisoned");
     let root = unique_temp_dir("memory-independent-vault");
     let home = root.join("home");
@@ -1770,7 +1626,6 @@ fn refresh_memory_artifacts_uses_independent_store_with_external_vault_selected(
 
     let mut config = AppConfig::default();
     config.memory.enabled = true;
-    config.vault_path = Some("~/Documents/My Vault/".to_string());
     config.save().expect("save config");
 
     let storage = Storage::new().expect("create storage");
@@ -1778,7 +1633,6 @@ fn refresh_memory_artifacts_uses_independent_store_with_external_vault_selected(
         storage,
         Arc::new(tokio::sync::RwLock::new(config)),
         Arc::new(crate::llm::LlmClient::new()),
-        None,
     );
 
     let store = crate::memory::MemoryStore::open_default().expect("open independent memory store");
@@ -1790,24 +1644,29 @@ fn refresh_memory_artifacts_uses_independent_store_with_external_vault_selected(
         )
         .expect("save memory");
 
-    app.refresh_memory_artifacts();
-
+    app.refresh_memory_artifacts()
+        .expect("refresh memory catalog");
+    let entry = &app.ui.memory_artifacts[0];
+    let handle = entry.handle.clone();
+    app.insert_artifact_to_chat(handle);
+    let snapshot = app
+        .pending_documents_mut()
+        .iter()
+        .next()
+        .expect("selected native memory");
     assert!(matches!(
-        app.ui.memory_artifacts.as_slice(),
-        [crate::ui::artifact_sidebar::ArtifactEntry {
-            handle: crate::ui::artifact_sidebar::ArtifactHandle::Memory(path),
-            ..
-        }] if path == std::path::Path::new("preferences.md")
+        snapshot.context_reference(),
+        Some(crate::app::submission::ContextReference::Memory(_))
     ));
-    assert!(app.ui.memory_artifacts[0]
-        .path
-        .as_ref()
-        .expect("physical memory path")
-        .starts_with(crate::storage::paths::TcuiDataPaths::discover().memories_dir));
+    assert!(snapshot
+        .content()
+        .contains("User prefers dark mode for coding."));
     assert_eq!(
         std::fs::read(vault.join("preferences.md")).expect("external file unchanged"),
         b"external note is not a memory"
     );
+    drop(store);
+    drop(app);
 
     std::fs::remove_dir_all(&root).expect("cleanup temp dir");
     for (name, previous) in previous {

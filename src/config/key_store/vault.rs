@@ -64,6 +64,35 @@ pub(super) struct Vault {
     path: PathBuf,
 }
 
+/// Password-wrapped application data key only. This contains no provider records.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ProtectionWrapping {
+    pub(crate) salt: [u8; 16],
+    pub(crate) nonce: [u8; 12],
+    pub(crate) ciphertext: [u8; 48],
+}
+
+impl ProtectionWrapping {
+    /// The portable format fixes Argon2id v0x13 to 64 MiB, three passes, one lane.
+    pub(crate) fn unlock(&self, password: &str) -> Result<Zeroizing<[u8; 32]>> {
+        if password.len() > 4096 {
+            return Err(KeyStoreError::InvalidCredentialPayload);
+        }
+        let key = derive_key(password, &self.salt)?;
+        let plaintext = decrypt(
+            &key,
+            &metadata("app_data_key", "master", "Application data key")?,
+            &self.nonce,
+            &self.ciphertext,
+        )?;
+        let master = plaintext
+            .as_slice()
+            .try_into()
+            .map_err(|_| KeyStoreError::VaultAuthentication)?;
+        Ok(Zeroizing::new(master))
+    }
+}
+
 type UnlockKeys = HashMap<PathBuf, Zeroizing<[u8; 32]>>;
 pub(super) fn session() -> Result<MutexGuard<'static, UnlockKeys>> {
     static KEYS: LazyLock<Mutex<UnlockKeys>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -255,6 +284,46 @@ impl Vault {
         keys.get(&self.path)
             .map(|key| &**key)
             .ok_or(KeyStoreError::VaultLocked)
+    }
+
+    pub(crate) fn protection_wrapping(&self, keys: &UnlockKeys) -> Result<ProtectionWrapping> {
+        self.require_key(keys)?;
+        let record = self.conn.query_row(
+            "SELECT kind,id,label,encrypted,nonce,payload FROM tcui_credentials WHERE kind='app_data_key' AND id='master'",
+            [], record_from_row,
+        ).optional().map_err(|_| KeyStoreError::Read)?
+            .ok_or(KeyStoreError::InvalidCredentialPayload)?;
+        if record.storage != CredentialStorage::Encrypted || record.label != "Application data key"
+        {
+            return Err(KeyStoreError::VaultAuthentication);
+        }
+        let plaintext = self.decode(&record, keys)?;
+        if plaintext.len() != 32 {
+            return Err(KeyStoreError::VaultAuthentication);
+        }
+        let salt: Vec<u8> = self
+            .conn
+            .query_row(
+                "SELECT salt FROM tcui_credential_vault WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| KeyStoreError::Read)?;
+        Ok(ProtectionWrapping {
+            salt: salt
+                .try_into()
+                .map_err(|_| KeyStoreError::VaultAuthentication)?,
+            nonce: record
+                .nonce
+                .as_slice()
+                .try_into()
+                .map_err(|_| KeyStoreError::VaultAuthentication)?,
+            ciphertext: record
+                .payload
+                .as_slice()
+                .try_into()
+                .map_err(|_| KeyStoreError::VaultAuthentication)?,
+        })
     }
 
     pub fn initialize(&self, password: &str, keys: &mut UnlockKeys) -> Result<()> {
@@ -572,5 +641,53 @@ mod tests {
         let plaintext =
             decrypt(&key, &aad, &[7; 12], &ciphertext).expect("decrypt existing credential");
         assert_eq!(plaintext.as_slice(), b"local fixture secret");
+    }
+}
+
+#[cfg(test)]
+mod protection_wrapping_tests {
+    use super::*;
+    use crate::config::key_store::{test_support::TestEnv, KeyStore};
+
+    #[test]
+    fn exporting_data_wrapping_never_creates_a_master_or_includes_provider_records() {
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let environment = TestEnv::new("portable-data-wrapping");
+        let config = environment.initialized_config();
+        assert!(KeyStore::protection_wrapping().is_err());
+        assert!(
+            KeyStore::protection_key(false).is_err(),
+            "export must not generate an orphan key"
+        );
+        let master = KeyStore::protection_key(true).expect("explicit application data enrollment");
+        {
+            let keys = session().expect("vault session");
+            let store = Vault::open().expect("vault");
+            store
+                .write(
+                    "api_key",
+                    "private-provider",
+                    "Private provider",
+                    b"synthetic-provider-secret",
+                    CredentialStorage::Plaintext,
+                    &keys,
+                )
+                .expect("unrelated provider record");
+        }
+        let wrapping = KeyStore::protection_wrapping().expect("export authenticated app wrapping");
+        KeyStore::lock_vault(&config).expect("lock local password vault");
+        assert!(KeyStore::protection_wrapping().is_err());
+        assert!(wrapping.unlock("wrong source password").is_err());
+        assert_eq!(
+            *wrapping
+                .unlock("test-only-vault-password")
+                .expect("standalone password unwrap"),
+            *master
+        );
+        let mut damaged = wrapping;
+        damaged.ciphertext[0] ^= 1;
+        assert!(damaged.unlock("test-only-vault-password").is_err());
     }
 }

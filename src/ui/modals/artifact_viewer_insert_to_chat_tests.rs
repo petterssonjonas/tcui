@@ -70,6 +70,7 @@ fn insert_to_chat_viewer_button_is_hidden_for_ineligible_documents() {
             origin: ArtifactOrigin::Temporary,
             content: Some("text-shaped but binary-origin".to_string()),
             path: None,
+            relative_path: None,
         },
         ArtifactEntry::temp_markdown(3, "empty.md".to_string(), String::new()),
         ArtifactEntry::temp_markdown(4, "oversized.md".to_string(), oversized),

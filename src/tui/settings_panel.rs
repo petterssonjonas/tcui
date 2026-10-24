@@ -11,7 +11,7 @@ pub enum SettingCategory {
     Theme,
     Keybind,
     Mcp,
-    Obsidian,
+    Files,
     UiLayout,
     ChatBehavior,
     Privacy,
@@ -32,7 +32,7 @@ impl SettingCategory {
             Self::Theme => "Appearance",
             Self::Keybind => "Keyboard",
             Self::Mcp => "MCP",
-            Self::Obsidian => "Files & vaults",
+            Self::Files => "Files",
             Self::UiLayout => "Layout",
             Self::ChatBehavior => "Chat",
             Self::Privacy => "Privacy",
@@ -363,7 +363,6 @@ pub fn command_action(id: &str) -> Option<crate::app::Action> {
         "show_keybinds" => Some(Action::ShowKeybinds),
         "focus_input" => Some(Action::FocusInput),
         "quit" => Some(Action::ShowQuitConfirm),
-        "manage_vault_profiles" => Some(Action::OpenVaultProfileManager),
         _ => None,
     }
 }

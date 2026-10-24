@@ -62,11 +62,34 @@ impl TuiApp {
         let input = match self.pending_document_input(&handle) {
             Ok(input) => input,
             Err(error) => {
-                self.ui
-                    .show_toast(format!("Could not insert document: {error}"));
+                self.show_resource_error(Self::artifact_domain(&handle), error);
                 return;
             }
         };
+        let share_plaintext = (|| -> color_eyre::Result<bool> {
+            let protected_source =
+                matches!(
+                    handle,
+                    ArtifactHandle::Memory(_)
+                        | ArtifactHandle::Vault(_)
+                        | ArtifactHandle::ChatFile { .. }
+                ) && crate::protection::is_protected(Self::artifact_domain(&handle))?;
+            Ok(protected_source
+                && !crate::protection::is_protected(crate::protection::Domain::Chats)?)
+        })();
+        let share_plaintext = match share_plaintext {
+            Ok(value) => value,
+            Err(error) => {
+                self.show_resource_error(Self::artifact_domain(&handle), error);
+                return;
+            }
+        };
+        if share_plaintext {
+            self.ui.pending_protected_context = Some(input);
+            self.ui.active_modal = Some(crate::ui::Modal::ShareProtectedContext);
+            return;
+        }
+        self.focus_composer();
         match self.queue_pending_document_inner(input) {
             Ok(QueuePendingDocumentOutcome::Added) => self.focus_composer(),
             Ok(QueuePendingDocumentOutcome::Duplicate) => {
@@ -77,6 +100,27 @@ impl TuiApp {
                     .show_toast(format!("Could not insert document: {error}"));
             }
         }
+    }
+
+    pub(crate) fn confirm_protected_context(&mut self) -> color_eyre::Result<()> {
+        let Some(input) = self.ui.pending_protected_context.take() else {
+            return Ok(());
+        };
+        let domain = match &input {
+            PendingDocumentInput::Resource {
+                reference: super::submission::ContextReference::Memory(_),
+                ..
+            } => crate::protection::Domain::Memories,
+            _ => crate::protection::Domain::Vault,
+        };
+        if let Err(error) = crate::protection::require(domain) {
+            self.ui.pending_protected_context = Some(input);
+            self.show_resource_error(domain, error);
+            return Ok(());
+        }
+        self.ui.active_modal = None;
+        self.focus_composer();
+        self.queue_pending_document(input)
     }
 
     pub(crate) fn remove_pending_document(&mut self, id: PendingDocumentId) {
@@ -215,6 +259,12 @@ impl TuiApp {
     }
 
     fn focus_composer(&mut self) {
+        if !self.ui.app_tabs.active_view().is_chat() {
+            self.ui
+                .app_tabs
+                .open_view(crate::ui::app_tabs::AppView::Chat);
+            self.focus_chat_pane(self.ui.main_chat_index());
+        }
         self.ui.artifact_viewer = None;
         self.ui.focus = crate::tui::focus::Focus::Chat;
     }

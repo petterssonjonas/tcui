@@ -32,7 +32,6 @@ mod mcp;
 #[cfg(feature = "memory")]
 mod memory;
 mod notifications;
-mod obsidian;
 mod protection;
 mod reminders;
 mod search;
@@ -50,7 +49,6 @@ pub mod vault;
 use app::TuiApp;
 use config::AppConfig;
 use llm::LlmClient;
-use obsidian::Vault;
 use storage::Storage;
 
 pub type Backend = CrosstermBackend<io::Stdout>;
@@ -227,6 +225,9 @@ async fn main() -> Result<()> {
                 protection::ui::initialize_password(&mut terminal, &mut events).await?;
             }
             Some(protection::ui::SecurityRestart::Lock) => protection::lock()?,
+            Some(protection::ui::SecurityRestart::Transfer(domain)) => {
+                protection::transfer_ui::run(&mut terminal, &mut events, domain).await?;
+            }
             None => {}
         }
         if protection::startup_requires_unlock()?
@@ -240,25 +241,41 @@ async fn main() -> Result<()> {
         {
             return Ok(());
         }
+        // Recovery runs without store/session guards. A locked pending transfer
+        // must be unlocked before partially replaced native data can be reopened.
+        protection::require_app()?;
+        for domain in [protection::Domain::Vault, protection::Domain::Memories] {
+            #[cfg(not(feature = "memory"))]
+            if domain == protection::Domain::Memories {
+                continue;
+            }
+            loop {
+                match storage::native_transfer::NativeTransferService::recover_pending(domain) {
+                    Ok(_) => break,
+                    Err(error) if protection::require(domain).is_err() => {
+                        if !protection::ui::unlock_with_notice(
+                            &mut terminal,
+                            &mut events,
+                            Some(&error.to_string()),
+                        )
+                        .await?
+                        {
+                            return Ok(());
+                        }
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
         let session = protection::session_guard()?;
         // No application configuration initialization, stores, or background tasks precede the gate.
-        protection::require_app()?;
         let config = AppConfig::load()?;
-        recover_vault_moves(&config)?;
+        recover_vault_moves()?;
         let storage = Storage::new()?;
-        let vault = config.vault_path.as_ref().and_then(|path| {
-            let expanded = crate::app::generated_file::expand_user_path(
-                Path::new(path),
-                dirs::home_dir().as_deref(),
-            );
-            let vault = Vault::new(expanded);
-            vault.exists().then(|| Arc::new(vault))
-        });
         let mut app = TuiApp::new(
             storage,
             Arc::new(RwLock::new(config)),
             Arc::new(LlmClient::new()),
-            vault,
         );
         app.queue_update_check();
         app.ui.show_toast(
@@ -299,23 +316,16 @@ async fn main() -> Result<()> {
     }
 }
 
-fn recover_vault_moves(config: &AppConfig) -> Result<()> {
+fn recover_vault_moves() -> Result<()> {
     // Protected journals cannot be recovered or pruned while locked. Leave them untouched
     // until the unlock restart; journal guards still refuse journal-backed mutations meanwhile.
     if protection::is_protected(protection::Domain::Vault)? && !protection::is_unlocked()? {
         return Ok(());
     }
-    let catalog = crate::config::vault_profiles::VaultCatalog {
-        profiles: config.vaults.clone(),
-        default_id: config.default_vault_id.clone(),
-    };
     let data_root = crate::storage::paths::TcuiDataPaths::discover().root;
     let report = crate::vault::move_recovery::MoveRecoveryService::at_data_root(
-        &catalog,
         &data_root,
-        crate::vault::move_recovery::MoveRecoveryConfig {
-            retention_days: config.vault_operation_retention_days,
-        },
+        crate::vault::move_recovery::MoveRecoveryConfig::default(),
     )
     .recover_startup()?;
     let blocked = report.blocked();

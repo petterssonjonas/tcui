@@ -16,12 +16,21 @@ use crate::config::AppConfig;
 
 mod io;
 mod migration;
+mod portable;
+#[cfg(test)]
+pub(crate) use portable::MissingLegacyWrapping;
+pub(crate) use portable::{
+    inspect_bytes, require_native_store_adoption, unlock_foreign_file, NativeStoreAdoptionNeeded,
+    PortableUnlockNeeded, StoredFormat, NATIVE_STORE_ADOPTION_PROBE_LEN,
+};
+pub(crate) mod transfer_ui;
 pub(crate) mod ui;
 
 const MAGIC: &[u8] = b"TCUI-PROTECTED\x01";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 struct Session {
     key: Zeroizing<[u8; 32]>,
+    wrapping: crate::config::key_store::ProtectionWrapping,
     manifest: Option<Manifest>,
 }
 
@@ -91,7 +100,7 @@ impl Manifest {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.version != VERSION {
+        if !matches!(self.version, 1 | VERSION) {
             bail!("Unsupported application protection version; restore compatible TCUI software.");
         }
         if self.policy.any() && self.authentication.is_none() {
@@ -187,11 +196,19 @@ pub(crate) fn is_unlocked() -> Result<bool> {
         .contains_key(&root()?))
 }
 
+/// A V1 authenticated store needs an exclusive, durable format migration on
+/// unlock. Release this process's store/session guards before calling unlock.
+pub(crate) fn needs_portable_upgrade() -> Result<bool> {
+    Ok(load_manifest()?
+        .is_some_and(|manifest| manifest.version == 1 && manifest.authentication.is_some()))
+}
+
 pub(crate) fn startup_requires_unlock() -> Result<bool> {
     if migration::pending()?.is_some() {
         return Ok(true);
     }
-    Ok(policy()?.is_some_and(|policy| policy.app_password || policy.chats))
+    Ok(needs_portable_upgrade()?
+        || policy()?.is_some_and(|policy| policy.app_password || policy.chats))
 }
 
 pub(crate) fn require_app() -> Result<()> {
@@ -247,11 +264,13 @@ pub(crate) fn unlock(password: &str) -> Result<()> {
                     root()?,
                     Session {
                         key,
+                        wrapping: KeyStore::protection_wrapping()?,
                         manifest: Some(manifest),
                     },
                 );
         }
-        migration::recover()
+        migration::recover()?;
+        upgrade_local_format()
     })();
     if result.is_err() {
         let _ = lock();
@@ -260,6 +279,13 @@ pub(crate) fn unlock(password: &str) -> Result<()> {
 }
 
 pub(crate) fn lock() -> Result<()> {
+    portable::clear()?;
+    lock_local()
+}
+
+// Policy adoption needs authenticated source keys until its durable migration
+// completes. Only the explicit session lock clears those foreign keys.
+fn lock_local() -> Result<()> {
     SESSIONS
         .lock()
         .map_err(|_| eyre!("Protection session lock is unavailable."))?
@@ -269,11 +295,67 @@ pub(crate) fn lock() -> Result<()> {
 }
 
 pub(crate) fn configure(target: ProtectionPolicy, password: &str) -> Result<()> {
+    configure_impl(target, password, None)
+}
+
+/// Preflights copied encrypted native data before first setup or policy changes.
+/// Missing source authentication returns `PortableUnlockNeeded`; after source
+/// authentication, `NativeStoreAdoptionNeeded` requests explicit protected
+/// adoption. This does not create keys, change policy, or expose decoded bodies.
+pub(crate) fn preflight_native_adoption(domain: Domain) -> Result<()> {
+    migration::preflight_native_adoption(domain)
+}
+
+fn preflight_configure_domains(old: Option<&Manifest>) -> Result<()> {
+    for domain in [Domain::Vault, Domain::Memories] {
+        if old.is_none_or(|manifest| !manifest.policy.protects(domain)) {
+            preflight_native_adoption(domain)?;
+        }
+    }
+    Ok(())
+}
+
+/// Explicitly adopts copied native data under this instance's master. This
+/// preserves existing options, enables the selected domain, and also rewraps
+/// foreign portable sources when that domain is already protected. Authenticate
+/// all source wrappers first and release store/session guards before calling.
+pub(crate) fn adopt_native_store(domain: Domain, password: &str) -> Result<()> {
+    require_app()?;
+    if domain == Domain::Chats {
+        bail!("Native portable adoption is for Vault and Memories only.");
+    }
+    configure_impl(ProtectionPolicy::default(), password, Some(domain))
+}
+
+fn configure_impl(
+    mut target: ProtectionPolicy,
+    password: &str,
+    adoption: Option<Domain>,
+) -> Result<()> {
     let _lock = io::migration_lock()?;
+    crate::storage::native_transfer::assert_no_pending_recovery()?;
     if migration::pending()?.is_some() {
         bail!("Recover the interrupted protection migration with /unlock before changing options.");
     }
     let old = load_manifest()?;
+    let preflight_after_auth = adoption.is_none()
+        && old
+            .as_ref()
+            .is_some_and(|manifest| manifest.policy.app_password || manifest.policy.chats)
+        && !is_unlocked()?;
+    if adoption.is_none() && !preflight_after_auth {
+        preflight_configure_domains(old.as_ref())?;
+    }
+    if let Some(domain) = adoption {
+        target = old
+            .as_ref()
+            .map_or_else(ProtectionPolicy::default, |manifest| manifest.policy);
+        match domain {
+            Domain::Vault => target.vault = true,
+            Domain::Memories => target.memories = true,
+            Domain::Chats => bail!("Native portable adoption is for Vault and Memories only."),
+        }
+    }
     let config = AppConfig::default();
     let status = KeyStore::vault_status(&config)?;
     if old.as_ref().is_some_and(|old| old.authentication.is_some()) && !status.initialized {
@@ -284,7 +366,7 @@ pub(crate) fn configure(target: ProtectionPolicy, password: &str) -> Result<()> 
         if password.is_empty() {
             bail!("Enter the existing password, or choose a password for the protected stores.");
         }
-        lock()?;
+        lock_local()?;
         if status.initialized {
             KeyStore::unlock_vault(&config, password)?;
         } else {
@@ -308,11 +390,19 @@ pub(crate) fn configure(target: ProtectionPolicy, password: &str) -> Result<()> 
                 root()?,
                 Session {
                     key: Zeroizing::new(**key),
+                    wrapping: KeyStore::protection_wrapping()?,
                     manifest: old.clone(),
                 },
             );
     }
-    if old.as_ref().is_some_and(|old| old.policy == target) {
+    if preflight_after_auth {
+        preflight_configure_domains(old.as_ref())?;
+    }
+    if adoption.is_none()
+        && old
+            .as_ref()
+            .is_some_and(|old| old.policy == target && old.version == VERSION)
+    {
         let storage = if target.credentials {
             crate::config::key_store::CredentialStorage::Encrypted
         } else {
@@ -322,7 +412,11 @@ pub(crate) fn configure(target: ProtectionPolicy, password: &str) -> Result<()> 
         return Ok(());
     }
     let target = Manifest::new(target, key.as_deref())?;
-    migration::prepare(old.as_ref(), &target, key.as_deref())?;
+    if let Some(domain) = adoption {
+        migration::prepare_adoption(old.as_ref(), &target, key.as_deref(), domain)?;
+    } else {
+        migration::prepare(old.as_ref(), &target, key.as_deref())?;
+    }
     if let Some(session) = SESSIONS
         .lock()
         .map_err(|_| eyre!("Protection session lock is unavailable."))?
@@ -339,12 +433,14 @@ pub(crate) fn initialize_password(password: &str) -> Result<()> {
         bail!("Choose a nonempty password of at most 4096 UTF-8 bytes.");
     }
     let _lock = io::migration_lock()?;
+    crate::storage::native_transfer::assert_no_pending_recovery()?;
     if migration::pending()?.is_some() {
         bail!("Recover the interrupted protection migration before initializing a password.");
     }
     let old = load_manifest()?
         .ok_or_else(|| eyre!("Choose application protection options with /security first."))?;
     if old.authentication.is_some() {
+        drop(_lock);
         return unlock(password);
     }
     let config = AppConfig::default();
@@ -365,6 +461,7 @@ pub(crate) fn initialize_password(password: &str) -> Result<()> {
             root()?,
             Session {
                 key,
+                wrapping: KeyStore::protection_wrapping()?,
                 manifest: Some(manifest),
             },
         );
@@ -380,8 +477,23 @@ pub(crate) fn open_directory(path: &Path, create: bool) -> Result<cap_std::fs::D
     Ok(io::directory(path, create)?)
 }
 
+#[cfg(feature = "memory")]
+/// Opens or creates native directories without following symlinks. This keeps
+/// the original IO error for callers that must distinguish missing paths.
+pub(crate) fn open_native_directory(
+    path: &Path,
+    create: bool,
+) -> std::io::Result<cap_std::fs::Dir> {
+    io::directory(path, create)
+}
+
 pub(crate) fn read_regular(path: &Path) -> Result<Vec<u8>> {
     Ok(io::read_regular(path)?)
+}
+
+/// Reads at most `limit` bytes from a regular file without following symlinks.
+pub(crate) fn read_regular_prefix(path: &Path, limit: usize) -> Result<Vec<u8>> {
+    Ok(io::read_regular_prefix(path, limit)?)
 }
 
 /// An explicit plaintext export, not a write into a managed protected store.
@@ -403,7 +515,17 @@ fn encode_bytes(domain: Domain, plaintext: &[u8]) -> Result<Cow<'_, [u8]>> {
     if !is_protected(domain)? {
         return Ok(Cow::Borrowed(plaintext));
     }
-    with_key(|key| seal(domain.context(), plaintext, key)).map(Cow::Owned)
+    if domain == Domain::Chats {
+        return with_key(|key| seal(domain.context(), plaintext, key)).map(Cow::Owned);
+    }
+    let sessions = SESSIONS
+        .lock()
+        .map_err(|_| eyre!("Protection session lock is unavailable."))?;
+    let root = root()?;
+    let session = sessions
+        .get(&root)
+        .ok_or_else(|| eyre!("Protected storage is locked."))?;
+    portable::seal(domain, plaintext, &session.key, &session.wrapping).map(Cow::Owned)
 }
 
 pub(crate) fn decode(domain: Domain, stored: &[u8]) -> Result<Vec<u8>> {
@@ -412,8 +534,11 @@ pub(crate) fn decode(domain: Domain, stored: &[u8]) -> Result<Vec<u8>> {
 
 fn decode_bytes(domain: Domain, stored: &[u8]) -> Result<Cow<'_, [u8]>> {
     require(domain)?;
+    if let StoredFormat::Portable { .. } = inspect_bytes(stored)? {
+        return portable::decode(domain, stored).map(Cow::Owned);
+    }
     if is_protected(domain)? {
-        return with_key(|key| open(domain.context(), stored, key)).map(Cow::Owned);
+        return with_key(|key| open_content(domain, stored, key)).map(Cow::Owned);
     }
     Ok(Cow::Borrowed(stored))
 }
@@ -427,21 +552,55 @@ pub(crate) fn read(domain: Domain, path: &Path) -> Result<Vec<u8>> {
     }
 }
 
-/// Explicitly decrypts an archived document even when its managed store is now plaintext.
-/// Routine store reads must use `read` and the representation selected by their policy.
-pub(crate) fn read_for_explicit_decryption(domain: Domain, path: &Path) -> Result<Vec<u8>> {
+/// Reads managed native content without permitting a copied portable file to
+/// enter plaintext management. Explicit external imports must use `read`/`decode`.
+pub(crate) fn read_native(domain: Domain, path: &Path) -> Result<Vec<u8>> {
     require(domain)?;
     let stored = io::read_regular(path)?;
-    if stored.starts_with(MAGIC) {
-        return with_key(|key| open(domain.context(), &stored, key));
-    }
+    require_native_store_adoption(domain, &stored)?;
     match decode_bytes(domain, &stored)? {
         Cow::Borrowed(_) => Ok(stored),
         Cow::Owned(plaintext) => Ok(plaintext),
     }
 }
 
+/// Explicitly decrypts an archived document even when its managed store is plaintext.
+/// Portable data uses its source key; legacy data requires this instance's master.
+pub(crate) fn read_for_explicit_decryption(domain: Domain, path: &Path) -> Result<Vec<u8>> {
+    require(domain)?;
+    let stored = io::read_regular(path)?;
+    match decode_explicit_bytes(domain, &stored)? {
+        Cow::Borrowed(_) => Ok(stored),
+        Cow::Owned(plaintext) => Ok(plaintext),
+    }
+}
+
+/// Explicit archived decryption of the exact observed bytes. This avoids a
+/// second path read when a durable migration has already hashed the source.
+pub(crate) fn decode_for_explicit_decryption(domain: Domain, stored: &[u8]) -> Result<Vec<u8>> {
+    Ok(decode_explicit_bytes(domain, stored)?.into_owned())
+}
+
+fn decode_explicit_bytes(domain: Domain, stored: &[u8]) -> Result<Cow<'_, [u8]>> {
+    require(domain)?;
+    if let StoredFormat::Portable { .. } = inspect_bytes(stored)? {
+        return portable::decode(domain, stored).map(Cow::Owned);
+    }
+    if stored.starts_with(MAGIC) {
+        return with_key(|key| open(domain.context(), stored, key)).map(Cow::Owned);
+    }
+    decode_bytes(domain, stored)
+}
+
 pub(crate) fn write(domain: Domain, path: &Path, plaintext: &[u8]) -> Result<()> {
+    require(domain)?;
+    if !is_protected(domain)? {
+        match io::read_regular_prefix(path, NATIVE_STORE_ADOPTION_PROBE_LEN) {
+            Ok(existing) => require_native_store_adoption(domain, &existing)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     let stored = encode_bytes(domain, plaintext)?;
     io::atomic_write(path, &stored)?;
     Ok(())
@@ -450,6 +609,60 @@ pub(crate) fn write(domain: Domain, path: &Path, plaintext: &[u8]) -> Result<()>
 pub(crate) fn write_new(domain: Domain, path: &Path, plaintext: &[u8]) -> Result<()> {
     let stored = encode_bytes(domain, plaintext)?;
     Ok(io::atomic_write_new(path, &stored)?)
+}
+
+/// Upgrade only after password authentication, under the existing exclusive
+/// migration lock and authenticated durable journal. Reads never rewrite files.
+fn upgrade_local_format() -> Result<()> {
+    let Some(old) = load_manifest()? else {
+        return Ok(());
+    };
+    if old.version == VERSION || old.authentication.is_none() {
+        return Ok(());
+    }
+    let _lock = io::migration_lock()?;
+    crate::storage::native_transfer::assert_no_pending_recovery()?;
+    // Recheck the authenticated snapshot after acquiring process exclusion.
+    let old =
+        load_manifest()?.ok_or_else(|| eyre!("Protection metadata disappeared before upgrade."))?;
+    let key = KeyStore::protection_key(false)?;
+    old.authenticate(&key)?;
+    let target = Manifest::new(old.policy, Some(&key))?;
+    migration::prepare_format_upgrade(&old, &target, &key)?;
+    if let Some(session) = SESSIONS
+        .lock()
+        .map_err(|_| eyre!("Protection session lock is unavailable."))?
+        .get_mut(&root()?)
+    {
+        session.manifest = Some(target);
+    }
+    migration::recover_locked(Some(&key))
+}
+
+fn seal_content(
+    domain: Domain,
+    plaintext: &[u8],
+    key: &[u8; 32],
+    wrapping: Option<&crate::config::key_store::ProtectionWrapping>,
+) -> Result<Vec<u8>> {
+    if domain == Domain::Chats {
+        seal(domain.context(), plaintext, key)
+    } else {
+        portable::seal(
+            domain,
+            plaintext,
+            key,
+            wrapping.ok_or_else(|| eyre!("Missing portable master wrapping."))?,
+        )
+    }
+}
+
+fn open_content(domain: Domain, stored: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
+    if stored.starts_with(portable::MAGIC) {
+        portable::open_with_key(domain, stored, key)
+    } else {
+        open(domain.context(), stored, key)
+    }
 }
 
 fn seal(context: &[u8], plaintext: &[u8], master: &[u8; 32]) -> Result<Vec<u8>> {

@@ -1,5 +1,5 @@
 use super::TestRoot;
-use crate::storage::chat_files::{ChatFileError, ChatFileLinkManifestV1};
+use crate::storage::chat_files::{ChatFileError, ChatFileManifest};
 
 #[test]
 fn chat_saved_file_store_list_prunes_links_with_missing_targets() {
@@ -15,7 +15,7 @@ fn chat_saved_file_store_list_prunes_links_with_missing_targets() {
 
     // Then
     assert!(links.is_empty());
-    let manifest: ChatFileLinkManifestV1 =
+    let manifest: ChatFileManifest =
         serde_json::from_slice(&root.read(&root.manifest_path())).expect("parse pruned manifest");
     assert!(manifest.links.is_empty());
 }
@@ -37,7 +37,7 @@ fn chat_saved_file_store_open_prunes_missing_target_and_returns_not_found() {
 
     // Then
     assert!(matches!(error, ChatFileError::NotFound { .. }));
-    let manifest: ChatFileLinkManifestV1 =
+    let manifest: ChatFileManifest =
         serde_json::from_slice(&root.read(&root.manifest_path())).expect("parse pruned manifest");
     assert!(manifest.links.is_empty());
 }
@@ -46,7 +46,7 @@ fn chat_saved_file_store_open_prunes_missing_target_and_returns_not_found() {
 fn chat_saved_file_store_preserves_future_manifest_without_rewrite() {
     // Given
     let root = TestRoot::new("future-manifest");
-    let future = br#"{"version":2,"links":[],"future_field":"preserve me"}"#;
+    let future = br#"{"version":3,"links":[],"future_field":"preserve me"}"#;
     root.write_manifest(future);
     let store = root.store();
 
@@ -58,7 +58,7 @@ fn chat_saved_file_store_preserves_future_manifest_without_rewrite() {
     // Then
     assert!(matches!(
         error,
-        ChatFileError::UnsupportedManifestVersion { version: 2 }
+        ChatFileError::UnsupportedManifestVersion { version: 3 }
     ));
     assert_eq!(root.read(&root.manifest_path()), future);
 }

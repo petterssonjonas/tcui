@@ -20,6 +20,7 @@ pub struct ArtifactViewerHitAreas {
     pub save: Option<Rect>,
     pub delete: Option<Rect>,
     pub insert_to_chat: Option<Rect>,
+    pub copy: Option<Rect>,
 }
 
 pub struct ArtifactViewerState {
@@ -28,6 +29,7 @@ pub struct ArtifactViewerState {
     pub view_only: bool,
     pub hit_areas: ArtifactViewerHitAreas,
     document: DocumentViewerState,
+    insertable: bool,
 }
 
 pub struct ArtifactViewerProps<'a> {
@@ -39,7 +41,7 @@ pub struct ArtifactViewerProps<'a> {
 }
 
 impl ArtifactViewerState {
-    pub fn new(artifact: ArtifactEntry) -> Self {
+    pub fn new(mut artifact: ArtifactEntry) -> Self {
         let document_kind = match artifact.kind {
             ArtifactKind::Markdown => DocumentKind::Markdown,
             ArtifactKind::Text => {
@@ -48,9 +50,18 @@ impl ArtifactViewerState {
             ArtifactKind::Image => DocumentKind::Image,
             ArtifactKind::Video | ArtifactKind::Audio | ArtifactKind::Binary => DocumentKind::Text,
         };
+        let insertable = matches!(
+            artifact.handle,
+            ArtifactHandle::Memory(_) | ArtifactHandle::Vault(_)
+        ) || (matches!(
+            artifact.kind,
+            ArtifactKind::Markdown | ArtifactKind::Text
+        ) && artifact.content.as_ref().is_some_and(|content| {
+            !content.is_empty() && content.len() <= crate::app::submission::MAX_DOCUMENT_BYTES
+        }));
         let document = DocumentViewerState::new(DocumentSource::new(
             document_kind,
-            artifact.content.clone(),
+            artifact.content.take(),
             artifact.path.clone(),
         ));
         Self {
@@ -59,6 +70,7 @@ impl ArtifactViewerState {
             view_only: false,
             hit_areas: ArtifactViewerHitAreas::default(),
             document,
+            insertable,
         }
     }
 
@@ -77,7 +89,7 @@ impl ArtifactViewerState {
             ArtifactHandle::Memory(_) => {
                 crate::protection::require(crate::protection::Domain::Memories)
             }
-            ArtifactHandle::ChatFile { .. } | ArtifactHandle::Saved(_) => {
+            ArtifactHandle::ChatFile { .. } | ArtifactHandle::Vault(_) => {
                 crate::protection::require(crate::protection::Domain::Vault)
             }
             _ => {
@@ -112,34 +124,36 @@ impl ArtifactViewerState {
         );
         f.render_widget(Clear, popup_area);
         f.render_widget(block, popup_area);
-        let title_y = popup_area.y;
-
-        let name_label = format!(" {} ", self.artifact.name);
+        let header = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(6),
+            Constraint::Length(3),
+        ])
+        .spacing(1)
+        .split(Rect::new(
+            popup_area.x.saturating_add(1),
+            popup_area.y,
+            popup_area.width.saturating_sub(2),
+            popup_area.height.min(1),
+        ));
         f.render_widget(
-            Paragraph::new(name_label).style(Style::default().fg(Color::Cyan)),
-            Rect::new(
-                popup_area.x + 1,
-                title_y,
-                self.artifact.name.len() as u16 + 2,
-                1,
-            ),
+            Paragraph::new(self.artifact.name.as_str()).style(Style::default().fg(Color::Cyan)),
+            header[0],
         );
-
-        let center_label = " Viewer ";
-        let center_x = popup_area.x + popup_area.width / 2 - center_label.len() as u16 / 2;
-        f.render_widget(
-            Paragraph::new(center_label).style(Style::default().fg(Color::Cyan)),
-            Rect::new(center_x, title_y, center_label.len() as u16, 1),
-        );
-
-        let close_label = "[x]";
-        let close_len = close_label.len() as u16;
-        let close_x = popup_area.x + popup_area.width.saturating_sub(close_len + 1);
-        let close = Rect::new(close_x, title_y, close_len, 1);
-        f.render_widget(
-            Paragraph::new(close_label).style(Style::default().fg(Color::Red)),
-            close,
-        );
+        let copy = (!self.view_only && header[1].width == 6).then_some(header[1]);
+        if let Some(copy) = copy {
+            f.render_widget(
+                Paragraph::new("[Copy]").style(Style::default().fg(Color::Cyan)),
+                copy,
+            );
+        }
+        let close = (header[2].width == 3).then_some(header[2]);
+        if let Some(close) = close {
+            f.render_widget(
+                Paragraph::new("[x]").style(Style::default().fg(Color::Red)),
+                close,
+            );
+        }
 
         let document_area = if self.view_only {
             Rect::new(
@@ -164,7 +178,11 @@ impl ArtifactViewerState {
             },
             DocumentViewerCapabilities {
                 close: false,
-                edit: !self.view_only && self.artifact.path.is_some(),
+                edit: !self.view_only
+                    && matches!(
+                        self.artifact.handle,
+                        ArtifactHandle::Memory(_) | ArtifactHandle::Vault(_)
+                    ),
                 save: false,
                 delete: !self.view_only,
                 insert_to_chat: self.can_insert_to_chat(),
@@ -173,23 +191,17 @@ impl ArtifactViewerState {
         self.scroll = self.document.scroll;
 
         self.hit_areas = ArtifactViewerHitAreas {
-            close: Some(close),
+            close,
             edit: self.document.hit_areas.edit,
             save: self.document.hit_areas.save,
             delete: self.document.hit_areas.delete,
             insert_to_chat: self.document.hit_areas.insert_to_chat,
+            copy,
         };
     }
 
-    fn can_insert_to_chat(&self) -> bool {
-        !self.view_only
-            && matches!(
-                self.artifact.kind,
-                ArtifactKind::Markdown | ArtifactKind::Text
-            )
-            && self.artifact.content.as_ref().is_some_and(|content| {
-                !content.is_empty() && content.len() <= crate::app::submission::MAX_DOCUMENT_BYTES
-            })
+    pub(crate) fn can_insert_to_chat(&self) -> bool {
+        !self.view_only && self.insertable
     }
 }
 

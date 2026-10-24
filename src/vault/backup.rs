@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use super::VaultRelativePath;
 
-const BACKUP_VERSION: u32 = 1;
+const BACKUP_VERSION: u32 = 2;
 const ENVELOPE_FILE: &str = "envelope.json";
 const PAYLOAD_FILE: &str = "original.bin";
 
@@ -92,7 +92,6 @@ pub(crate) enum BackupOriginal {
 pub(crate) struct BackupEnvelopeV1 {
     pub(crate) version: u32,
     pub(crate) id: StandaloneBackupId,
-    pub(crate) profile_id: String,
     #[serde(with = "relative_path_serde")]
     pub(crate) path: VaultRelativePath,
     pub(crate) created_at: DateTime<Utc>,
@@ -134,7 +133,6 @@ impl BackupStore {
 
     pub(crate) fn create_prepared(
         &self,
-        profile_id: &str,
         path: &VaultRelativePath,
         original: Option<&[u8]>,
     ) -> Result<StandaloneBackupId, BackupError> {
@@ -164,7 +162,6 @@ impl BackupStore {
         let envelope = BackupEnvelopeV1 {
             version: BACKUP_VERSION,
             id: id.clone(),
-            profile_id: profile_id.to_owned(),
             path: path.clone(),
             created_at: Utc::now(),
             state: BackupState::Prepared,
@@ -206,10 +203,11 @@ impl BackupStore {
     pub(crate) fn load(&self, id: &StandaloneBackupId) -> Result<LoadedBackup, BackupError> {
         let record = self.root.join(id.as_str());
         let envelope_path = record.join(ENVELOPE_FILE);
-        let bytes = crate::protection::read(crate::protection::Domain::Vault, &envelope_path)
-            .map_err(|error| {
-                io_error("read", &envelope_path, io::Error::other(error.to_string()))
-            })?;
+        let bytes =
+            crate::protection::read_native(crate::protection::Domain::Vault, &envelope_path)
+                .map_err(|error| {
+                    io_error("read", &envelope_path, super::protection_io_error(error))
+                })?;
         let version = serde_json::from_slice::<VersionProbe>(&bytes)?.version;
         if version != u64::from(BACKUP_VERSION) {
             return Err(BackupError::UnknownVersion { version });
@@ -225,9 +223,9 @@ impl BackupStore {
             BackupOriginal::File { len, blake3 } => {
                 let payload_path = record.join(PAYLOAD_FILE);
                 let payload =
-                    crate::protection::read(crate::protection::Domain::Vault, &payload_path)
+                    crate::protection::read_native(crate::protection::Domain::Vault, &payload_path)
                         .map_err(|error| {
-                            io_error("read", &payload_path, io::Error::other(error.to_string()))
+                            io_error("read", &payload_path, super::protection_io_error(error))
                         })?;
                 if u64::try_from(payload.len()).ok() != Some(*len) {
                     return Err(BackupError::Corrupt {
@@ -286,7 +284,7 @@ impl BackupStore {
             let record = self.root.join(entry.file_name());
             let envelope_path = record.join(ENVELOPE_FILE);
             let Ok(bytes) =
-                crate::protection::read(crate::protection::Domain::Vault, &envelope_path)
+                crate::protection::read_native(crate::protection::Domain::Vault, &envelope_path)
             else {
                 continue;
             };
@@ -472,7 +470,6 @@ mod tests {
     use super::{
         BackupEnvelopeV1, BackupError, BackupOriginal, BackupState, BackupStore, StandaloneBackupId,
     };
-    use crate::config::vault_profiles::VaultProfileId;
     use crate::vault::VaultRelativePath;
 
     fn test_root(label: &str) -> std::path::PathBuf {
@@ -487,9 +484,8 @@ mod tests {
 
     fn envelope(state: BackupState, age_days: i64) -> BackupEnvelopeV1 {
         BackupEnvelopeV1 {
-            version: 1,
+            version: super::BACKUP_VERSION,
             id: StandaloneBackupId::new(),
-            profile_id: VaultProfileId::new().to_string(),
             path: VaultRelativePath::parse(std::path::Path::new("note.md"))
                 .expect("valid vault path"),
             created_at: Utc::now() - Duration::days(age_days),

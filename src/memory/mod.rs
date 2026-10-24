@@ -4,6 +4,7 @@ mod contextual;
 mod embedding;
 mod host;
 mod index;
+mod management;
 mod markdown;
 mod mcp_server;
 mod metadata;

@@ -1,6 +1,6 @@
 # TCUI
 
-TCUI is a terminal helper workspace for Linux commands, troubleshooting, and scripts, backed by local or hosted LLM providers. Chat, live settings, Markdown vaults, and persistent terminal tabs share one terminal-native interface.
+TCUI is a terminal helper workspace for Linux commands, troubleshooting, and scripts, backed by local or hosted LLM providers. Chat, live settings, the internal Vault, Memories, and persistent terminal tabs share one terminal-native interface.
 
 TCUI is functional but still a work in progress and not yet ready for a general release. To try it, clone the repo and run `cargo run`. Feedback is welcome.
 
@@ -55,8 +55,8 @@ can run requests independently.
   **`Fork of <title>`** in the sidebar. It includes a partial response already received,
   but the original request continues only in its original destination. The fork
   retains the provider, model, and reasoning selection. Send or clear pending
-  draft text and inserted documents first. Message history is copied; Chat file
-  links are not. Saved files remain available through **Insert to chat**.
+  draft text and inserted documents first. Message history is copied; Chat Artifact
+  links are not. Existing Vault items remain available through **Insert to chat**.
 - `/steer <instruction>` is reserved for real live steering. Current HTTP SSE
   connections and the Claude print-mode connection cannot accept new input
   during a response. The command reports this, preserves the draft, and leaves
@@ -124,7 +124,7 @@ user message, with a five-word and 16-Unicode-character limit before an
 optional ellipsis.
 
 With Memory enabled, select a skill anywhere in your own prompt, or use
-`/skill <name> <request>`. Memory does not require a Markdown Vault profile:
+`/skill <name> <request>`. Memory uses its own native store, separate from Vault:
 
 ```text
 This machine is used for local CI @remember that, and the configuration we have set up this session.
@@ -463,52 +463,95 @@ Detached SSH reminders cannot notify a terminal that is no longer attached.
 They preserve Herdr routing context when available; otherwise use explicitly
 configured ntfy for delivery after disconnecting.
 
-## Markdown Vault
+## Vault and Memories
 
-Markdown Vault includes **TCUI Internal**, rooted at
-`$XDG_DATA_HOME/tcui/vault` (normally `~/.local/share/tcui/vault`). It is the
-default for a fresh configuration; existing defaults and later explicit default
-choices are preserved. Its folder cannot be relocated or removed through the
-profile manager, but its display name can change. `/security` optionally
-encrypts its contents, backups, link manifests, journals, and stages. Add ordinary
-plaintext external folders in **Settings → Markdown Vault → Manage vault profiles**.
-Open a workspace from the `+` tab launcher or address a profile from Chat:
+The new-tab launcher contains working **Vault**, **Memories**, **Settings**, and
+**Terminal** views. There are no external Vault profiles or unfinished feature
+cards. Existing external folders are not imported, searched, changed, or deleted.
+Configuration migration keeps a backup before it removes obsolete profile settings.
+
+The two internal stores are separate:
+
+- **Vault:** `$XDG_DATA_HOME/tcui/vault`, normally `~/.local/share/tcui/vault`.
+  It holds saved text, binary files, downloads, and files related to chats.
+- **Memories:** `$XDG_DATA_HOME/tcui/memories`. Native `.tcui-memory` records
+  retain their IDs, source details, scope, and creation metadata when edited.
+
+Open either view from `+`. Select an entry and use `e` to edit, `c` to copy,
+`d` to move it to Trash, `+` to insert context, or `i` to import or export.
+Memories also has clickable controls. Plaintext Vault text can use the configured
+terminal editor. Protected Vault files, binary files, and Memories use an in-app
+editor; decrypted edits do not require a plaintext temporary file. Binary edits
+use base64. The in-app editor supports up to 64 MiB of decoded content.
+The in-app editor checks the original content digest before saving. A concurrent change leaves both the
+stored file and the unsaved editor buffer intact.
+
+The right sidebar has **Chat Artifacts**, **Memories**, and **Vault**.
+Chat Artifacts are conversation-scoped links to canonical files. Deleting a
+conversation removes only its links. Deleting a Chat Artifact removes its body.
+Use its **Vault** action to make an independent, collision-safe Vault snapshot
+that survives deletion of the Chat Artifact. Vault and Memory deletion uses
+internal Trash. Clipboard actions send plaintext text, or base64 for binary data;
+terminal clipboard requests have no acceptance acknowledgement.
+
+Native `@vault` operations address only internal paths:
 
 ```text
 @vault list my notes
-@vault "Work Notes" read projects/status.md
-@vault vault:Personal search for "renewal date"
+@vault read projects/status.md
+@vault search for "renewal date"
 ```
 
-Workspace tabs are ephemeral; profile configuration persists. Vault mutations
-require an exact preview and explicit confirmation. Native `@vault copy`
-copies regular files, including binary files, byte-for-byte between named
-profiles without moving sources or removing chat links. External destinations
-are intentionally plaintext. **Saved files** also provides a direct **Export**
-control; exporting protected content or opening a plaintext terminal-editor copy
-requires explicit consent.
+Mutations require a preview and explicit confirmation. An explicit legacy Saved
+directory remains a migration source. A missing legacy mount blocks migration
+instead of being recreated; remount it and retry with the same password.
 
-Generated files and downloaded/chat artifacts are canonical files in TCUI
-Internal's **Saved files**. **Chat files** contains conversation-scoped links
-with View and Del actions, not duplicate files. Deleting a conversation removes
-only its links. For `@save`, a successful save replaces the visible response with
-`Saved as <filename>`; a save failure retains the original response and reports
-the error. A missing legacy Saved mount blocks mutation or protection migration
-instead of being recreated; remount it and retry with the same initialized password.
+### Context snapshots
 
-**Insert to chat** keeps removable document chips in the composer until send.
-Sending expands their snapshots in insertion order into the ordinary user
-message text. That exact plain text is persisted, displayed, processed, and
-included in later conversation context just as if it had been pasted manually;
-chip labels and source metadata are not persisted.
+The sidebar context control or `+` inserts a removable **`<Memory #432>`** or
+**`<Vault item #32>`** chip. Sending expands its captured content between visible
+resource tags in the user message. Those tags and content follow the destination
+chat's persistence policy. Later source edits do not change an inserted snapshot.
+Source text cannot select host commands such as `@save` or `@schedule`; only the
+typed request can do that.
 
-See the [canonical Markdown Vault guide](skills/vault/SKILL.md) for profile and
-workspace navigation, exact selector grammar, move rollback and recovery,
-persisted document expansion, lock behavior, and every enforced limit.
+TCUI asks before placing protected content in an unencrypted chat. Sending also
+shares that content with the selected provider. Binary context uses lossless
+base64. Context is limited to 256 KiB per item after encoding and 1 MiB in total,
+including resource tags.
 
-Markdown Vault works with ordinary Markdown folders, including folders used by
-Obsidian. TCUI is not affiliated with or endorsed by Obsidian, and Markdown
-Vault does not implement Obsidian Sync, APIs, or plugins.
+### Move data to another instance
+
+Close TCUI before copying native folders, or use `i` → **Export portable**.
+Both plaintext and encrypted files can move to another machine. New protected
+Vault and Memory files use self-contained `TCUI-PORTABLE` version 2 envelopes.
+They need the source password, not the source provider credentials or database.
+
+Copy native data into the new instance's corresponding folder, or choose a source
+file or folder through `i`:
+
+- **Add / adopt:** authenticate copied encrypted files, then adopt them in place
+  or add them to the current store. Name or ID conflicts keep both versions.
+- **Replace dataset:** retain the old dataset and its identity metadata in a
+  recovery backup before replacing it.
+- **Restore backup:** restore that dataset and retain the displaced data separately.
+- **Export plaintext:** require explicit consent before writing decrypted data
+  outside TCUI protection.
+
+TCUI recognizes copied encrypted files and asks for the source password. It then
+uses the destination instance's password. Imported encrypted data stays encrypted
+unless the user explicitly confirms a plaintext protection choice. Provider
+credentials do not transfer. Numeric context IDs belong to the local catalog;
+imports preserve source IDs when they are available and do not conflict.
+
+External import/export is limited to 64 MiB per file and 256 MiB per operation.
+Native adoption and retained backups support 1 GiB per stored file with no total
+byte cap. File-count and path-depth limits still apply. Legacy V1 files need a
+source-side upgrade with the original wrapping metadata; old `enc:v1:` Memory
+records also need the original `chat.key`. A password alone cannot recover them.
+
+See the [Vault guide](skills/vault/SKILL.md) for native operations, workspace
+navigation, move recovery, and limits.
 
 ## Install
 

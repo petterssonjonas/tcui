@@ -2,16 +2,11 @@ use ratatui::{prelude::*, widgets::*, Frame};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LauncherAction {
-    MarkdownVault,
-    MemoryManagement,
+    Vault,
+    #[cfg(feature = "memory")]
+    Memories,
     Settings,
     Terminal,
-    System,
-    Research,
-    Todo,
-    Kanban,
-    News,
-    Pomodoro,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,42 +15,19 @@ struct LauncherFeature {
     action: LauncherAction,
 }
 
-const FEATURES: [LauncherFeature; 10] = [
+const FEATURES: &[LauncherFeature] = &[
     LauncherFeature {
-        label: "Markdown Vault",
-        action: LauncherAction::MarkdownVault,
+        label: "Vault",
+        action: LauncherAction::Vault,
     },
+    #[cfg(feature = "memory")]
     LauncherFeature {
-        label: "Memory management",
-        action: LauncherAction::MemoryManagement,
+        label: "Memories",
+        action: LauncherAction::Memories,
     },
     LauncherFeature {
         label: "Settings",
         action: LauncherAction::Settings,
-    },
-    LauncherFeature {
-        label: "System",
-        action: LauncherAction::System,
-    },
-    LauncherFeature {
-        label: "Research",
-        action: LauncherAction::Research,
-    },
-    LauncherFeature {
-        label: "TODO",
-        action: LauncherAction::Todo,
-    },
-    LauncherFeature {
-        label: "Kanban",
-        action: LauncherAction::Kanban,
-    },
-    LauncherFeature {
-        label: "News",
-        action: LauncherAction::News,
-    },
-    LauncherFeature {
-        label: "Pomodoro",
-        action: LauncherAction::Pomodoro,
     },
     LauncherFeature {
         label: "Terminal",
@@ -100,8 +72,11 @@ pub fn hit_areas(area: Rect) -> Vec<LauncherHitArea> {
 }
 
 fn cards(area: Rect) -> Vec<(LauncherFeature, Rect)> {
-    let row_height: u16 = if area.height >= 19 { 3 } else { 2 };
-    let total_height = row_height.saturating_mul(5).saturating_add(4);
+    let rows = u16::try_from(FEATURES.len().div_ceil(2)).unwrap_or(u16::MAX);
+    let row_height: u16 = if area.height >= 7 { 3 } else { 2 };
+    let total_height = row_height
+        .saturating_mul(rows)
+        .saturating_add(rows.saturating_sub(1));
     let width = area.width.saturating_sub(4).min(60);
     let grid = Rect::new(
         area.x.saturating_add(area.width.saturating_sub(width) / 2),
@@ -117,7 +92,7 @@ fn cards(area: Rect) -> Vec<(LauncherFeature, Rect)> {
         return cards;
     }
 
-    for row in 0..5_u16 {
+    for row in 0..rows {
         let y = grid
             .y
             .saturating_add(row.saturating_mul(row_height.saturating_add(1)));
@@ -126,7 +101,9 @@ fn cards(area: Rect) -> Vec<(LauncherFeature, Rect)> {
             let x = grid
                 .x
                 .saturating_add(column.saturating_mul(column_width.saturating_add(column_gap)));
-            cards.push((FEATURES[index], Rect::new(x, y, column_width, row_height)));
+            if let Some(feature) = FEATURES.get(index) {
+                cards.push((*feature, Rect::new(x, y, column_width, row_height)));
+            }
         }
     }
 
@@ -184,8 +161,14 @@ mod tests {
             .map(|hit| hit.action)
             .collect::<Vec<_>>();
 
-        assert_eq!(actions, super::FEATURES.map(|feature| feature.action));
-        assert_eq!(actions[0], super::LauncherAction::MarkdownVault);
+        assert_eq!(
+            actions,
+            super::FEATURES
+                .iter()
+                .map(|feature| feature.action)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(actions[0], super::LauncherAction::Vault);
     }
 
     #[test]

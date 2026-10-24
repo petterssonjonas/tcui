@@ -4,25 +4,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::config::vault_profiles::{VaultCatalog, VaultProfile, VaultProfileId};
 use crate::vault::move_execute::{
     inject_failure, take_test_events, MoveExecuteError, MoveExecutor, TestEvent, TestFailurePoint,
 };
 use crate::vault::move_journal::{JournalStore, MoveJournalState, MoveOperationId};
 use crate::vault::move_plan::{MovePair, MovePlan, VaultFileRef};
-use crate::vault::{
-    VaultMutationLock, VaultProfileRegistration, VaultRelativePath, VaultWriteError,
-    VaultWriteService,
-};
+use crate::vault::{VaultMutationLock, VaultRelativePath, VaultWriteError, VaultWriteService};
 
 struct Fixture {
     base: PathBuf,
     source_root: PathBuf,
     destination_root: PathBuf,
     data_root: PathBuf,
-    source_id: VaultProfileId,
-    destination_id: VaultProfileId,
-    catalog: VaultCatalog,
 }
 
 impl Fixture {
@@ -32,42 +25,29 @@ impl Fixture {
             std::process::id(),
             rand::random::<u64>()
         ));
-        let source_root = base.join("source");
-        let destination_root = base.join("destination");
         let data_root = base.join("data").join("tcui");
+        let source_root = data_root.join("vault/source");
+        let destination_root = data_root.join("vault/destination");
         fs::create_dir_all(&source_root).expect("create source root");
         fs::create_dir_all(&destination_root).expect("create destination root");
-        let source = VaultProfile::new("Source", &source_root).expect("source profile");
-        let destination =
-            VaultProfile::new("Destination", &destination_root).expect("destination profile");
-        let source_id = source.id.clone();
-        let destination_id = destination.id.clone();
-        let mut catalog = VaultCatalog::default();
-        catalog.add(source).expect("register source profile");
-        catalog
-            .add(destination)
-            .expect("register destination profile");
         Self {
             base,
             source_root,
             destination_root,
             data_root,
-            source_id,
-            destination_id,
-            catalog,
         }
     }
 
     fn pair(&self, source: &str, destination: &str, overwrite: bool) -> MovePair {
         MovePair::new(
-            self.file_ref(self.source_id.clone(), source),
-            self.file_ref(self.destination_id.clone(), destination),
+            self.file_ref(source),
+            VaultFileRef::new(relative(&format!("destination/{destination}"))),
             overwrite,
         )
     }
 
-    fn file_ref(&self, profile_id: VaultProfileId, path: &str) -> VaultFileRef {
-        VaultFileRef::new(profile_id, relative(path))
+    fn file_ref(&self, path: &str) -> VaultFileRef {
+        VaultFileRef::new(relative(&format!("source/{path}")))
     }
 
     fn write_source(&self, path: &str, bytes: &[u8]) {
@@ -79,11 +59,11 @@ impl Fixture {
     }
 
     fn plan(&self, pairs: Vec<MovePair>) -> MovePlan {
-        MovePlan::build(pairs, &self.catalog, |_| false).expect("build confirmed move plan")
+        MovePlan::build(pairs, &self.data_root, |_| false).expect("build confirmed move plan")
     }
 
     fn executor(&self) -> MoveExecutor<'_> {
-        MoveExecutor::at_data_root(&self.catalog, &self.data_root)
+        MoveExecutor::at_data_root(&self.data_root)
     }
 
     fn journal(&self, operation_id: &MoveOperationId) -> crate::vault::move_journal::MoveJournalV1 {
@@ -132,7 +112,7 @@ fn move_execution_dual_handle_contention_returns_busy_without_journal() {
         Err(MoveExecuteError::Write(VaultWriteError::VaultBusy))
     ));
     assert!(fixture.source_root.join("note.md").exists());
-    assert!(!fixture.data_root.join("vault-ops").exists());
+    assert!(!fixture.data_root.join("vault-native-ops").exists());
 }
 
 #[test]
@@ -155,7 +135,7 @@ fn move_execution_cross_process_contention_returns_busy_without_journal() {
 
     // Then
     assert!(status.success());
-    assert!(!fixture.data_root.join("vault-ops").exists());
+    assert!(!fixture.data_root.join("vault-native-ops").exists());
 }
 
 #[test]
@@ -244,20 +224,20 @@ fn move_execution_source_sync_failure_restores_pre_operation_state() {
 }
 
 #[test]
-fn move_execution_same_profile_move_and_rollback_preserve_transaction_guarantees() {
+fn move_execution_same_directory_move_and_rollback_preserve_transaction_guarantees() {
     let _env_guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock");
     for failure in [None, Some(TestFailurePoint::SourceDirectorySync)] {
         // Given
         let fixture = Fixture::new(match failure {
-            None => "same-profile-happy",
-            Some(_) => "same-profile-rollback",
+            None => "same-directory-happy",
+            Some(_) => "same-directory-rollback",
         });
         fixture.write_source("notes/readme.md", b"source bytes");
         let pair = MovePair::new(
-            fixture.file_ref(fixture.source_id.clone(), "notes/readme.md"),
-            fixture.file_ref(fixture.source_id.clone(), "archive/readme.md"),
+            fixture.file_ref("notes/readme.md"),
+            fixture.file_ref("archive/readme.md"),
             false,
         );
         let plan = fixture.plan(vec![pair]);
@@ -280,7 +260,7 @@ fn move_execution_same_profile_move_and_rollback_preserve_transaction_guarantees
             );
             assert!(!fixture.source_root.join("archive/readme.md").exists());
         } else {
-            result.expect("same-profile move");
+            result.expect("same-directory move");
             assert!(!fixture.source_root.join("notes/readme.md").exists());
             assert_eq!(
                 fs::read(fixture.source_root.join("archive/readme.md")).expect("moved destination"),
@@ -339,7 +319,7 @@ fn move_execution_precommit_revalidation_failure_never_starts_journal() {
         b"changed bytes"
     );
     assert!(!fixture.destination_root.join("moved.md").exists());
-    assert!(!fixture.data_root.join("vault-ops").exists());
+    assert!(!fixture.data_root.join("vault-native-ops").exists());
 }
 
 #[test]
@@ -436,7 +416,7 @@ fn move_execution_unknown_journal_version_blocks_and_retains_all_data() {
     let plan = fixture.plan(vec![fixture.pair("note.md", "moved.md", false)]);
     let unknown = fixture
         .data_root
-        .join("vault-ops")
+        .join("vault-native-ops")
         .join("move-00000000000000000000000000000000");
     fs::create_dir_all(&unknown).expect("create unknown operation");
     let unknown_bytes = br#"{"version":99,"retained":"sentinel"}"#;
@@ -468,21 +448,14 @@ fn move_execution_unknown_journal_version_blocks_standalone_write() {
     fixture.write_source("note.md", b"source bytes");
     let unknown = fixture
         .data_root
-        .join("vault-ops")
+        .join("vault-native-ops")
         .join("move-00000000000000000000000000000000");
     fs::create_dir_all(&unknown).expect("create unknown operation");
     fs::write(unknown.join("journal.json"), br#"{"version":99}"#).expect("write unknown journal");
-    let service = VaultWriteService::at_data_root(
-        [VaultProfileRegistration::new(
-            fixture.source_id.clone(),
-            fixture.source_root.clone(),
-        )],
-        &fixture.data_root,
-    )
-    .expect("open write service");
+    let service = VaultWriteService::at_data_root(&fixture.data_root).expect("open write service");
 
     // When
-    let result = service.write(&fixture.source_id, &relative("note.md"), b"replacement");
+    let result = service.write(&relative("source/note.md"), b"replacement");
 
     // Then
     assert!(matches!(
@@ -516,7 +489,7 @@ fn move_execution_journal_storage_uses_private_unix_modes() {
     // Then
     let operation_root = fixture
         .data_root
-        .join("vault-ops")
+        .join("vault-native-ops")
         .join(operation_id.as_str());
     let directory_mode = fs::metadata(&operation_root)
         .expect("operation metadata")

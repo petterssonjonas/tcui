@@ -8,7 +8,6 @@ pub mod settings_panel;
 pub mod shell;
 pub mod status_bar;
 mod status_bar_layout;
-pub mod vault_profile_ui;
 
 #[cfg(test)]
 mod status_bar_tests;

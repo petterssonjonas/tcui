@@ -39,7 +39,7 @@ pub(super) fn directory(path: &Path, create: bool) -> io::Result<Dir> {
     Ok(directory)
 }
 
-pub(super) fn read_regular(path: &Path) -> io::Result<Vec<u8>> {
+fn regular_file(path: &Path) -> io::Result<File> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("storage path has no parent"))?;
@@ -53,14 +53,26 @@ pub(super) fn read_regular(path: &Path) -> io::Result<Vec<u8>> {
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )?;
-    let mut file = File::from(descriptor);
+    let file = File::from(descriptor);
     if !file.metadata()?.is_file() {
         return Err(io::Error::other(
             "protected storage path is not a regular file",
         ));
     }
+    Ok(file)
+}
+
+pub(super) fn read_regular(path: &Path) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    regular_file(path)?.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+pub(super) fn read_regular_prefix(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    regular_file(path)?
+        .take(limit as u64)
+        .read_to_end(&mut bytes)?;
     Ok(bytes)
 }
 

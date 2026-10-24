@@ -190,16 +190,18 @@ fn insert_to_chat_read_failure_leaves_viewer_and_composer_unchanged() {
     with_test_app("insert-to-chat-read-failure", |app| {
         // Given
         let missing = std::env::temp_dir().join("tcui-missing-insert-to-chat.md");
-        let handle = ArtifactHandle::Saved(missing.clone());
+        let handle =
+            ArtifactHandle::Vault("18446744073709551615".parse().expect("missing item ID"));
         let artifact = ArtifactEntry {
             handle: handle.clone(),
             name: "missing.md".to_string(),
             kind: ArtifactKind::Markdown,
-            origin: ArtifactOrigin::Saved,
+            origin: ArtifactOrigin::Vault,
             content: Some("preview".to_string()),
             path: Some(missing),
+            relative_path: Some(std::path::PathBuf::from("missing.md")),
         };
-        app.ui.saved_artifacts.push(artifact.clone());
+        app.ui.vault_artifacts.push(artifact.clone());
         app.ui.artifact_viewer =
             Some(crate::ui::modals::artifact_viewer::ArtifactViewerState::new(artifact));
         app.replace_input_content("keep me".to_string());

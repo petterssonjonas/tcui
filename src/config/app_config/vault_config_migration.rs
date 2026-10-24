@@ -3,12 +3,11 @@
 mod failure_cases;
 mod migration_cases;
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use super::persistence::{inject_failure, ConfigError, TestFailurePoint};
-use super::{AppConfig, VaultProfile, VaultProfileId};
+use super::AppConfig;
 
 fn env_lock() -> &'static Mutex<()> {
     crate::test_support::env_lock()
@@ -81,16 +80,6 @@ impl Drop for ConfigHome {
             None => std::env::remove_var("XDG_DATA_HOME"),
         }
         let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
-
-fn profile_config(display_name: &str, root: &Path) -> AppConfig {
-    let profile = VaultProfile::new(display_name, root).expect("create test profile");
-    let id = profile.id.clone();
-    AppConfig {
-        vaults: HashMap::from([(id.clone(), profile)]),
-        default_vault_id: Some(id),
-        ..AppConfig::default()
     }
 }
 

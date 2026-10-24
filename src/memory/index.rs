@@ -30,6 +30,7 @@ pub(crate) struct MemoryIndex {
 impl MemoryIndex {
     pub(crate) fn open(path: &Path) -> Result<Self, IndexError> {
         protection::require(Domain::Memories)?;
+        super::management::require_native_file_policy(path)?;
         register_sqlite_vec()?;
         let protected = protection::is_protected(Domain::Memories)?;
         let mut conn = if protected {
@@ -61,6 +62,7 @@ impl MemoryIndex {
 
     pub(super) fn fresh(path: &Path) -> Result<Self, IndexError> {
         protection::require(Domain::Memories)?;
+        super::management::require_native_file_policy(path)?;
         register_sqlite_vec()?;
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(
@@ -87,6 +89,7 @@ impl MemoryIndex {
     pub(crate) fn persist(&self) -> Result<(), IndexError> {
         protection::require(Domain::Memories)?;
         if let Some(path) = &self.snapshot {
+            super::management::require_native_file_policy(path)?;
             let bytes = self.conn.serialize(rusqlite::MAIN_DB)?;
             protection::write(Domain::Memories, path, &bytes)?;
         }

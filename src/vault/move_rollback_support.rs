@@ -1,19 +1,19 @@
-use crate::config::vault_profiles::VaultCatalog;
+use std::path::Path;
 
 use super::move_journal::MoveJournalFileRef;
 use super::move_recovery_fs::{read_optional, replace_file, RecoveryFsError};
 use super::VaultRelativePath;
 
 pub(super) fn restore_source(
-    catalog: &VaultCatalog,
+    data_root: &Path,
     source: &MoveJournalFileRef,
     original: &[u8],
 ) -> Result<(), RollbackFailure> {
-    match read_optional(catalog, source)
+    match read_optional(data_root, source)
         .map_err(|error| fs_failure(RecoveryFailurePoint::RestoreSource, error))?
     {
         Some(current) if current == original => Ok(()),
-        None => replace_file(catalog, source, original)
+        None => replace_file(data_root, source, original)
             .map_err(|error| fs_failure(RecoveryFailurePoint::RestoreSource, error)),
         Some(_) => Err(RollbackFailure::new(
             RecoveryFailurePoint::RestoreSource,
@@ -23,18 +23,18 @@ pub(super) fn restore_source(
 }
 
 pub(super) fn restore_destination(
-    catalog: &VaultCatalog,
+    data_root: &Path,
     destination: &MoveJournalFileRef,
     original: &[u8],
     moved: &[u8],
 ) -> Result<(), RollbackFailure> {
-    match read_optional(catalog, destination)
+    match read_optional(data_root, destination)
         .map_err(|error| fs_failure(RecoveryFailurePoint::RestoreDestination, error))?
     {
         Some(current) if current == original => Ok(()),
-        Some(current) if current == moved => replace_file(catalog, destination, original)
+        Some(current) if current == moved => replace_file(data_root, destination, original)
             .map_err(|error| fs_failure(RecoveryFailurePoint::RestoreDestination, error)),
-        None => replace_file(catalog, destination, original)
+        None => replace_file(data_root, destination, original)
             .map_err(|error| fs_failure(RecoveryFailurePoint::RestoreDestination, error)),
         Some(_) => Err(RollbackFailure::new(
             RecoveryFailurePoint::RestoreDestination,

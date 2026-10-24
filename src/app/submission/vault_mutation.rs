@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use crate::config::vault_profiles::VaultCatalog;
 use crate::vault::mutation_plan::{
     VaultMutationKind, VaultMutationPlanError, VaultMutationPreview,
 };
@@ -47,9 +46,8 @@ impl PendingVaultMutation {
     pub(crate) fn new(
         submission: PreparedUserTurn,
         kind: VaultMutationKind,
-        catalog: &VaultCatalog,
     ) -> Result<Self, VaultMutationPlanError> {
-        let preview = kind.preview(catalog)?;
+        let preview = kind.preview()?;
         Ok(Self {
             submission,
             kind,
@@ -63,9 +61,8 @@ impl PendingVaultMutation {
     pub(crate) fn new_workspace(
         submission: PreparedUserTurn,
         kind: VaultMutationKind,
-        catalog: &VaultCatalog,
     ) -> Result<Self, VaultMutationPlanError> {
-        let preview = kind.preview(catalog)?;
+        let preview = kind.preview()?;
         Ok(Self {
             submission,
             kind,
@@ -80,11 +77,7 @@ impl PendingVaultMutation {
         self.origin == VaultMutationOrigin::Workspace
     }
 
-    pub(crate) fn confirm(
-        &mut self,
-        catalog: &VaultCatalog,
-        data_root: &Path,
-    ) -> Result<(), VaultMutationPlanError> {
+    pub(crate) fn confirm(&mut self, data_root: &Path) -> Result<(), VaultMutationPlanError> {
         if !self.preview.confirm_enabled {
             let error = VaultMutationPlanError::UnapprovedCollision;
             self.state = VaultMutationConfirmationState::Reviewing {
@@ -92,7 +85,7 @@ impl PendingVaultMutation {
             };
             return Err(error);
         }
-        match self.kind.revalidate(catalog, data_root) {
+        match self.kind.revalidate(data_root) {
             Ok(()) => {
                 self.state = VaultMutationConfirmationState::ReadyForExecution;
                 Ok(())

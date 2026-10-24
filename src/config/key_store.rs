@@ -17,6 +17,7 @@ pub use credential::{
 };
 use oauth::StoredOAuthCredential;
 pub use oauth::{KeyStoreError, OAuthCredential, OAuthCredentialOwnership, OAuthCredentialSource};
+pub(crate) use vault::ProtectionWrapping;
 use vault::Vault;
 pub use vault::{CredentialStorage, SecretEntry, SecretKind, VaultStatus};
 
@@ -125,6 +126,13 @@ impl KeyStore {
             )?;
             Ok(key)
         })
+    }
+
+    /// Exports only the authenticated password wrapping for the application data master.
+    /// This never creates a key and never exports provider credentials.
+    pub(crate) fn protection_wrapping() -> std::result::Result<ProtectionWrapping, KeyStoreError> {
+        let keys = vault::session()?;
+        Vault::open()?.protection_wrapping(&keys)
     }
 
     pub fn vault_status(config: &AppConfig) -> std::result::Result<VaultStatus, KeyStoreError> {

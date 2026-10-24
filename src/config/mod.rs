@@ -4,7 +4,6 @@ pub mod mcp_config;
 pub mod search;
 pub mod soul;
 pub mod tui;
-pub mod vault_profiles;
 
 pub use app_config::{
     AppConfig, LocalInferenceConfig, LocalServerType, ProviderConfig, LOCAL_PROVIDER_NAME,

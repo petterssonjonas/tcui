@@ -1,9 +1,12 @@
+mod adoption;
 mod atomic;
 mod compat;
 mod deletion;
+mod items;
 mod lock;
 mod manifest;
 mod model;
+mod moves;
 
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -17,10 +20,12 @@ use lock::GlobalLinkLock;
 use manifest::LinkManifest;
 
 pub(crate) use atomic::AtomicWriteTarget;
-use model::{collision_filename, sanitize_name, validate_conversation_id};
+use model::{collision_filename, validate_conversation_id};
 pub(crate) use model::{
-    ChatFileError, ChatFileId, ChatFileLink, ChatFileLinkManifestV1, SavedFileRecord,
+    ChatFileError, ChatFileId, ChatFileLink, ChatFileManifest, SavedFileRecord, VaultItemId,
+    VaultItemRecord,
 };
+pub(crate) use moves::NativeMoveSnapshot;
 
 use crate::storage::paths::TcuiDataPaths;
 
@@ -58,13 +63,11 @@ impl ChatSavedFileStore {
         name: &str,
         contents: &[u8],
     ) -> Result<SavedFileRecord, ChatFileError> {
-        let _lock = GlobalLinkLock::acquire(&self.paths)?;
-        self.ensure_saved_root()?;
-        let (filename, path) = self.write_unique_saved_file(name, contents)?;
+        let item = self.create_item(name, contents, None)?;
         Ok(SavedFileRecord {
-            filename,
-            path,
-            size_bytes: contents.len() as u64,
+            filename: item.filename,
+            path: item.path,
+            size_bytes: item.size_bytes,
         })
     }
 
@@ -74,23 +77,11 @@ impl ChatSavedFileStore {
         name: &str,
         contents: &[u8],
     ) -> Result<ChatFileLink, ChatFileError> {
-        validate_conversation_id(conversation_id)?;
-        let _lock = GlobalLinkLock::acquire(&self.paths)?;
-        self.ensure_saved_root()?;
-        let mut manifest = self.load_manifest()?;
-        self.prune_stale_links(&mut manifest)?;
-        let (filename, path) = self.write_unique_saved_file(name, contents)?;
-        let link = ChatFileLink {
-            id: self.allocate_id(&manifest),
-            conversation_id,
-            filename,
-        };
-        manifest.links.push(link.clone());
-        if let Err(error) = self.write_manifest(&manifest) {
-            self.rollback_created_file(&path)?;
-            return Err(error);
-        }
-        Ok(link)
+        self.create_item(name, contents, Some(conversation_id))?
+            .chat_links
+            .into_iter()
+            .next()
+            .ok_or(ChatFileError::CorruptManifest)
     }
 
     pub(crate) fn import_for_chat(
@@ -107,25 +98,15 @@ impl ChatSavedFileStore {
     }
 
     pub(crate) fn list_saved(&self) -> Result<Vec<SavedFileRecord>, ChatFileError> {
-        self.ensure_saved_root()?;
-        let mut records = Vec::new();
-        let directory = self.open_saved_root()?;
-        for entry in directory.entries()? {
-            let entry = entry?;
-            let metadata = directory.symlink_metadata(entry.file_name())?;
-            let Some(filename) = entry.file_name().to_str().map(str::to_string) else {
-                continue;
-            };
-            if metadata.file_type().is_file() && !filename.starts_with('.') {
-                records.push(SavedFileRecord {
-                    filename,
-                    path: self.saved_root.join(entry.file_name()),
-                    size_bytes: metadata.len(),
-                });
-            }
-        }
-        records.sort_by(|left, right| left.filename.cmp(&right.filename));
-        Ok(records)
+        Ok(self
+            .list_items()?
+            .into_iter()
+            .map(|item| SavedFileRecord {
+                filename: item.filename,
+                path: item.path,
+                size_bytes: item.size_bytes,
+            })
+            .collect())
     }
 
     pub(crate) fn list_for_conversation(
@@ -133,6 +114,7 @@ impl ChatSavedFileStore {
         conversation_id: i64,
     ) -> Result<Vec<ChatFileLink>, ChatFileError> {
         validate_conversation_id(conversation_id)?;
+        let _mutation = self.acquire_mutation_lock()?;
         let _lock = GlobalLinkLock::acquire(&self.paths)?;
         self.ensure_saved_root()?;
         let mut manifest = self.load_manifest()?;
@@ -150,6 +132,7 @@ impl ChatSavedFileStore {
         id: ChatFileId,
     ) -> Result<Vec<u8>, ChatFileError> {
         validate_conversation_id(conversation_id)?;
+        let _mutation = self.acquire_mutation_lock()?;
         let _lock = GlobalLinkLock::acquire(&self.paths)?;
         self.ensure_saved_root()?;
         let mut manifest = self.load_manifest()?;
@@ -159,7 +142,18 @@ impl ChatSavedFileStore {
             .iter()
             .find(|link| link.conversation_id == conversation_id && link.id == id)
             .ok_or(ChatFileError::NotFound { id })?;
-        self.read_saved_path(&self.saved_path(&link.filename))
+        self.read_native_path(&self.saved_path(&link.filename))
+    }
+
+    fn acquire_mutation_lock(&self) -> Result<crate::vault::VaultMutationGuard, ChatFileError> {
+        let guard = crate::vault::VaultMutationLock::at_data_root(&self.paths.root)
+            .try_acquire()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        self.require_native_adoption()?;
+        crate::vault::move_journal::JournalStore::at_data_root(&self.paths.root)
+            .ensure_mutation_allowed()
+            .map_err(|error| ChatFileError::from_protection(error.into()))?;
+        Ok(guard)
     }
 
     fn open_saved_root(&self) -> Result<cap_std::fs::Dir, ChatFileError> {
@@ -183,75 +177,49 @@ impl ChatSavedFileStore {
 
     pub(crate) fn verify_migrated_targets(&self) -> Result<(), ChatFileError> {
         let manifest = self.load_manifest()?;
-        let vault = crate::vault::VaultFs::open_profile(&self.saved_root)
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let vault = crate::vault::VaultFs::open(&self.saved_root)
+            .map_err(|error| ChatFileError::from_protection(error.into()))?;
         for link in manifest.links {
             let path = crate::vault::VaultRelativePath::parse(Path::new(&link.filename))
                 .map_err(|_| ChatFileError::InvalidFileName)?;
-            vault.read_bytes(&path).map_err(|error| {
-                std::io::Error::other(format!(
-                    "Saved migration cannot complete while linked file {} is unavailable: {error}",
-                    link.filename
-                ))
-            })?;
+            vault
+                .read_bytes(&path)
+                .map_err(|error| ChatFileError::from_protection(error.into()))?;
         }
         Ok(())
     }
 
-    pub(crate) fn require_unlinked_move(&self, source: &Path) -> Result<(), ChatFileError> {
-        if source.parent() != Some(self.saved_root.as_path()) {
-            return Ok(());
-        }
-        self.ensure_saved_root()?;
-        let filename = source
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or(ChatFileError::InvalidFileName)?;
-        if self
-            .load_manifest()?
-            .links
-            .iter()
-            .any(|link| link.filename == filename)
-        {
-            return Err(std::io::Error::other("This file has chat links and cannot be moved or renamed. Explicitly copy/export it instead; the linked original must remain in the internal Vault.").into());
-        }
-        Ok(())
-    }
-
-    fn load_manifest(&self) -> Result<ChatFileLinkManifestV1, ChatFileError> {
+    fn load_manifest(&self) -> Result<ChatFileManifest, ChatFileError> {
         LinkManifest::new(&self.paths, &self.writer).load()
     }
 
-    fn write_manifest(&self, manifest: &ChatFileLinkManifestV1) -> Result<(), ChatFileError> {
+    fn write_manifest(&self, manifest: &ChatFileManifest) -> Result<(), ChatFileError> {
         LinkManifest::new(&self.paths, &self.writer).write(manifest)
     }
 
-    fn prune_stale_links(
-        &self,
-        manifest: &mut ChatFileLinkManifestV1,
-    ) -> Result<(), ChatFileError> {
-        let before = manifest.links.len();
-        let directory = self.open_saved_root()?;
-        manifest.links.retain(|link| {
-            directory
-                .symlink_metadata(&link.filename)
-                .is_ok_and(|metadata| metadata.file_type().is_file())
-        });
-        if manifest.links.len() != before {
-            self.write_manifest(manifest)?;
-        }
-        Ok(())
+    fn prune_stale_links(&self, manifest: &mut ChatFileManifest) -> Result<(), ChatFileError> {
+        self.reconcile_items(manifest)
     }
 
     fn write_unique_saved_file(
         &self,
-        name: &str,
+        relative_path: &Path,
         contents: &[u8],
     ) -> Result<(String, PathBuf), ChatFileError> {
         let contents = crate::vault::encode_root(&self.saved_root, contents)?;
-        let sanitized = sanitize_name(name);
+        let parent = relative_path.parent().unwrap_or_else(|| Path::new(""));
+        crate::protection::open_directory(&self.saved_root.join(parent), true)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let name = relative_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(ChatFileError::InvalidFileName)?;
         for suffix in 1..=u32::MAX {
-            let filename = collision_filename(&sanitized, suffix);
+            let relative = parent.join(collision_filename(name, suffix));
+            let filename = relative
+                .to_str()
+                .ok_or(ChatFileError::InvalidFileName)?
+                .to_string();
             let path = self.saved_path(&filename);
             match self
                 .writer
@@ -270,10 +238,15 @@ impl ChatSavedFileStore {
         .into())
     }
 
-    fn allocate_id(&self, manifest: &ChatFileLinkManifestV1) -> ChatFileId {
+    fn allocate_id(&self, manifest: &ChatFileManifest) -> ChatFileId {
         loop {
             let id = ChatFileId::random();
-            if manifest.links.iter().all(|link| link.id != id) {
+            if manifest.links.iter().all(|link| link.id != id)
+                && manifest
+                    .items
+                    .iter()
+                    .all(|item| item.archived_links.iter().all(|link| link.id != id))
+            {
                 return id;
             }
         }
@@ -287,14 +260,18 @@ impl ChatSavedFileStore {
                 rollback: std::io::Error::other("injected rollback failure"),
             });
         }
-        let filename = path.file_name().ok_or(ChatFileError::InvalidFileName)?;
-        self.open_saved_root()?
-            .remove_file(filename)
+        let relative = path
+            .strip_prefix(&self.saved_root)
+            .map_err(|_| ChatFileError::PathOutsideSavedRoot)?;
+        let (directory, name) = self.item_parent(relative)?;
+        directory
+            .remove_file(name)
             .map_err(|rollback| ChatFileError::RollbackFailed {
                 operation: "create",
                 rollback,
             })?;
-        atomic::sync_directory(&self.saved_root)
+        atomic::sync_handle(&directory)?;
+        Ok(())
     }
 
     fn saved_path(&self, filename: &str) -> PathBuf {
@@ -306,22 +283,33 @@ impl ChatSavedFileStore {
     }
 
     pub(crate) fn read_saved_path(&self, path: &Path) -> Result<Vec<u8>, ChatFileError> {
+        let _mutation = self.acquire_mutation_lock()?;
+        let _lock = GlobalLinkLock::acquire(&self.paths)?;
         self.ensure_saved_root()?;
-        let filename = path.file_name().ok_or(ChatFileError::InvalidFileName)?;
-        if path.parent() != Some(self.saved_root.as_path()) {
+        self.require_native_adoption()?;
+        self.read_native_path(path)
+    }
+
+    fn read_native_path(&self, path: &Path) -> Result<Vec<u8>, ChatFileError> {
+        let relative_path = path
+            .strip_prefix(&self.saved_root)
+            .map_err(|_| ChatFileError::PathOutsideSavedRoot)?;
+        if !items::item_path_is_valid(relative_path) {
             return Err(ChatFileError::PathOutsideSavedRoot);
         }
-        let relative = crate::vault::VaultRelativePath::parse(Path::new(filename))
+        let relative = crate::vault::VaultRelativePath::parse(relative_path)
             .map_err(|_| ChatFileError::InvalidFileName)?;
-        crate::vault::VaultFs::open_profile(&self.saved_root)
+        crate::vault::VaultFs::open(&self.saved_root)
             .and_then(|vault| vault.read_bytes(&relative))
-            .map_err(|error| std::io::Error::other(error.to_string()).into())
+            .map_err(|error| ChatFileError::from_protection(error.into()))
     }
 
     fn target_is_regular(&self, path: &Path) -> Result<(), ChatFileError> {
-        let metadata = self
-            .open_saved_root()?
-            .symlink_metadata(path.file_name().ok_or(ChatFileError::InvalidFileName)?)?;
+        let relative = path
+            .strip_prefix(&self.saved_root)
+            .map_err(|_| ChatFileError::PathOutsideSavedRoot)?;
+        let (parent, name) = self.item_parent(relative)?;
+        let metadata = parent.symlink_metadata(name)?;
         if metadata.file_type().is_file() {
             Ok(())
         } else {

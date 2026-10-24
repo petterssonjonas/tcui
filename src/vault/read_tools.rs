@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
@@ -7,7 +6,6 @@ use super::{
     VaultEntry, VaultFs, VaultFsError, VaultLimitReached, VaultRelativePath, VaultSearchLimits,
     VaultSearchMatch, VaultWalkLimits,
 };
-use crate::config::vault_profiles::{VaultProfile, VaultProfileId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct VaultReadOnlyLimits {
@@ -29,28 +27,9 @@ impl Default for VaultReadOnlyLimits {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum VaultReadOnlyOperation {
-    List {
-        profile_id: VaultProfileId,
-        path: Option<VaultRelativePath>,
-    },
-    Read {
-        profile_id: VaultProfileId,
-        path: VaultRelativePath,
-    },
-    Search {
-        profile_id: VaultProfileId,
-        query: String,
-    },
-}
-
-impl VaultReadOnlyOperation {
-    fn profile_id(&self) -> &VaultProfileId {
-        match self {
-            Self::List { profile_id, .. }
-            | Self::Read { profile_id, .. }
-            | Self::Search { profile_id, .. } => profile_id,
-        }
-    }
+    List { path: Option<VaultRelativePath> },
+    Read { path: VaultRelativePath },
+    Search { query: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +54,6 @@ pub(crate) enum VaultReadOnlyData {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VaultReadOnlyResult {
-    pub(crate) display_name: String,
     pub(crate) status: VaultReadOnlyStatus,
     pub(crate) limits: Vec<VaultLimitReached>,
     pub(crate) data: VaultReadOnlyData,
@@ -125,7 +103,7 @@ impl VaultReadOnlyResult {
             }),
         };
         json!({
-            "vault": self.display_name,
+            "vault": "Vault",
             "status": status,
             "limits": limits,
             "data": data,
@@ -136,38 +114,28 @@ impl VaultReadOnlyResult {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum VaultReadOnlyError {
-    #[error("unknown Markdown Vault read-only tool '{0}'")]
+    #[error("unknown Vault read-only tool '{0}'")]
     UnknownTool(String),
-    #[error("missing or invalid '{name}' argument for Markdown Vault tool")]
+    #[error("missing or invalid '{name}' argument for Vault tool")]
     InvalidArgument { name: &'static str },
     #[error(transparent)]
     InvalidPath(#[from] super::VaultPathError),
-    #[error("Markdown Vault profile is no longer configured")]
-    UnknownProfile,
-    #[error("Markdown Vault profile '{display_name}' is unavailable")]
-    Unavailable { display_name: String },
-    #[error("failed to open Markdown Vault profile '{display_name}'")]
-    OpenProfile { display_name: String },
     #[error(transparent)]
     FileSystem(#[from] VaultFsError),
 }
 
 pub(crate) fn parse_read_only_operation(
-    profile_id: VaultProfileId,
     tool: &str,
     arguments: &Map<String, Value>,
 ) -> Result<VaultReadOnlyOperation, VaultReadOnlyError> {
     match tool {
         "list_notes" => Ok(VaultReadOnlyOperation::List {
-            profile_id,
             path: optional_path(arguments)?,
         }),
         "read_note" => Ok(VaultReadOnlyOperation::Read {
-            profile_id,
             path: required_path(arguments)?,
         }),
         "search_notes" => Ok(VaultReadOnlyOperation::Search {
-            profile_id,
             query: required_string(arguments, "query")?.to_owned(),
         }),
         unknown => Err(VaultReadOnlyError::UnknownTool(unknown.to_owned())),
@@ -175,22 +143,11 @@ pub(crate) fn parse_read_only_operation(
 }
 
 pub(crate) fn execute_read_only(
-    profiles: &HashMap<VaultProfileId, VaultProfile>,
+    data_root: &Path,
     operation: &VaultReadOnlyOperation,
     limits: VaultReadOnlyLimits,
 ) -> Result<VaultReadOnlyResult, VaultReadOnlyError> {
-    let profile = profiles
-        .get(operation.profile_id())
-        .ok_or(VaultReadOnlyError::UnknownProfile)?;
-    if !profile.available {
-        return Err(VaultReadOnlyError::Unavailable {
-            display_name: profile.display_name.clone(),
-        });
-    }
-    let vault =
-        VaultFs::open_profile(&profile.root).map_err(|_| VaultReadOnlyError::OpenProfile {
-            display_name: profile.display_name.clone(),
-        })?;
+    let vault = VaultFs::open(&data_root.join("vault"))?;
     let (data, reached) = match operation {
         VaultReadOnlyOperation::List { path, .. } => {
             let result = vault.list(path.as_ref(), limits.walk)?;
@@ -224,7 +181,6 @@ pub(crate) fn execute_read_only(
         VaultReadOnlyStatus::Partial
     };
     Ok(VaultReadOnlyResult {
-        display_name: profile.display_name.clone(),
         status,
         limits: reached,
         data,

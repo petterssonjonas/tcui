@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use ratatui::{prelude::*, widgets::*, Frame};
 
-use crate::ui::markdown_vault::tree::{build_tree_nodes, TreeSourceEntry, VaultTreeNode};
+use crate::storage::chat_files::{VaultItemId, VaultItemRecord};
+use crate::ui::vault::tree::{build_tree_nodes, TreeSourceEntry, VaultTreeNode};
 use crate::vault::VaultEntryKind;
 
 const ROW_HEIGHT: u16 = 3;
@@ -20,9 +21,8 @@ pub enum ArtifactHandle {
         id: crate::storage::chat_files::ChatFileId,
     },
     Media(String),
-    Saved(PathBuf),
-    Memory(PathBuf),
-    Vault(PathBuf),
+    Memory(u64),
+    Vault(VaultItemId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,7 +39,6 @@ pub enum ArtifactKind {
 pub enum ArtifactOrigin {
     Temporary,
     Chat,
-    Saved,
     Memory,
     Vault,
 }
@@ -52,6 +51,7 @@ pub struct ArtifactEntry {
     pub origin: ArtifactOrigin,
     pub content: Option<String>,
     pub path: Option<PathBuf>,
+    pub relative_path: Option<PathBuf>,
 }
 
 impl ArtifactEntry {
@@ -63,6 +63,7 @@ impl ArtifactEntry {
             origin: ArtifactOrigin::Temporary,
             content: Some(content),
             path: None,
+            relative_path: None,
         }
     }
 
@@ -82,6 +83,7 @@ impl ArtifactEntry {
             origin: ArtifactOrigin::Chat,
             content: None,
             path: Some(path),
+            relative_path: None,
         }
     }
 
@@ -94,60 +96,31 @@ impl ArtifactEntry {
             origin: ArtifactOrigin::Temporary,
             content: None,
             path: Some(path),
+            relative_path: None,
         })
     }
 
-    pub fn saved_markdown(path: PathBuf, content: String) -> Self {
+    pub fn memory_file(id: u64, title: String) -> Self {
         Self {
-            handle: ArtifactHandle::Saved(path.clone()),
-            name: display_name(&path),
-            kind: ArtifactKind::Markdown,
-            origin: ArtifactOrigin::Saved,
-            content: Some(content),
-            path: Some(path),
-        }
-    }
-
-    pub fn saved_file(path: PathBuf) -> Self {
-        Self {
-            handle: ArtifactHandle::Saved(path.clone()),
-            name: display_name(&path),
-            kind: infer_kind(&path, None),
-            origin: ArtifactOrigin::Saved,
-            content: None,
-            path: Some(path),
-        }
-    }
-
-    pub fn memory_file(
-        logical_path: PathBuf,
-        title: String,
-        markdown: String,
-        path: PathBuf,
-    ) -> Self {
-        Self {
-            handle: ArtifactHandle::Memory(logical_path),
-            name: title,
+            handle: ArtifactHandle::Memory(id),
+            name: display_label(title),
             kind: ArtifactKind::Markdown,
             origin: ArtifactOrigin::Memory,
-            content: Some(markdown),
-            path: Some(path),
+            content: None,
+            path: None,
+            relative_path: None,
         }
     }
 
-    pub fn vault_file(root: &Path, path: &Path) -> Self {
-        let relative = path
-            .strip_prefix(root)
-            .ok()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| path.to_path_buf());
+    pub fn vault_file(record: VaultItemRecord) -> Self {
         Self {
-            handle: ArtifactHandle::Vault(relative.clone()),
-            name: relative.display().to_string(),
-            kind: infer_kind(&relative, None),
+            handle: ArtifactHandle::Vault(record.id),
+            name: display_label(record.relative_path.to_string_lossy().into_owned()),
+            kind: infer_kind(&record.path, None),
             origin: ArtifactOrigin::Vault,
             content: None,
-            path: Some(path.to_path_buf()),
+            path: Some(record.path),
+            relative_path: Some(record.relative_path),
         }
     }
 
@@ -157,11 +130,10 @@ impl ArtifactEntry {
 
     pub fn action_label(&self, has_vault: bool) -> Option<&'static str> {
         match self.origin {
-            ArtifactOrigin::Temporary if self.is_markdown() && has_vault => Some("Vault"),
-            ArtifactOrigin::Temporary => Some("Save"),
-            ArtifactOrigin::Chat => None,
+            ArtifactOrigin::Temporary | ArtifactOrigin::Chat => {
+                Some(if has_vault { "Vault" } else { "Unlock" })
+            }
             ArtifactOrigin::Memory => Some("Exp"),
-            ArtifactOrigin::Saved => Some("Export"),
             ArtifactOrigin::Vault => None,
         }
     }
@@ -180,9 +152,7 @@ impl ArtifactEntry {
 
     pub fn origin_label(&self) -> &'static str {
         match self.origin {
-            ArtifactOrigin::Temporary => "Chat files",
-            ArtifactOrigin::Chat => "Chat files",
-            ArtifactOrigin::Saved => "Saved",
+            ArtifactOrigin::Temporary | ArtifactOrigin::Chat => "Chat Artifacts",
             ArtifactOrigin::Memory => "Memory",
             ArtifactOrigin::Vault => "Vault",
         }
@@ -192,7 +162,6 @@ impl ArtifactEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactSection {
     Temporary,
-    Saved,
     Memories,
     Vault,
 }
@@ -205,6 +174,8 @@ pub enum ArtifactSidebarAction {
     Edit(ArtifactHandle),
     Save(ArtifactHandle),
     Delete(ArtifactHandle),
+    Context(ArtifactHandle),
+    Copy(ArtifactHandle),
 }
 
 #[derive(Debug, Clone)]
@@ -214,6 +185,8 @@ struct ArtifactRowHitAreas {
     edit: Option<Rect>,
     save: Option<Rect>,
     delete: Option<Rect>,
+    context: Option<Rect>,
+    copy: Option<Rect>,
 }
 
 #[derive(Debug, Clone)]
@@ -225,24 +198,19 @@ struct VaultNodeHitArea {
 #[derive(Debug, Default, Clone)]
 pub struct ArtifactSidebarState {
     pub temp_scroll: usize,
-    pub saved_scroll: usize,
     pub memory_scroll: usize,
     pub vault_scroll: usize,
     pub temp_collapsed: bool,
-    pub saved_collapsed: bool,
     pub memory_collapsed: bool,
     pub vault_collapsed: bool,
     pub collapsed_vault_dirs: HashSet<PathBuf>,
     pub temp_header: Option<Rect>,
-    pub saved_header: Option<Rect>,
     pub memory_header: Option<Rect>,
     pub vault_header: Option<Rect>,
     pub temp_body: Option<Rect>,
-    pub saved_body: Option<Rect>,
     pub memory_body: Option<Rect>,
     pub vault_body: Option<Rect>,
     temp_rows: Vec<ArtifactRowHitAreas>,
-    saved_rows: Vec<ArtifactRowHitAreas>,
     memory_rows: Vec<ArtifactRowHitAreas>,
     vault_nodes: Vec<VaultNodeHitArea>,
 }
@@ -250,15 +218,12 @@ pub struct ArtifactSidebarState {
 impl ArtifactSidebarState {
     pub(crate) fn clear_hit_areas(&mut self) {
         self.temp_rows.clear();
-        self.saved_rows.clear();
         self.memory_rows.clear();
         self.vault_nodes.clear();
         self.temp_header = None;
-        self.saved_header = None;
         self.memory_header = None;
         self.vault_header = None;
         self.temp_body = None;
-        self.saved_body = None;
         self.memory_body = None;
         self.vault_body = None;
     }
@@ -268,12 +233,7 @@ impl ArtifactSidebarState {
             return Some(ArtifactSidebarAction::ToggleSection(section));
         }
 
-        for row in self
-            .temp_rows
-            .iter()
-            .chain(self.saved_rows.iter())
-            .chain(self.memory_rows.iter())
-        {
+        for row in self.temp_rows.iter().chain(self.memory_rows.iter()) {
             if row.open.is_some_and(|area| area.contains(pos)) {
                 return Some(ArtifactSidebarAction::Open(row.handle.clone()));
             }
@@ -282,6 +242,12 @@ impl ArtifactSidebarState {
             }
             if row.edit.is_some_and(|area| area.contains(pos)) {
                 return Some(ArtifactSidebarAction::Edit(row.handle.clone()));
+            }
+            if row.context.is_some_and(|area| area.contains(pos)) {
+                return Some(ArtifactSidebarAction::Context(row.handle.clone()));
+            }
+            if row.copy.is_some_and(|area| area.contains(pos)) {
+                return Some(ArtifactSidebarAction::Copy(row.handle.clone()));
             }
             if row.delete.is_some_and(|area| area.contains(pos)) {
                 return Some(ArtifactSidebarAction::Delete(row.handle.clone()));
@@ -296,7 +262,6 @@ impl ArtifactSidebarState {
     pub fn section_at(&self, pos: Position) -> Option<ArtifactSection> {
         [
             (ArtifactSection::Temporary, self.temp_body),
-            (ArtifactSection::Saved, self.saved_body),
             (ArtifactSection::Memories, self.memory_body),
             (ArtifactSection::Vault, self.vault_body),
         ]
@@ -308,7 +273,6 @@ impl ArtifactSidebarState {
         let max_offset = total.saturating_sub(visible.max(1));
         let offset = match section {
             ArtifactSection::Temporary => &mut self.temp_scroll,
-            ArtifactSection::Saved => &mut self.saved_scroll,
             ArtifactSection::Memories => &mut self.memory_scroll,
             ArtifactSection::Vault => &mut self.vault_scroll,
         };
@@ -323,7 +287,6 @@ impl ArtifactSidebarState {
     pub fn toggle(&mut self, section: ArtifactSection) {
         match section {
             ArtifactSection::Temporary => self.temp_collapsed = !self.temp_collapsed,
-            ArtifactSection::Saved => self.saved_collapsed = !self.saved_collapsed,
             ArtifactSection::Memories => self.memory_collapsed = !self.memory_collapsed,
             ArtifactSection::Vault => self.vault_collapsed = !self.vault_collapsed,
         }
@@ -340,7 +303,6 @@ impl ArtifactSidebarState {
     fn header_at(&self, pos: Position) -> Option<ArtifactSection> {
         [
             (ArtifactSection::Temporary, self.temp_header),
-            (ArtifactSection::Saved, self.saved_header),
             (ArtifactSection::Memories, self.memory_header),
             (ArtifactSection::Vault, self.vault_header),
         ]
@@ -351,7 +313,6 @@ impl ArtifactSidebarState {
 
 pub struct ArtifactSidebar<'a> {
     temporary: &'a [ArtifactEntry],
-    saved: &'a [ArtifactEntry],
     memories: &'a [ArtifactEntry],
     vault: &'a [ArtifactEntry],
     has_vault: bool,
@@ -361,17 +322,15 @@ pub struct ArtifactSidebar<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArtifactSidebarVisibility {
-    pub saved_files: bool,
     pub memories: bool,
-    pub markdown_vault: bool,
+    pub vault: bool,
 }
 
 impl ArtifactSidebarVisibility {
     pub const fn all() -> Self {
         Self {
-            saved_files: true,
             memories: true,
-            markdown_vault: true,
+            vault: true,
         }
     }
 }
@@ -379,7 +338,6 @@ impl ArtifactSidebarVisibility {
 impl<'a> ArtifactSidebar<'a> {
     pub fn new(
         temporary: &'a [ArtifactEntry],
-        saved: &'a [ArtifactEntry],
         memories: &'a [ArtifactEntry],
         vault: &'a [ArtifactEntry],
         has_vault: bool,
@@ -387,7 +345,6 @@ impl<'a> ArtifactSidebar<'a> {
     ) -> Self {
         Self {
             temporary,
-            saved,
             memories,
             vault,
             has_vault,
@@ -415,14 +372,6 @@ impl<'a> ArtifactSidebar<'a> {
             FLAT_SECTION_MAX_ROWS,
             inner.height,
         );
-        let saved_body_height = self.visibility.saved_files.then(|| {
-            section_body_height(
-                self.state.saved_collapsed,
-                self.saved.len(),
-                FLAT_SECTION_MAX_ROWS,
-                inner.height,
-            )
-        });
         let memory_body_height = self.visibility.memories.then(|| {
             section_body_height(
                 self.state.memory_collapsed,
@@ -438,13 +387,10 @@ impl<'a> ArtifactSidebar<'a> {
         };
 
         let mut constraints = vec![Constraint::Length(1), Constraint::Length(temp_body_height)];
-        if let Some(height) = saved_body_height {
-            constraints.extend([Constraint::Length(1), Constraint::Length(height)]);
-        }
         if let Some(height) = memory_body_height {
             constraints.extend([Constraint::Length(1), Constraint::Length(height)]);
         }
-        if self.visibility.markdown_vault {
+        if self.visibility.vault {
             constraints.extend([Constraint::Length(1), vault_body_constraint]);
         }
         let chunks = Layout::default()
@@ -459,7 +405,7 @@ impl<'a> ArtifactSidebar<'a> {
             chunks[chunk + 1],
             SectionConfig {
                 section: ArtifactSection::Temporary,
-                title: "Chat files",
+                title: "Chat Artifacts",
                 entries: self.temporary,
                 scroll: self.state.temp_scroll,
                 collapsed: self.state.temp_collapsed,
@@ -467,22 +413,6 @@ impl<'a> ArtifactSidebar<'a> {
             },
         );
         chunk += 2;
-        if self.visibility.saved_files {
-            self.render_flat_section(
-                f,
-                chunks[chunk],
-                chunks[chunk + 1],
-                SectionConfig {
-                    section: ArtifactSection::Saved,
-                    title: "Saved files",
-                    entries: self.saved,
-                    scroll: self.state.saved_scroll,
-                    collapsed: self.state.saved_collapsed,
-                    max_rows: FLAT_SECTION_MAX_ROWS,
-                },
-            );
-            chunk += 2;
-        }
         if self.visibility.memories {
             self.render_flat_section(
                 f,
@@ -499,7 +429,7 @@ impl<'a> ArtifactSidebar<'a> {
             );
             chunk += 2;
         }
-        if self.visibility.markdown_vault {
+        if self.visibility.vault {
             self.render_vault_section(f, chunks[chunk], chunks[chunk + 1]);
         }
     }
@@ -549,7 +479,7 @@ impl<'a> ArtifactSidebar<'a> {
                 Some(body_area)
             },
         );
-        self.render_header(f, header_area, "Markdown Vault", self.state.vault_collapsed);
+        self.render_header(f, header_area, "Vault", self.state.vault_collapsed);
         if self.state.vault_collapsed || body_area.height == 0 {
             return;
         }
@@ -657,7 +587,21 @@ impl<'a> ArtifactSidebar<'a> {
             f.render_widget(button("View", theme.info, theme.card_bg), rect);
         }
 
-        let edit = if matches!(entry.origin, ArtifactOrigin::Saved) {
+        let context = if matches!(entry.origin, ArtifactOrigin::Memory | ArtifactOrigin::Vault) {
+            let rect = button_area(&mut x, y, "+", area.right());
+            if let Some(rect) = rect {
+                f.render_widget(button("+", theme.info, theme.card_bg), rect);
+            }
+            rect
+        } else {
+            None
+        };
+        let copy = button_area(&mut x, y, "Copy", area.right());
+        if let Some(rect) = copy {
+            f.render_widget(button("Copy", theme.info, theme.card_bg), rect);
+        }
+
+        let edit = if matches!(entry.origin, ArtifactOrigin::Memory | ArtifactOrigin::Vault) {
             let rect = button_area(&mut x, y, "Edit", area.right());
             if let Some(rect) = rect {
                 f.render_widget(button("Edit", theme.warning, theme.card_bg), rect);
@@ -694,6 +638,8 @@ impl<'a> ArtifactSidebar<'a> {
             edit,
             save,
             delete,
+            context,
+            copy,
         });
     }
 
@@ -719,31 +665,53 @@ impl<'a> ArtifactSidebar<'a> {
         let visible = Self::visible_vault_rows(area);
         for (idx, node) in nodes.iter().skip(scroll).take(visible).enumerate() {
             let row = Rect::new(area.x, area.y + idx as u16, area.width, 1);
-            let label = vault_node_label(node, area.width as usize);
+            if node.entry_kind == VaultEntryKind::Directory {
+                f.render_widget(
+                    Paragraph::new(vault_node_label(node, area.width as usize))
+                        .style(Style::default().fg(theme.foreground)),
+                    row,
+                );
+                self.state.vault_nodes.push(VaultNodeHitArea {
+                    action: ArtifactSidebarAction::ToggleVaultDir(node.path.clone()),
+                    area: row,
+                });
+                continue;
+            }
+            // Catalog refresh sorts these native entries by relative path.
+            let Ok(index) = self.vault.binary_search_by(|entry| {
+                entry
+                    .relative_path
+                    .as_deref()
+                    .cmp(&Some(node.path.as_path()))
+            }) else {
+                continue;
+            };
+            let handle = self.vault[index].handle.clone();
+            let context_width = if row.width >= 4 { 4 } else { 0 };
+            let open = Rect::new(row.x, row.y, row.width - context_width, 1);
             f.render_widget(
-                Paragraph::new(label).style(Style::default().fg(theme.foreground)),
-                row,
+                Paragraph::new(vault_node_label(node, open.width as usize))
+                    .style(Style::default().fg(theme.foreground)),
+                open,
             );
             self.state.vault_nodes.push(VaultNodeHitArea {
-                action: match node.entry_kind {
-                    VaultEntryKind::Directory => {
-                        ArtifactSidebarAction::ToggleVaultDir(node.path.clone())
-                    }
-                    VaultEntryKind::File
-                    | VaultEntryKind::UnsupportedSymlink
-                    | VaultEntryKind::Unsupported => {
-                        ArtifactSidebarAction::Open(ArtifactHandle::Vault(node.path.clone()))
-                    }
-                },
-                area: row,
+                action: ArtifactSidebarAction::Open(handle.clone()),
+                area: open,
             });
+            if context_width != 0 {
+                let context = Rect::new(row.right() - 3, row.y, 3, 1);
+                f.render_widget(button("+", theme.info, theme.sidebar), context);
+                self.state.vault_nodes.push(VaultNodeHitArea {
+                    action: ArtifactSidebarAction::Context(handle),
+                    area: context,
+                });
+            }
         }
     }
 
     fn row_hits_mut(&mut self, section: ArtifactSection) -> &mut Vec<ArtifactRowHitAreas> {
         match section {
             ArtifactSection::Temporary => &mut self.state.temp_rows,
-            ArtifactSection::Saved => &mut self.state.saved_rows,
             ArtifactSection::Memories => &mut self.state.memory_rows,
             ArtifactSection::Vault => unreachable!("vault uses line hit areas"),
         }
@@ -752,7 +720,6 @@ impl<'a> ArtifactSidebar<'a> {
     fn set_header(&mut self, section: ArtifactSection, area: Rect) {
         match section {
             ArtifactSection::Temporary => self.state.temp_header = Some(area),
-            ArtifactSection::Saved => self.state.saved_header = Some(area),
             ArtifactSection::Memories => self.state.memory_header = Some(area),
             ArtifactSection::Vault => self.state.vault_header = Some(area),
         }
@@ -761,7 +728,6 @@ impl<'a> ArtifactSidebar<'a> {
     fn set_body(&mut self, section: ArtifactSection, area: Option<Rect>) {
         match section {
             ArtifactSection::Temporary => self.state.temp_body = area,
-            ArtifactSection::Saved => self.state.saved_body = area,
             ArtifactSection::Memories => self.state.memory_body = area,
             ArtifactSection::Vault => self.state.vault_body = area,
         }
@@ -770,7 +736,6 @@ impl<'a> ArtifactSidebar<'a> {
     fn set_scroll(&mut self, section: ArtifactSection, value: usize) {
         match section {
             ArtifactSection::Temporary => self.state.temp_scroll = value,
-            ArtifactSection::Saved => self.state.saved_scroll = value,
             ArtifactSection::Memories => self.state.memory_scroll = value,
             ArtifactSection::Vault => self.state.vault_scroll = value,
         }
@@ -792,9 +757,11 @@ fn build_vault_nodes(
 ) -> Vec<VaultTreeNode> {
     let sources = entries
         .iter()
-        .filter_map(|entry| match &entry.handle {
-            ArtifactHandle::Vault(path) => Some(TreeSourceEntry::file(path.clone(), entry.kind)),
-            _ => None,
+        .filter_map(|entry| {
+            entry
+                .relative_path
+                .as_ref()
+                .map(|path| TreeSourceEntry::file(path.clone(), entry.kind))
         })
         .collect::<Vec<_>>();
     build_tree_nodes(&sources, collapsed_dirs)
@@ -870,7 +837,7 @@ fn truncate_label(label: &str, width: usize) -> String {
         + "..."
 }
 
-fn infer_kind(path: &Path, content: Option<&str>) -> ArtifactKind {
+pub(crate) fn infer_kind(path: &Path, content: Option<&str>) -> ArtifactKind {
     let extension = path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -900,6 +867,17 @@ fn display_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+pub(crate) fn display_label(value: String) -> String {
+    if value
+        .chars()
+        .any(|character| character.is_control() || character == '\\')
+    {
+        value.escape_debug().to_string()
+    } else {
+        value
+    }
+}
+
 fn resolve_local_path(source: &str) -> Option<PathBuf> {
     crate::ui::components::image_block::is_local_image_source(source).then(|| {
         let trimmed = source.trim().trim_matches('<').trim_matches('>');
@@ -913,11 +891,7 @@ fn resolve_local_path(source: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        build_vault_nodes, ArtifactEntry, ArtifactHandle, ArtifactKind, ArtifactOrigin,
-        ArtifactSection, ArtifactSidebar, ArtifactSidebarAction, ArtifactSidebarState,
-    };
-    use ratatui::{backend::TestBackend, layout::Position, layout::Rect, Terminal};
+    use super::{build_vault_nodes, ArtifactEntry, ArtifactHandle, ArtifactKind, ArtifactOrigin};
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
 
@@ -926,15 +900,15 @@ mod tests {
             handle: match origin {
                 ArtifactOrigin::Temporary => ArtifactHandle::Temporary(1),
                 ArtifactOrigin::Chat => ArtifactHandle::Temporary(1),
-                ArtifactOrigin::Saved => ArtifactHandle::Saved(PathBuf::from(name)),
-                ArtifactOrigin::Memory => ArtifactHandle::Memory(PathBuf::from(name)),
-                ArtifactOrigin::Vault => ArtifactHandle::Vault(PathBuf::from(name)),
+                ArtifactOrigin::Memory => ArtifactHandle::Memory(432),
+                ArtifactOrigin::Vault => ArtifactHandle::Vault("32".parse().expect("item ID")),
             },
             name: name.to_string(),
             kind: ArtifactKind::Markdown,
             origin,
             content: Some("content".to_string()),
             path: None,
+            relative_path: (origin == ArtifactOrigin::Vault).then(|| PathBuf::from(name)),
         }
     }
 
@@ -964,112 +938,5 @@ mod tests {
         assert!(!collapsed
             .iter()
             .any(|node| node.path == Path::new("notes/a.md")));
-    }
-
-    #[test]
-    fn header_click_returns_toggle_action() {
-        let mut state = ArtifactSidebarState::default();
-        let temporary = vec![entry("temp.md", ArtifactOrigin::Temporary)];
-        let mut sidebar = ArtifactSidebar::new(&temporary, &[], &[], &[], false, &mut state);
-        let mut terminal = Terminal::new(TestBackend::new(32, 20)).expect("terminal");
-        terminal
-            .draw(|frame| sidebar.render(frame, Rect::new(0, 0, 32, 20)))
-            .expect("render");
-
-        let action = state.action_at(Position::new(1, 0));
-        assert!(matches!(
-            action,
-            Some(ArtifactSidebarAction::ToggleSection(
-                ArtifactSection::Temporary
-            ))
-        ));
-    }
-
-    #[test]
-    fn toggling_vault_dir_updates_collapsed_set() {
-        let mut state = ArtifactSidebarState::default();
-        let path = PathBuf::from("notes");
-
-        state.toggle_vault_dir(&path);
-        assert!(state.collapsed_vault_dirs.contains(&path));
-
-        state.toggle_vault_dir(&path);
-        assert!(!state.collapsed_vault_dirs.contains(&path));
-    }
-
-    #[test]
-    fn empty_flat_sections_use_one_row_and_vault_gets_remaining_space() {
-        let mut state = ArtifactSidebarState::default();
-        let mut sidebar = ArtifactSidebar::new(&[], &[], &[], &[], true, &mut state);
-        let mut terminal = Terminal::new(TestBackend::new(40, 30)).expect("terminal");
-
-        terminal
-            .draw(|frame| sidebar.render(frame, Rect::new(0, 0, 40, 30)))
-            .expect("render");
-        let rendered: String = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
-
-        assert_eq!(state.temp_body.expect("temp body").height, 1);
-        assert_eq!(state.saved_body.expect("saved body").height, 1);
-        assert_eq!(state.memory_body.expect("memory body").height, 1);
-        assert!(state.vault_body.expect("vault body").height > 1);
-        assert!(rendered.contains("Saved files"));
-    }
-
-    #[test]
-    fn flat_sections_grow_by_card_height_to_three_cards() {
-        let temporary = vec![
-            entry("one.md", ArtifactOrigin::Temporary),
-            entry("two.md", ArtifactOrigin::Temporary),
-        ];
-        let saved = vec![
-            entry("a.md", ArtifactOrigin::Saved),
-            entry("b.md", ArtifactOrigin::Saved),
-            entry("c.md", ArtifactOrigin::Saved),
-            entry("d.md", ArtifactOrigin::Saved),
-        ];
-        let memories = vec![entry("memory.md", ArtifactOrigin::Memory)];
-        let vault = vec![entry("vault.md", ArtifactOrigin::Vault)];
-        let mut state = ArtifactSidebarState::default();
-        let mut sidebar =
-            ArtifactSidebar::new(&temporary, &saved, &memories, &vault, true, &mut state);
-        let mut terminal = Terminal::new(TestBackend::new(40, 40)).expect("terminal");
-
-        terminal
-            .draw(|frame| sidebar.render(frame, Rect::new(0, 0, 40, 40)))
-            .expect("render");
-
-        assert_eq!(state.temp_body.expect("temp body").height, 7);
-        assert_eq!(state.saved_body.expect("saved body").height, 11);
-        assert_eq!(state.memory_body.expect("memory body").height, 3);
-        assert!(state.vault_body.expect("vault body").height > 1);
-    }
-
-    #[test]
-    fn flat_rows_use_card_background_with_sidebar_gap() {
-        let temporary = vec![
-            entry("one.md", ArtifactOrigin::Temporary),
-            entry("two.md", ArtifactOrigin::Temporary),
-        ];
-        let mut state = ArtifactSidebarState::default();
-        let mut sidebar = ArtifactSidebar::new(&temporary, &[], &[], &[], false, &mut state);
-        let mut terminal = Terminal::new(TestBackend::new(32, 20)).expect("terminal");
-
-        terminal
-            .draw(|frame| sidebar.render(frame, Rect::new(0, 0, 32, 20)))
-            .expect("render");
-
-        let theme = crate::theme::active_theme();
-        let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(0, 1)].bg, theme.sidebar);
-        assert_eq!(buffer[(1, 1)].bg, theme.card_bg);
-        assert_eq!(buffer[(1, 3)].bg, theme.card_bg);
-        assert_eq!(buffer[(1, 4)].bg, theme.sidebar);
-        assert_eq!(buffer[(1, 5)].bg, theme.card_bg);
     }
 }

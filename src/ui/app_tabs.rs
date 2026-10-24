@@ -1,7 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::config::vault_profiles::VaultProfileId;
-
 static NEXT_APP_TAB_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -26,13 +24,9 @@ pub enum AppView {
         session_id: u64,
     },
     Settings,
-    MarkdownVault {
-        profile_id: VaultProfileId,
-    },
-    #[cfg(test)]
-    Placeholder {
-        number: u32,
-    },
+    Vault,
+    #[cfg(feature = "memory")]
+    Memories,
 }
 
 impl AppView {
@@ -46,9 +40,9 @@ impl AppView {
             Self::Launcher => "Launcher",
             Self::Terminal { .. } => "Terminal",
             Self::Settings => "Settings",
-            Self::MarkdownVault { .. } => "Markdown Vault",
-            #[cfg(test)]
-            Self::Placeholder { .. } => "Placeholder",
+            Self::Vault => "Vault",
+            #[cfg(feature = "memory")]
+            Self::Memories => "Memories",
         }
     }
 }
@@ -87,17 +81,6 @@ pub enum CloseTabResult {
     Closed { id: AppTabId, active: AppTabId },
     Permanent { id: AppTabId },
     Unknown { id: AppTabId },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RebindMarkdownVaultError {
-    Unknown(AppTabId),
-    NotMarkdownVault(AppTabId),
-    ProfileMismatch {
-        id: AppTabId,
-        expected: VaultProfileId,
-        actual: VaultProfileId,
-    },
 }
 
 #[doc(hidden)]
@@ -162,16 +145,6 @@ impl AppTabs {
         let Some(tab) = self.active_tab() else {
             return AppView::Chat;
         };
-        #[cfg(test)]
-        if tab.view == AppView::Launcher {
-            let number = self
-                .tabs
-                .iter()
-                .position(|candidate| candidate.id == tab.id)
-                .and_then(|index| u32::try_from(index).ok())
-                .unwrap_or(u32::MAX);
-            return AppView::Placeholder { number };
-        }
         tab.view.clone()
     }
 
@@ -240,10 +213,13 @@ impl AppTabs {
         if tab.view != AppView::Launcher {
             return Err(ReplaceLauncherError::NotLauncher(id));
         }
-        if !matches!(
+        let valid = matches!(
             replacement,
-            AppView::MarkdownVault { .. } | AppView::Terminal { .. } | AppView::Settings
-        ) {
+            AppView::Vault | AppView::Terminal { .. } | AppView::Settings
+        );
+        #[cfg(feature = "memory")]
+        let valid = valid || matches!(replacement, AppView::Memories);
+        if !valid {
             return Err(ReplaceLauncherError::InvalidReplacement(id));
         }
         tab.view = replacement;
@@ -272,39 +248,6 @@ impl AppTabs {
         }
     }
 
-    pub fn rebind_markdown_vault(
-        &mut self,
-        id: AppTabId,
-        expected: &VaultProfileId,
-        replacement: &VaultProfileId,
-    ) -> Result<(), RebindMarkdownVaultError> {
-        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else {
-            return Err(RebindMarkdownVaultError::Unknown(id));
-        };
-        let AppView::MarkdownVault { profile_id } = &mut tab.view else {
-            return Err(RebindMarkdownVaultError::NotMarkdownVault(id));
-        };
-        if profile_id != expected {
-            return Err(RebindMarkdownVaultError::ProfileMismatch {
-                id,
-                expected: expected.clone(),
-                actual: profile_id.clone(),
-            });
-        }
-        profile_id.clone_from(replacement);
-        Ok(())
-    }
-
-    #[doc(hidden)]
-    pub const fn active_index(&self) -> AppTabId {
-        self.active
-    }
-
-    #[doc(hidden)]
-    pub fn add_placeholder(&mut self) -> AppTabId {
-        self.add_launcher()
-    }
-
     #[cfg(test)]
     pub fn views(&self) -> Vec<AppView> {
         self.tabs.iter().map(|tab| tab.view.clone()).collect()
@@ -314,7 +257,6 @@ impl AppTabs {
 #[cfg(test)]
 mod tests {
     use super::{AppTabs, AppView, CloseTabResult, ReplaceLauncherError, SelectTabResult};
-    use crate::config::vault_profiles::VaultProfileId;
 
     #[test]
     fn app_tab_id_is_never_reused_after_close() {
@@ -332,14 +274,8 @@ mod tests {
         let mut tabs = AppTabs::default();
         let launcher_id = tabs.add_launcher();
         let original_position = tabs.tabs().iter().position(|tab| tab.id() == launcher_id);
-        let profile_id = VaultProfileId::new();
 
-        let result = tabs.replace_launcher(
-            launcher_id,
-            AppView::MarkdownVault {
-                profile_id: profile_id.clone(),
-            },
-        );
+        let result = tabs.replace_launcher(launcher_id, AppView::Vault);
 
         assert_eq!(result, Ok(launcher_id));
         assert_eq!(tabs.active_id(), launcher_id);
@@ -349,7 +285,7 @@ mod tests {
         );
         assert_eq!(
             tabs.active_tab().map(super::AppTab::view),
-            Some(&AppView::MarkdownVault { profile_id })
+            Some(&AppView::Vault)
         );
     }
 
@@ -359,12 +295,7 @@ mod tests {
         let chat_id = tabs.active_id();
         let mut tabs = tabs;
 
-        let result = tabs.replace_launcher(
-            chat_id,
-            AppView::MarkdownVault {
-                profile_id: VaultProfileId::new(),
-            },
-        );
+        let result = tabs.replace_launcher(chat_id, AppView::Vault);
 
         assert_eq!(result, Err(ReplaceLauncherError::NotLauncher(chat_id)));
     }

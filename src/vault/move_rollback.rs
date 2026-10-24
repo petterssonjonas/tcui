@@ -1,4 +1,4 @@
-use crate::config::vault_profiles::VaultCatalog;
+use std::path::Path;
 
 use super::backup::{BackupStore, LoadedBackup, StandaloneBackupId};
 use super::move_journal::{JournalStore, MoveJournalFileRef, MoveJournalV1};
@@ -10,19 +10,19 @@ pub(crate) use super::move_rollback_support::{RecoveryFailurePoint, RollbackFail
 use super::{VaultMutationGuard, VaultRelativePath};
 
 pub(crate) struct MoveRollback<'a> {
-    catalog: &'a VaultCatalog,
+    data_root: &'a Path,
     journals: &'a JournalStore,
     backups: &'a BackupStore,
 }
 
 impl<'a> MoveRollback<'a> {
     pub(crate) const fn new(
-        catalog: &'a VaultCatalog,
+        data_root: &'a Path,
         journals: &'a JournalStore,
         backups: &'a BackupStore,
     ) -> Self {
         Self {
-            catalog,
+            data_root,
             journals,
             backups,
         }
@@ -36,7 +36,16 @@ impl<'a> MoveRollback<'a> {
         self.restore_sources(journal)?;
         self.restore_overwritten_destinations(journal)?;
         self.remove_created_destinations(journal)?;
-        self.clean_staged_files(journal)
+        self.clean_staged_files(journal)?;
+        if let Some(snapshot) = &journal.native_move {
+            crate::storage::chat_files::ChatSavedFileStore::new(
+                self.data_root.join("vault"),
+                crate::storage::paths::TcuiDataPaths::from_root(self.data_root.to_path_buf()),
+            )
+            .rollback_native_moves(snapshot)
+            .map_err(|_| RollbackFailure::persist_progress())?;
+        }
+        Ok(())
     }
 
     fn restore_sources(&self, journal: &mut MoveJournalV1) -> Result<(), RollbackFailure> {
@@ -51,7 +60,7 @@ impl<'a> MoveRollback<'a> {
             maybe_fail(RecoveryFailurePoint::RestoreSource, Some(&source.path))?;
             if let Some(id) = &journal.artifacts[index].source_backup_id {
                 let bytes = self.load_backup(id, source)?;
-                restore_source(self.catalog, source, &bytes)?;
+                restore_source(self.data_root, source, &bytes)?;
             }
             journal.artifacts[index].source_restored = true;
             self.persist_progress(journal, RecoveryFailurePoint::RestoreSource, &source.path)?;
@@ -76,7 +85,7 @@ impl<'a> MoveRollback<'a> {
                 if let Some(id) = &journal.artifacts[index].destination_backup_id {
                     let original = self.load_backup(id, &pair.destination)?;
                     let moved = self.source_bytes(journal, index)?;
-                    restore_destination(self.catalog, &pair.destination, &original, &moved)?;
+                    restore_destination(self.data_root, &pair.destination, &original, &moved)?;
                 }
             }
             journal.artifacts[index].overwritten_destination_restored = true;
@@ -104,7 +113,7 @@ impl<'a> MoveRollback<'a> {
             )?;
             if !pair.overwrite {
                 if let Some(moved) = self.source_bytes_optional(journal, index)? {
-                    remove_if_matches(self.catalog, &pair.destination, &moved).map_err(
+                    remove_if_matches(self.data_root, &pair.destination, &moved).map_err(
                         |error| fs_failure(RecoveryFailurePoint::RemoveCreatedDestination, error),
                     )?;
                 }
@@ -129,10 +138,7 @@ impl<'a> MoveRollback<'a> {
             let report_path = staged.as_ref().unwrap_or(&pair.destination.path).clone();
             maybe_fail(RecoveryFailurePoint::CleanStagedFile, Some(&report_path))?;
             if let Some(staged) = staged {
-                let staged_ref = MoveJournalFileRef {
-                    profile_id: pair.destination.profile_id.clone(),
-                    path: staged,
-                };
+                let staged_ref = MoveJournalFileRef { path: staged };
                 let identity = journal.artifacts[index].staged_identity;
                 let legacy = if identity.is_none() {
                     self.source_bytes_optional(journal, index)?
@@ -144,7 +150,7 @@ impl<'a> MoveRollback<'a> {
                     .operation_owner(&journal.operation_id)
                     .map_err(|_| RollbackFailure::persist_progress())?;
                 remove_private_stage(
-                    self.catalog,
+                    self.data_root,
                     PrivateStage {
                         target: &staged_ref,
                         destination: &pair.destination,
@@ -196,7 +202,7 @@ impl<'a> MoveRollback<'a> {
         let LoadedBackup { envelope, contents } = self.backups.load(id).map_err(|_| {
             RollbackFailure::new(RecoveryFailurePoint::LoadBackup, Some(target.path.clone()))
         })?;
-        if envelope.profile_id != target.profile_id.to_string() || envelope.path != target.path {
+        if envelope.path != target.path {
             return Err(RollbackFailure::new(
                 RecoveryFailurePoint::LoadBackup,
                 Some(target.path.clone()),
