@@ -72,8 +72,8 @@ impl VaultSearchResult {
 
 #[derive(Debug, thiserror::Error)]
 pub enum VaultFsError {
-    #[error("failed to open vault profile {path}: {source}")]
-    OpenProfile {
+    #[error("failed to open internal Vault root {path}: {source}")]
+    OpenRoot {
         path: PathBuf,
         #[source]
         source: io::Error,
@@ -106,20 +106,18 @@ pub enum VaultFsError {
 pub struct VaultFs(Dir, PathBuf);
 
 impl VaultFs {
-    pub fn open_profile(root: &Path) -> Result<Self, VaultFsError> {
-        let absolute = if root.is_absolute() {
-            root.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map_err(|source| VaultFsError::OpenProfile {
-                    path: root.to_path_buf(),
-                    source,
-                })?
-                .join(root)
-        };
-        crate::protection::open_directory(&absolute, false)
-            .map(|directory| Self(directory, absolute))
-            .map_err(|error| VaultFsError::OpenProfile {
+    pub fn open_default() -> Result<Self, VaultFsError> {
+        Self::open(&crate::protection::internal_vault_root())
+    }
+
+    pub fn open(root: &Path) -> Result<Self, VaultFsError> {
+        super::require_root(root).map_err(|source| VaultFsError::OpenRoot {
+            path: root.to_path_buf(),
+            source,
+        })?;
+        crate::protection::open_directory(root, true)
+            .map(|directory| Self(directory, root.to_path_buf()))
+            .map_err(|error| VaultFsError::OpenRoot {
                 path: root.to_path_buf(),
                 source: io::Error::other(error.to_string()),
             })
@@ -129,6 +127,14 @@ impl VaultFs {
         let path = path.as_path();
         let mut file = self.open_file_nofollow(path)?;
         let mut bytes = Vec::new();
+        if super::is_internal_root(&self.1) {
+            file.by_ref()
+                .take(crate::protection::NATIVE_STORE_ADOPTION_PROBE_LEN as u64)
+                .read_to_end(&mut bytes)
+                .map_err(|source| io_error("read native framing", path, source))?;
+            super::require_native_bytes(&bytes)
+                .map_err(|source| io_error("adopt protected native store", path, source))?;
+        }
         file.read_to_end(&mut bytes)
             .map_err(|source| io_error("read", path, source))?;
         super::decode_root(&self.1.join(path), bytes)
@@ -225,9 +231,18 @@ impl VaultFs {
         let overhead = if protected { 4096 } else { 0 };
         let mut bytes = Vec::new();
         file.by_ref()
-            .take(max_bytes.saturating_add(overhead).saturating_add(1))
+            .take(
+                max_bytes
+                    .saturating_add(overhead)
+                    .saturating_add(1)
+                    .max(crate::protection::NATIVE_STORE_ADOPTION_PROBE_LEN as u64),
+            )
             .read_to_end(&mut bytes)
             .map_err(|source| io_error("read", path, source))?;
+        if super::is_internal_root(&self.1.join(path)) {
+            super::require_native_bytes(&bytes)
+                .map_err(|source| io_error("adopt protected native store", path, source))?;
+        }
         if protected && bytes.len() as u64 > max_bytes.saturating_add(overhead) {
             return Ok((Vec::new(), true));
         }
@@ -640,7 +655,7 @@ mod tests {
         }
 
         fn open(&self) -> VaultFs {
-            VaultFs::open_profile(&self.0).expect("open capability root")
+            VaultFs::open(&self.0).expect("open capability root")
         }
     }
 

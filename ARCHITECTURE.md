@@ -17,7 +17,7 @@ The codebase consists of **47 source files** organized into 7 major functional a
 | **Storage** | 2 | Persistent SQLite metadata and authoritative chat documents |
 | **LLM** | 5 | Provider abstraction, HTTP client, streaming, tools |
 | **MCP** | 4 | Model Context Protocol client, registry, transport |
-| **Obsidian** | 5 | Vault file integration, diff safety, file watcher |
+| **Native stores** | — | Internal Vault, separate Memories, portable protection and transfer |
 
 ---
 
@@ -28,7 +28,7 @@ The codebase consists of **47 source files** organized into 7 major functional a
 The core application loop lives in `TuiApp` (`src/app.rs`). It owns the event loop (`run`), processes keyboard/mouse input (`handle_key`, `handle_mouse`), and dispatches actions (`dispatch`).
 
 Key types:
-- `TuiApp` — Main app struct holding storage, config, UI state, LLM client, vault
+- `TuiApp` — Main app struct holding storage, config, UI state, LLM client, and the canonical internal file store
 - `Action` — Enum of all possible user/system actions (Quit, SendMessage, ToggleSettings, etc.)
 - `Message` — Chat message model (role, content, thinking, tool calls, images)
 - `Tab` — Chat tab configuration (provider, model, endpoint, soul, agent)
@@ -59,7 +59,8 @@ All rendering is pure and stateless per frame. The `UI` struct (`src/ui/mod.rs`)
 - `terminal_workspace.rs` — Persistent PTY sessions, terminal tab/split presentation, focus, and draggable divider geometry.
 - `command_blocks.rs` / `command_review.rs` — Closed shell-fence extraction and explicit selected-command review; no execution during rendering.
 - `session_list.rs` — Session/conversation switcher
-- `obsidian_tab.rs` — Obsidian vault file tree and preview
+- `vault.rs` / `vault_workspace.rs` — Internal file tree, preview, editing, and confirmed operations
+- `memory_manager.rs` — Native Memory entry management and context selection
 
 **Modals:**
 - `quit_confirm.rs` — Exit confirmation
@@ -115,14 +116,26 @@ SQLite search index is encrypted on disk and loaded into an in-RAM query databas
 without plaintext SQLite sidecars. Corrupt caches do not prevent source reads or
 listing; explicit repair rebuilds the index without changing source records.
 
-The built-in **TCUI Internal** profile is the fresh-configuration default, rooted at
-`$XDG_DATA_HOME/tcui/vault` and owns canonical Saved files and downloaded/chat
-artifacts. Vault protection covers its content, backups, link manifests, journals,
-and stages; external profiles are ordinary plaintext folders. Native confirmed
-copies preserve source files and chat links, including exact binary bytes.
-Protected shared journals defer startup recovery while locked and reject
-journal-backed mutations, including external-only operations, until unlock.
-Policy migration recovers pending operations under the old policy first.
+The internal Vault is rooted at `$XDG_DATA_HOME/tcui/vault`. There are no external
+profiles, profile selectors, or Obsidian adapters. `ChatSavedFileStore` owns one
+manifest and canonical file bodies, with separate numeric item IDs and chat-link
+IDs. An explicit Chat Artifact save creates an independent Vault snapshot.
+Vault deletion archives links and moves the encoded body to internal Trash.
+Content-digest comparisons protect editor saves from overwriting a newer body.
+
+Vault protection covers content, retained backups, link manifests, journals, and
+stages. Vault and Memory files use authenticated, self-contained portable V2
+envelopes with password-wrapped data keys. Chats retain their existing format.
+Source-password authentication does not import provider credentials. Explicit
+adoption rewrites copied data under the destination key; ordinary reads never
+silently accept foreign encryption as plaintext.
+
+`storage/native_transfer` owns Add, Replace, export, retained snapshots, and
+restore. Replace and restore preserve displaced data and its matching identity
+metadata. Retained backups enter the same authenticated protection transaction
+as active data. Pending replacement recovery blocks incompatible policy changes.
+Native snapshots use bounded streaming copies; protection conversion still
+buffers one file at a time. File, count, and depth limits remain explicit.
 
 On Linux `$XDG_DATA_HOME` defaults to `~/.local/share`; the database is therefore
 normally `~/.local/share/tcui/tcui.db`. Filenames, paths, configuration, profile
@@ -186,12 +199,18 @@ unavailable evidence rather than silently falling back. The Web search settings
 category and credential manager own backend selection, result limits, service
 keys, and profile enablement; no environment API-key discovery occurs.
 
-### 7. Obsidian (`src/obsidian/`)
+### 7. Native Vault and Memories
 
-File-based knowledge vault integration:
-- `vault.rs` — File listing, reading, searching, writing
-- `safety.rs` — Diff generation, backup creation, diff review parsing
-- `watcher.rs` — File system change monitoring (`notify` crate)
+- `src/vault/` — Confined internal paths, file operations, previews, backups, recovery, and watching
+- `src/storage/chat_files/` — Canonical Vault bodies, item IDs, chat links, compare-and-save, and Trash
+- `src/memory/` — Native records, preserved source/scope metadata, search, management, and separate Trash
+- `src/storage/native_transfer/` — Portable imports/exports, in-place adoption, Replace, and retained-backup restore
+- `src/protection/` — Selective access gates, authenticated file formats, password wrapping, and durable policy migration
+
+Native context attachments capture immutable bytes at selection. They render as
+`<Memory #N>` or `<Vault item #N>` and expand into the destination user message.
+Only the raw typed instruction can select host-side skills, saves, or reminders.
+Protected-to-plaintext chat insertion needs explicit consent.
 
 ---
 
@@ -334,7 +353,7 @@ flowchart TB
     end
 
     subgraph Storage["Storage Layer"]
-        DB["Storage (db.rs)\nSQLite: messages, conversations,\nsettings, tabs, mcp_servers"]
+        DB["Storage (db.rs)\nProvider, model, settings,\nand MCP metadata"]
     end
 
     subgraph Config["Config Layer"]
@@ -356,9 +375,11 @@ flowchart TB
         TRN["Transport"]
     end
 
-    subgraph Obsidian["Obsidian Layer"]
-        VAULT["Vault"]
-        SAFE["Safety (diff/backup)"]
+    subgraph NativeStores["Native Stores"]
+        VAULT["VaultFs / ChatSavedFileStore"]
+        MEM["MemoryStore"]
+        PROTECT["Selective / portable protection"]
+        SAFE["Backups and recovery journals"]
         WATCH["File Watcher"]
     end
 
@@ -371,6 +392,8 @@ flowchart TB
     A -->|chat| LC
     A -->|tools| MC
     A -->|vault| VAULT
+    A -->|memories| MEM
+    A -->|access and migration| PROTECT
 
     U --> TB
     U --> SB
@@ -389,6 +412,8 @@ flowchart TB
 
     VAULT --> SAFE
     VAULT --> WATCH
+    VAULT --> PROTECT
+    MEM --> PROTECT
 
     style Entry fill:#f9f,stroke:#333
     style AppLayer fill:#bbf,stroke:#333
@@ -397,7 +422,7 @@ flowchart TB
     style Config fill:#ffb,stroke:#333
     style LLM fill:#bff,stroke:#333
     style MCP fill:#fbf,stroke:#333
-    style Obsidian fill:#eee,stroke:#333
+    style NativeStores fill:#eee,stroke:#333
 ```
 
 ---
@@ -413,7 +438,7 @@ flowchart TB
 | App config (provider, model, theme) | Disk → App | TOML (`~/.config/tcui/config.toml`) |
 | Memory sources / search | App ↔ native Memory | `tcui/memories`; protected serialized index encrypted on disk, queried in RAM |
 | LLM streaming | LLM → UI | Saved response content follows destination chat policy |
-| Vault file operations | App ↔ configured profile | Optional encryption for TCUI Internal; external folders plaintext |
+| Vault file operations | App ↔ internal Vault | Optional portable encryption; no external profiles |
 
 ---
 

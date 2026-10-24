@@ -1,10 +1,7 @@
 // allow: SIZE_OK - T04B keeps atomic mutation invariants and their fault-injection tests colocated.
 
-use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
-use std::fmt::Display;
 use std::fs::{File, OpenOptions as StdOpenOptions, TryLockError};
-use std::hash::Hash;
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
@@ -84,8 +81,6 @@ pub struct VaultRestoreOutcome {
 pub enum VaultWriteError {
     #[error("Vault is busy with another mutation")]
     VaultBusy,
-    #[error("Vault profile is unavailable: {profile_id}")]
-    UnknownProfile { profile_id: String },
     #[error("Vault path points through a symbolic link: {path}")]
     Symlink { path: PathBuf },
     #[error("Vault path is not a regular file: {path}")]
@@ -120,81 +115,27 @@ pub enum VaultWriteError {
     },
 }
 
-struct ProfileHandle {
-    canonical_root: PathBuf,
-    directory: Dir,
-}
-
-pub struct VaultProfileRegistration<ProfileId> {
-    profile_id: ProfileId,
+pub struct VaultWriteService {
     root: PathBuf,
-}
-
-impl<ProfileId> VaultProfileRegistration<ProfileId> {
-    pub fn new(profile_id: ProfileId, root: impl Into<PathBuf>) -> Self {
-        Self {
-            profile_id,
-            root: root.into(),
-        }
-    }
-}
-
-pub struct VaultWriteService<ProfileId> {
-    profiles: HashMap<ProfileId, ProfileHandle>,
+    directory: Dir,
     mutation_lock: VaultMutationLock,
     backups: BackupStore,
     journals: JournalStore,
 }
 
-impl<ProfileId> VaultWriteService<ProfileId>
-where
-    ProfileId: Clone + Display + Eq + Hash,
-{
-    pub fn new(
-        profiles: impl IntoIterator<Item = VaultProfileRegistration<ProfileId>>,
-    ) -> Result<Self, VaultWriteError> {
-        Self::open(profiles, &TcuiDataPaths::discover().root)
+impl VaultWriteService {
+    pub fn new() -> Result<Self, VaultWriteError> {
+        Self::at_data_root(&TcuiDataPaths::discover().root)
     }
 
-    #[cfg(test)]
-    pub(crate) fn at_data_root(
-        profiles: impl IntoIterator<Item = VaultProfileRegistration<ProfileId>>,
-        data_root: &Path,
-    ) -> Result<Self, VaultWriteError> {
-        Self::open(profiles, data_root)
-    }
-
-    fn open(
-        registrations: impl IntoIterator<Item = VaultProfileRegistration<ProfileId>>,
-        data_root: &Path,
-    ) -> Result<Self, VaultWriteError> {
-        let mut profiles = HashMap::new();
-        for registration in registrations {
-            let canonical_root = if registration.root.is_absolute() {
-                registration.root.clone()
-            } else {
-                std::env::current_dir()
-                    .map_err(|source| io_error("resolve profile", &registration.root, source))?
-                    .join(&registration.root)
-            };
-            let directory =
-                crate::protection::open_directory(&canonical_root, false).map_err(|error| {
-                    io_error(
-                        "open profile",
-                        &canonical_root,
-                        io::Error::other(error.to_string()),
-                    )
-                })?;
-            profiles.insert(
-                registration.profile_id,
-                ProfileHandle {
-                    canonical_root,
-                    directory,
-                },
-            );
-        }
+    pub(crate) fn at_data_root(data_root: &Path) -> Result<Self, VaultWriteError> {
+        let root = data_root.join("vault");
+        super::require_root(&root).map_err(|source| io_error("unlock Vault", &root, source))?;
+        let directory = crate::protection::open_directory(&root, true)
+            .map_err(|error| io_error("open Vault", &root, io::Error::other(error.to_string())))?;
         Ok(Self {
-            profiles,
+            root,
+            directory,
             mutation_lock: VaultMutationLock::at_data_root(data_root),
             backups: BackupStore::new(data_root.join("vault-backups")),
             journals: JournalStore::at_data_root(data_root),
@@ -203,16 +144,14 @@ where
 
     pub fn diff(
         &self,
-        profile_id: &ProfileId,
         path: &VaultRelativePath,
         replacement: &str,
     ) -> Result<VaultDiff, VaultWriteError> {
-        let profile = self.profile(profile_id)?;
-        super::require_root(&profile.canonical_root.join(path.as_path()))
+        super::require_root(&self.root.join(path.as_path()))
             .map_err(|source| io_error("unlock before accessing", path.as_path(), source))?;
-        let (parent, name) = open_parent(&profile.directory, path.as_path())?;
+        let (parent, name) = open_parent(&self.directory, path.as_path())?;
         let original = read_existing(&parent, &name, path.as_path())?
-            .map(|bytes| super::decode_root(&profile.canonical_root.join(path.as_path()), bytes))
+            .map(|bytes| super::decode_root(&self.root.join(path.as_path()), bytes))
             .transpose()
             .map_err(|source| io_error("decrypt", path.as_path(), source))?
             .unwrap_or_default();
@@ -229,43 +168,40 @@ where
 
     pub fn write(
         &self,
-        profile_id: &ProfileId,
         path: &VaultRelativePath,
         replacement: &[u8],
     ) -> Result<VaultWriteOutcome, VaultWriteError> {
         let guard = self.mutation_lock.try_acquire()?;
+        self.require_native_adoption()?;
         self.ensure_journal_mutation_allowed()?;
         self.backups.prune_terminal(BACKUP_RETENTION_DAYS)?;
-        self.write_with_guard(&guard, profile_id, path, replacement)
+        self.write_with_guard(&guard, path, replacement)
     }
 
-    pub fn remove(
-        &self,
-        profile_id: &ProfileId,
-        path: &VaultRelativePath,
-    ) -> Result<VaultWriteOutcome, VaultWriteError> {
+    pub fn remove(&self, path: &VaultRelativePath) -> Result<VaultWriteOutcome, VaultWriteError> {
         let guard = self.mutation_lock.try_acquire()?;
+        self.require_native_adoption()?;
         self.ensure_journal_mutation_allowed()?;
         self.backups.prune_terminal(BACKUP_RETENTION_DAYS)?;
-        self.remove_with_guard(&guard, profile_id, path)
+        self.remove_with_guard(&guard, path)
     }
 
     pub fn restore(
         &self,
-        profile_id: &ProfileId,
         path: &VaultRelativePath,
         backup_id: &StandaloneBackupId,
     ) -> Result<VaultRestoreOutcome, VaultWriteError> {
         let guard = self.mutation_lock.try_acquire()?;
+        self.require_native_adoption()?;
         self.ensure_journal_mutation_allowed()?;
         self.backups.prune_terminal(BACKUP_RETENTION_DAYS)?;
         let LoadedBackup { envelope, contents } = self.backups.load(backup_id)?;
-        if envelope.profile_id != profile_id.to_string() || envelope.path != *path {
+        if envelope.path != *path {
             return Err(VaultWriteError::BackupTargetMismatch);
         }
         let outcome = match contents {
-            Some(bytes) => self.write_with_guard(&guard, profile_id, path, &bytes)?,
-            None => self.remove_with_guard(&guard, profile_id, path)?,
+            Some(bytes) => self.write_with_guard(&guard, path, &bytes)?,
+            None => self.remove_with_guard(&guard, path)?,
         };
         Ok(VaultRestoreOutcome {
             replaced_content_backup_id: outcome.backup_id,
@@ -276,28 +212,53 @@ where
         self.mutation_lock.try_acquire()
     }
 
+    fn require_native_adoption(&self) -> Result<(), VaultWriteError> {
+        let data_root = self.root.parent().ok_or(VaultWriteError::InvalidDataRoot)?;
+        crate::storage::chat_files::ChatSavedFileStore::new(
+            self.root.clone(),
+            TcuiDataPaths::from_root(data_root.to_path_buf()),
+        )
+        .require_native_adoption()
+        .map_err(|error| {
+            io_error(
+                "adopt protected native store",
+                &self.root,
+                io::Error::other(error),
+            )
+        })
+    }
+
     pub(crate) fn write_with_guard(
         &self,
         _guard: &VaultMutationGuard,
-        profile_id: &ProfileId,
         path: &VaultRelativePath,
         replacement: &[u8],
     ) -> Result<VaultWriteOutcome, VaultWriteError> {
-        let profile = self.profile(profile_id)?;
-        super::require_root(&profile.canonical_root.join(path.as_path()))
+        super::require_root(&self.root.join(path.as_path()))
             .map_err(|source| io_error("unlock before accessing", path.as_path(), source))?;
-        let (parent, name) = open_parent(&profile.directory, path.as_path())?;
+        super::VaultFs::open(&self.root)
+            .and_then(|vault| vault.create_parent_directories(path))
+            .map_err(|error| match error {
+                super::VaultFsError::Symlink { path } => VaultWriteError::Symlink { path },
+                super::VaultFsError::NotDirectory { path } => {
+                    VaultWriteError::NotDirectory { path }
+                }
+                super::VaultFsError::NotFile { path } => VaultWriteError::NotFile { path },
+                error => io_error(
+                    "create parent directories",
+                    path.as_path(),
+                    io::Error::other(error),
+                ),
+            })?;
+        let (parent, name) = open_parent(&self.directory, path.as_path())?;
         let original = read_existing(&parent, &name, path.as_path())?;
         let decoded_original = original
             .as_ref()
-            .map(|bytes| {
-                super::decode_root(&profile.canonical_root.join(path.as_path()), bytes.clone())
-            })
+            .map(|bytes| super::decode_root(&self.root.join(path.as_path()), bytes.clone()))
             .transpose()
             .map_err(|source| io_error("decrypt original", path.as_path(), source))?;
-        let replacement =
-            super::encode_root(&profile.canonical_root.join(path.as_path()), replacement)
-                .map_err(|source| io_error("encrypt replacement", path.as_path(), source))?;
+        let replacement = super::encode_root(&self.root.join(path.as_path()), replacement)
+            .map_err(|source| io_error("encrypt replacement", path.as_path(), source))?;
         let (mut temporary, mut cleanup) = create_temporary(&parent, path.as_path())?;
         let prepared = (|| {
             maybe_fail(FailurePoint::Write)?;
@@ -312,9 +273,8 @@ where
                 .sync_all()
                 .map_err(|source| io_error("sync temporary for", path.as_path(), source))?;
             maybe_fail(FailurePoint::Backup)?;
-            let profile_key = profile_id.to_string();
             self.backups
-                .create_prepared(&profile_key, path, decoded_original.as_deref())
+                .create_prepared(path, decoded_original.as_deref())
                 .map_err(VaultWriteError::from)
         })();
         drop(temporary);
@@ -344,11 +304,9 @@ where
 
     pub fn validate_editor_target(
         &self,
-        profile_id: &ProfileId,
         path: &VaultRelativePath,
     ) -> Result<ValidatedEditorTarget, VaultWriteError> {
-        let profile = self.profile(profile_id)?;
-        if super::is_internal_root(&profile.canonical_root.join(path.as_path()))
+        if super::is_internal_root(&self.root.join(path.as_path()))
             && crate::protection::is_protected(crate::protection::Domain::Vault).map_err(
                 |error| {
                     io_error(
@@ -365,32 +323,27 @@ where
                 io::Error::other("Protected files cannot be opened in an external editor"),
             ));
         }
-        editor::validate_editor_target(&profile.canonical_root, &profile.directory, path)
+        editor::validate_editor_target(&self.root, &self.directory, path)
             .map_err(VaultWriteError::from)
     }
 
     fn remove_with_guard(
         &self,
         _guard: &VaultMutationGuard,
-        profile_id: &ProfileId,
         path: &VaultRelativePath,
     ) -> Result<VaultWriteOutcome, VaultWriteError> {
-        let profile = self.profile(profile_id)?;
-        super::require_root(&profile.canonical_root.join(path.as_path()))
+        super::require_root(&self.root.join(path.as_path()))
             .map_err(|source| io_error("unlock before accessing", path.as_path(), source))?;
-        let (parent, name) = open_parent(&profile.directory, path.as_path())?;
+        let (parent, name) = open_parent(&self.directory, path.as_path())?;
         let original = read_existing(&parent, &name, path.as_path())?;
         let decoded_original = original
             .as_ref()
-            .map(|bytes| {
-                super::decode_root(&profile.canonical_root.join(path.as_path()), bytes.clone())
-            })
+            .map(|bytes| super::decode_root(&self.root.join(path.as_path()), bytes.clone()))
             .transpose()
             .map_err(|source| io_error("decrypt original", path.as_path(), source))?;
-        let profile_key = profile_id.to_string();
-        let backup_id =
-            self.backups
-                .create_prepared(&profile_key, path, decoded_original.as_deref())?;
+        let backup_id = self
+            .backups
+            .create_prepared(path, decoded_original.as_deref())?;
         if original.is_none() {
             let _ = self.backups.mark_state(&backup_id, BackupState::Complete);
             return Ok(VaultWriteOutcome { backup_id });
@@ -424,23 +377,6 @@ where
         }
         let _ = self.backups.mark_state(&backup_id, BackupState::Complete);
         Ok(VaultWriteOutcome { backup_id })
-    }
-
-    fn profile(&self, id: &ProfileId) -> Result<&ProfileHandle, VaultWriteError> {
-        let profile = self
-            .profiles
-            .get(id)
-            .ok_or_else(|| VaultWriteError::UnknownProfile {
-                profile_id: id.to_string(),
-            })?;
-        super::require_root(&profile.canonical_root).map_err(|source| {
-            io_error(
-                "unlock with /unlock before accessing",
-                &profile.canonical_root,
-                source,
-            )
-        })?;
-        Ok(profile)
     }
 
     fn ensure_journal_mutation_allowed(&self) -> Result<(), VaultWriteError> {
@@ -786,17 +722,14 @@ mod tests {
     use std::process::Command;
 
     use super::{
-        inject_failure, TestFailurePoint, VaultMutationLock, VaultProfileRegistration,
-        VaultWriteError, VaultWriteService,
+        inject_failure, TestFailurePoint, VaultMutationLock, VaultWriteError, VaultWriteService,
     };
-    use crate::config::vault_profiles::{VaultProfile, VaultProfileId};
     use crate::vault::VaultRelativePath;
 
     struct Fixture {
         base: PathBuf,
         root: PathBuf,
         data_root: PathBuf,
-        profile_id: VaultProfileId,
     }
 
     impl Fixture {
@@ -806,16 +739,13 @@ mod tests {
                 std::process::id(),
                 rand::random::<u64>()
             ));
-            let root = base.join("vault");
             let data_root = base.join("data").join("tcui");
+            let root = data_root.join("vault");
             fs::create_dir_all(&root).expect("create vault root");
-            let profile = VaultProfile::new(label, &root).expect("create vault profile");
-            let profile_id = profile.id.clone();
             Self {
                 base,
                 root,
                 data_root,
-                profile_id,
             }
         }
 
@@ -823,11 +753,8 @@ mod tests {
             VaultRelativePath::parse(Path::new(raw)).expect("valid vault-relative path")
         }
 
-        fn service(&self) -> VaultWriteService<VaultProfileId> {
-            let registration =
-                VaultProfileRegistration::new(self.profile_id.clone(), self.root.clone());
-            VaultWriteService::at_data_root([registration], &self.data_root)
-                .expect("open write service")
+        fn service(&self) -> VaultWriteService {
+            VaultWriteService::at_data_root(&self.data_root).expect("open write service")
         }
     }
 
@@ -923,11 +850,7 @@ mod tests {
         let service = fixture.service();
 
         // When
-        let result = service.write(
-            &fixture.profile_id,
-            &Fixture::path("note.md"),
-            b"replacement",
-        );
+        let result = service.write(&Fixture::path("note.md"), b"replacement");
 
         // Then
         assert!(matches!(result, Err(VaultWriteError::VaultBusy)));
@@ -957,11 +880,7 @@ mod tests {
             inject_failure(point);
 
             // When
-            let result = service.write(
-                &fixture.profile_id,
-                &Fixture::path("note.md"),
-                b"replacement",
-            );
+            let result = service.write(&Fixture::path("note.md"), b"replacement");
 
             // Then
             assert!(matches!(
@@ -995,14 +914,13 @@ mod tests {
         let service = fixture.service();
 
         // When
-        let result = service.write(
-            &fixture.profile_id,
-            &Fixture::path("escaped/sentinel.md"),
-            b"replacement",
-        );
+        let result = service.write(&Fixture::path("escaped/sentinel.md"), b"replacement");
 
         // Then
-        assert!(matches!(result, Err(VaultWriteError::Symlink { .. })));
+        assert!(
+            matches!(result, Err(VaultWriteError::Symlink { .. })),
+            "{result:?}"
+        );
         assert_eq!(
             fs::read(outside.join("sentinel.md")).expect("read outside sentinel"),
             b"outside-sentinel"
@@ -1025,11 +943,7 @@ mod tests {
         let service = fixture.service();
 
         // When
-        let result = service.write(
-            &fixture.profile_id,
-            &Fixture::path("note.md"),
-            b"replacement",
-        );
+        let result = service.write(&Fixture::path("note.md"), b"replacement");
 
         // Then
         assert!(matches!(result, Err(VaultWriteError::Symlink { .. })));
@@ -1049,19 +963,11 @@ mod tests {
         fs::write(fixture.root.join("note.md"), b"original").expect("write original");
         let service = fixture.service();
         let write = service
-            .write(
-                &fixture.profile_id,
-                &Fixture::path("note.md"),
-                b"replacement",
-            )
+            .write(&Fixture::path("note.md"), b"replacement")
             .expect("write replacement");
 
         // When
-        let restore = service.restore(
-            &fixture.profile_id,
-            &Fixture::path("note.md"),
-            &write.backup_id,
-        );
+        let restore = service.restore(&Fixture::path("note.md"), &write.backup_id);
 
         // Then
         assert!(restore.is_ok(), "restore failed: {restore:?}");
@@ -1080,19 +986,11 @@ mod tests {
         let fixture = Fixture::new("restore-missing");
         let service = fixture.service();
         let write = service
-            .write(
-                &fixture.profile_id,
-                &Fixture::path("created.md"),
-                b"created",
-            )
+            .write(&Fixture::path("created.md"), b"created")
             .expect("create note");
 
         // When
-        let result = service.restore(
-            &fixture.profile_id,
-            &Fixture::path("created.md"),
-            &write.backup_id,
-        );
+        let result = service.restore(&Fixture::path("created.md"), &write.backup_id);
 
         // Then
         assert!(result.is_ok(), "restore failed: {result:?}");
@@ -1108,20 +1006,12 @@ mod tests {
         let fixture = Fixture::new("restore-missing-sync");
         let service = fixture.service();
         let write = service
-            .write(
-                &fixture.profile_id,
-                &Fixture::path("created.md"),
-                b"created",
-            )
+            .write(&Fixture::path("created.md"), b"created")
             .expect("create note");
         inject_failure(TestFailurePoint::ParentSync);
 
         // When
-        let result = service.restore(
-            &fixture.profile_id,
-            &Fixture::path("created.md"),
-            &write.backup_id,
-        );
+        let result = service.restore(&Fixture::path("created.md"), &write.backup_id);
 
         // Then
         assert!(matches!(
@@ -1146,7 +1036,7 @@ mod tests {
 
         // When
         let diff = service
-            .diff(&fixture.profile_id, &Fixture::path("note.md"), "new line\n")
+            .diff(&Fixture::path("note.md"), "new line\n")
             .expect("generate diff");
 
         // Then
@@ -1166,7 +1056,7 @@ mod tests {
 
         // When
         let target = service
-            .validate_editor_target(&fixture.profile_id, &Fixture::path("note.md"))
+            .validate_editor_target(&Fixture::path("note.md"))
             .expect("validate editor target")
             .revalidate_for_spawn()
             .expect("revalidate editor target");

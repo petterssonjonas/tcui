@@ -2257,12 +2257,17 @@ mod tests {
                     .0
                     .clone();
                 let stored = std::fs::read(&path).expect("encrypted fixture");
-                app.refresh_memory_artifacts();
+                app.refresh_memory_artifacts().expect("memory catalog");
                 let handle = app
                     .ui
                     .memory_artifacts
                     .iter()
-                    .find(|artifact| artifact.path.as_ref() == Some(&path))
+                    .find(|artifact| {
+                        matches!(
+                            artifact.handle,
+                            crate::ui::artifact_sidebar::ArtifactHandle::Memory(_)
+                        )
+                    })
                     .expect("native memory artifact")
                     .handle
                     .clone();

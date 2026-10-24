@@ -32,6 +32,10 @@ pub enum Action {
     RemovePendingDocument(crate::app::submission::PendingDocumentId),
     ConfirmPendingDocumentDiscard,
     ConfirmChatDraftExport,
+    ConfirmProtectedContext,
+    SaveResourceEditor,
+    CopyResourceEditor,
+    OpenNativeTransfer(crate::protection::Domain),
     AwaitSubmissionConfirmation(crate::ui::app_tabs::AppTabId),
     ConfirmSubmission(crate::ui::app_tabs::AppTabId),
     CancelVaultMutation,
@@ -115,8 +119,10 @@ pub enum Action {
     TransferCommandReview,
     SetPinnedCommands(Vec<String>),
     ToggleCollapseThinking,
-    OpenMarkdownVaultLauncher,
-    OpenVaultProfileManager,
+    OpenVaultLauncher,
+    #[cfg(feature = "memory")]
+    OpenMemoriesLauncher,
+    CopyArtifact(crate::ui::artifact_sidebar::ArtifactHandle),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

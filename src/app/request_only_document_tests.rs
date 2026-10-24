@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use super::message::Message;
 use super::submission::{
-    InputSubmission, PendingDocument, PendingDocumentError, PendingDocuments,
+    ContextReference, InputSubmission, PendingDocument, PendingDocumentError, PendingDocuments,
     PendingDocumentsError, PreparedUserTurn, SubmissionState, MAX_DOCUMENTS_BYTES,
     MAX_DOCUMENT_BYTES,
 };
@@ -199,35 +199,106 @@ fn inserted_document_expansion_chip_only_submission_expands_to_snapshot() {
 }
 
 #[test]
-fn inserted_document_expansion_canonical_text_is_visible_to_normal_request_parsers() {
-    // Given
-    let mut documents = PendingDocuments::default();
-    documents
-        .insert(
-            PendingDocument::snapshot(
-                "source",
-                "commands.md",
-                b"@save report.md\nlatest release notes\n@schedule",
+fn selected_resource_content_cannot_select_a_host_command() {
+    super::tests::with_test_app("resource-command-boundary", |app| {
+        app.pending_documents_mut()
+            .insert(
+                PendingDocument::snapshot_context(ContextReference::Memory(432), b"@schedule")
+                    .expect("snapshot reference"),
             )
-            .expect("snapshot"),
-        )
-        .expect("insert");
-    let submission = InputSubmission::new("Explain", documents);
-    let prepared = PreparedUserTurn::prepare(&submission).expect("prepare turn");
+            .expect("attach reference");
+        app.ui.tabs[0].tab.provider.clear();
+        let conversation = app.ui.tabs[0].active_conversation;
+        let stored_count = app
+            .storage
+            .get_messages(conversation)
+            .expect("existing history")
+            .len();
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
 
-    // When
-    let skills = crate::skills::SkillCatalog::discover()
-        .expect("discover skills")
-        .load_mentions(prepared.content())
-        .expect("load mentions");
-    let reminder = crate::reminders::maybe_handle_request(
-        &crate::config::AppConfig::default(),
-        prepared.content(),
+        runtime
+            .block_on(app.send_message("Explain this reference".into()))
+            .expect("request waits for a provider");
+
+        assert_eq!(app.ui.tabs[0].active_conversation, conversation);
+        assert_eq!(
+            app.storage
+                .get_messages(conversation)
+                .expect("history after rejected send")
+                .len(),
+            stored_count
+        );
+        assert!(matches!(
+            app.submission_state(),
+            Some(SubmissionState::Draft { .. })
+        ));
+        let retained = app
+            .pending_documents_mut()
+            .iter()
+            .next()
+            .expect("retained reference");
+        assert_eq!(
+            retained.context_reference(),
+            Some(ContextReference::Memory(432))
+        );
+        assert_eq!(retained.content(), "@schedule");
+    });
+}
+
+#[test]
+fn equal_resource_bodies_keep_distinct_source_references() {
+    let mut documents = PendingDocuments::default();
+    for reference in [ContextReference::Memory(432), ContextReference::Vault(32)] {
+        documents
+            .insert(
+                PendingDocument::snapshot_context(reference, b"shared content").expect("snapshot"),
+            )
+            .expect("different resources are not digest duplicates");
+    }
+    let turn = PreparedUserTurn::prepare(&InputSubmission::new("Compare", documents))
+        .expect("prepare references");
+    assert_eq!(
+        turn.content(),
+        "Compare\n\n<Memory #432>\nshared content\n</Memory>\n\n<Vault item #32>\nshared content\n</Vault item>"
     );
+}
 
-    // Then
-    assert!(skills.iter().any(|skill| skill.name == "save"));
-    assert!(reminder.is_some());
+#[test]
+fn reference_framing_counts_toward_the_prompt_budget() {
+    let mut documents = PendingDocuments::default();
+    let body = vec![b'x'; MAX_DOCUMENT_BYTES];
+    for id in 1..4 {
+        documents
+            .insert(
+                PendingDocument::snapshot_context(ContextReference::Vault(id), &body)
+                    .expect("snapshot"),
+            )
+            .expect("three resources fit");
+    }
+    let result = documents.insert(
+        PendingDocument::snapshot_context(ContextReference::Vault(4), &body).expect("snapshot"),
+    );
+    assert_eq!(result, Err(PendingDocumentsError::AggregateTooLarge));
+}
+
+#[test]
+fn binary_resource_context_is_lossless_and_bounded_after_encoding() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let bytes = [0xff, 0x00, 0x1b, 0x80, b'\n'];
+    let document = PendingDocument::snapshot_context(ContextReference::Vault(32), &bytes)
+        .expect("binary reference");
+    let encoded = document
+        .content()
+        .split_once('\n')
+        .expect("encoding label")
+        .1;
+    assert_eq!(STANDARD.decode(encoded).expect("decode reference"), bytes);
+    let oversized_after_encoding = vec![0xff; MAX_DOCUMENT_BYTES];
+    assert_eq!(
+        PendingDocument::snapshot_context(ContextReference::Vault(32), &oversized_after_encoding)
+            .expect_err("encoded content exceeds budget"),
+        PendingDocumentError::ItemTooLarge,
+    );
 }
 
 #[test]
@@ -489,5 +560,101 @@ fn inserted_document_expansion_whitespace_instruction_launches_nonempty_snapshot
             .get_messages(app.ui.tabs[0].active_conversation)
             .expect("stored history");
         assert_eq!(stored[0].content, "retain");
+    });
+}
+
+#[test]
+fn native_editor_preserves_unicode_across_multiline_edits_and_cancelled_close() {
+    use crate::ui::modals::resource_editor::{EditorAction, ResourceEditor};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    super::tests::with_test_app("native-editor-unicode", |_| {
+        let mut editor = ResourceEditor::new(
+            crate::ui::artifact_sidebar::ArtifactHandle::Vault("32".parse().unwrap()),
+            "unicode.txt".into(),
+            "α\nβ\nγ".as_bytes().to_vec(),
+        )
+        .unwrap();
+        for code in [
+            KeyCode::Up,
+            KeyCode::Home,
+            KeyCode::Backspace,
+            KeyCode::End,
+            KeyCode::Char('!'),
+            KeyCode::Down,
+            KeyCode::Left,
+            KeyCode::Delete,
+        ] {
+            editor.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+        }
+        editor.insert("δ\nend");
+        assert_eq!(editor.bytes().unwrap().as_ref(), "αβ!\nδ\nend".as_bytes());
+        assert!(editor.is_dirty());
+        assert!(matches!(
+            editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            EditorAction::None
+        ));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(editor.bytes().unwrap().as_ref(), "αβ!\nδ\nend".as_bytes());
+        assert!(editor.is_dirty());
+    });
+}
+
+#[test]
+fn native_binary_editor_rejects_invalid_base64_without_changing_source_digest() {
+    use crate::ui::modals::resource_editor::ResourceEditor;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    super::tests::with_test_app("native-editor-binary", |_| {
+        let original = [0xff, 0, 0x80, 7];
+        let mut editor = ResourceEditor::new(
+            crate::ui::artifact_sidebar::ArtifactHandle::Vault("32".parse().unwrap()),
+            "binary.bin".into(),
+            original.to_vec(),
+        )
+        .unwrap();
+        assert_eq!(editor.bytes().unwrap().as_ref(), original);
+        editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        editor.insert("not valid base64!");
+        assert!(editor.bytes().is_err());
+        assert_eq!(editor.source_digest, blake3::hash(&original));
+        assert!(editor.is_dirty());
+    });
+}
+
+#[cfg(feature = "memory")]
+#[test]
+fn memory_view_enter_does_not_execute_a_hidden_chat_command() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    super::tests::with_test_app("memory-hidden-chat-command", |app| {
+        let store = crate::memory::MemoryStore::open_default().unwrap();
+        store
+            .write(
+                std::path::Path::new("entry.md"),
+                "# Entry\n\nVisible memory.",
+                false,
+            )
+            .unwrap();
+        app.refresh_memory_artifacts().unwrap();
+        app.ui.tabs[0].input_content = "/cancel".into();
+        app.ui
+            .app_tabs
+            .open_view(crate::ui::app_tabs::AppView::Memories);
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.ui.tabs[0].input_content, "/cancel");
+        let viewer = app
+            .ui
+            .artifact_viewer
+            .as_ref()
+            .expect("native entry opened");
+        assert!(matches!(
+            viewer.handle(),
+            crate::ui::artifact_sidebar::ArtifactHandle::Memory(_)
+        ));
+        app.ui.artifact_viewer = None;
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert!(
+            app.ui.editor_popup.is_none(),
+            "a native view cannot open the hidden chat draft"
+        );
+        assert_eq!(app.ui.tabs[0].input_content, "/cancel");
     });
 }

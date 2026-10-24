@@ -505,7 +505,7 @@ fn legacy_documents_and_saved_binary_round_trip_through_protection() {
     assert_eq!(read(Domain::Vault, &binary).expect("read binary"), payload);
     assert!(std::fs::read(&binary)
         .expect("raw binary")
-        .starts_with(MAGIC));
+        .starts_with(portable::MAGIC));
     configure(ProtectionPolicy::default(), "migration password")
         .expect("disable protection explicitly");
     assert_eq!(std::fs::read(&binary).expect("plaintext binary"), payload);
@@ -682,10 +682,10 @@ fn user_lock_named_files_are_encrypted_and_decrypted_with_other_vault_content() 
     configure(all_protected(), "lock filename password").expect("protect");
     assert!(std::fs::read(&first)
         .expect("protected first")
-        .starts_with(MAGIC));
+        .starts_with(portable::MAGIC));
     assert!(std::fs::read(&second)
         .expect("protected second")
-        .starts_with(MAGIC));
+        .starts_with(portable::MAGIC));
     assert_eq!(
         read(Domain::Vault, &first).expect("first content"),
         b"private dependency inventory"
@@ -799,7 +799,7 @@ fn enabling_protection_cleans_plaintext_orphans_including_atomic_temporaries() {
     assert!(!stage.exists());
     assert!(std::fs::read(&note)
         .expect("encrypted current source")
-        .starts_with(MAGIC));
+        .starts_with(portable::MAGIC));
     assert_eq!(
         read(Domain::Vault, &note).expect("source retained"),
         b"current source data"
@@ -1016,4 +1016,1053 @@ fn explicit_decryption_can_read_encrypted_copies_after_managed_protection_is_dis
     *damaged.last_mut().expect("authenticated ciphertext") ^= 1;
     std::fs::write(&archive, damaged).expect("damage the archive");
     assert!(read_for_explicit_decryption(Domain::Chats, &archive).is_err());
+}
+
+/// Switches between synthetic instances while retaining the shared env_lock.
+fn select_instance(environment: &Environment, name: &str) {
+    for (variable, directory) in [
+        ("HOME", "home"),
+        ("XDG_CONFIG_HOME", "config"),
+        ("XDG_DATA_HOME", "data"),
+        ("XDG_CACHE_HOME", "cache"),
+    ] {
+        let path = environment.root.join(name).join(directory);
+        std::fs::create_dir_all(&path).expect("instance directory");
+        std::env::set_var(variable, path);
+    }
+}
+
+#[test]
+fn portable_content_crosses_instances_without_provider_secrets_and_reencodes_target_policy() {
+    let environment = Environment::new();
+    configure(all_protected(), "source password").expect("source setup");
+    let vault = encode(Domain::Vault, b"portable binary \0\xff").expect("Vault envelope");
+    let memory =
+        encode(Domain::Memories, br#"{"memory":"portable fact"}"#).expect("Memory envelope");
+    let source_root = root().expect("source root");
+    let source_database = source_root.join("tcui.db");
+    lock().expect("source restart");
+
+    select_instance(&environment, "different-password-target");
+    configure(all_protected(), "unrelated target password").expect("target setup");
+    let target_key = KeyStore::protection_key(false).expect("target master");
+    let error = decode(Domain::Vault, &vault).expect_err("needs source password");
+    assert!(error.downcast_ref::<PortableUnlockNeeded>().is_some());
+    let target_database =
+        std::fs::read(root().expect("target root").join("tcui.db")).expect("target database");
+    assert!(unlock_foreign_file(Domain::Vault, &vault, "wrong password").is_err());
+    assert_eq!(
+        std::fs::read(root().expect("target root").join("tcui.db"))
+            .expect("unchanged target database"),
+        target_database
+    );
+    assert!(decode(Domain::Vault, &vault).is_err());
+    std::fs::remove_file(&source_database).expect("source database is not needed");
+    unlock_foreign_file(Domain::Vault, &vault, "source password").expect("source password only");
+    let plaintext = decode(Domain::Vault, &vault).expect("portable content");
+    assert_eq!(plaintext, b"portable binary \0\xff");
+    assert_eq!(
+        decode(Domain::Memories, &memory).expect("same authenticated source wrapping"),
+        br#"{"memory":"portable fact"}"#
+    );
+    let target = root().expect("target root").join("vault/imported.bin");
+    write(Domain::Vault, &target, &plaintext).expect("import under target policy");
+    let target_envelope = std::fs::read(&target).expect("target encrypted bytes");
+    assert_ne!(target_envelope, vault);
+    assert_eq!(
+        portable::open_with_key(Domain::Vault, &target_envelope, &target_key)
+            .expect("target master"),
+        plaintext
+    );
+    lock().expect("clear all session keys");
+    unlock("unrelated target password").expect("target password remains unchanged");
+    assert!(decode(Domain::Vault, &vault).is_err());
+    assert_eq!(
+        read(Domain::Vault, &target).expect("target restart"),
+        plaintext
+    );
+
+    lock().expect("target lock");
+    select_instance(&environment, "plaintext-target");
+    configure(ProtectionPolicy::default(), "").expect("plaintext target policy");
+    assert!(decode(Domain::Vault, &vault)
+        .expect_err("encrypted under plaintext policy")
+        .downcast_ref::<PortableUnlockNeeded>()
+        .is_some());
+    unlock_foreign_file(Domain::Vault, &vault, "source password")
+        .expect("plaintext target source unlock");
+    let target = root().expect("plaintext root").join("vault/imported.bin");
+    write(
+        Domain::Vault,
+        &target,
+        &decode(Domain::Vault, &vault).expect("decode import"),
+    )
+    .expect("plaintext import");
+    assert_eq!(std::fs::read(&target).expect("target plaintext"), plaintext);
+    select_instance(&environment, "isolated-root");
+    configure(ProtectionPolicy::default(), "").expect("separate root");
+    assert!(
+        decode(Domain::Vault, &vault).is_err(),
+        "foreign caches must not cross roots"
+    );
+    select_instance(&environment, "plaintext-target");
+    assert_eq!(
+        decode(Domain::Vault, &vault).expect("original root retains its session"),
+        plaintext
+    );
+    lock().expect("clear plaintext target foreign keys");
+    assert!(decode(Domain::Vault, &vault).is_err());
+}
+
+#[test]
+fn portable_rejects_domains_unbounded_kdf_truncation_and_authenticated_header_damage() {
+    let environment = Environment::new();
+    configure(all_protected(), "source authentication password").expect("source");
+    let original = encode(Domain::Vault, b"authenticated portable content").expect("envelope");
+    assert_eq!(
+        inspect_bytes(&original).expect("inspection"),
+        StoredFormat::Portable {
+            domain: Domain::Vault
+        }
+    );
+    assert!(decode(Domain::Memories, &original).is_err());
+    let legacy = with_key(|key| seal(Domain::Vault.context(), b"legacy", key)).expect("V1 file");
+    lock().expect("source lock");
+    select_instance(&environment, "damaged-target");
+    configure(ProtectionPolicy::default(), "").expect("target");
+    for length in [
+        portable::MAGIC.len(),
+        portable::MAGIC.len() + 1,
+        original.len() - b"authenticated portable content".len() - 1,
+    ] {
+        assert!(inspect_bytes(&original[..length]).is_err());
+    }
+    let mut unknown = original.clone();
+    unknown[portable::MAGIC.len() - 1] = 1;
+    assert!(inspect_bytes(&unknown).is_err());
+    let mut hostile_kdf = original.clone();
+    hostile_kdf[portable::MAGIC.len() + 1..portable::MAGIC.len() + 5]
+        .copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(inspect_bytes(&hostile_kdf).is_err());
+    assert!(unlock_foreign_file(
+        Domain::Vault,
+        &hostile_kdf,
+        "source authentication password"
+    )
+    .is_err());
+    assert!(unlock_foreign_file(
+        Domain::Vault,
+        &original[..original.len() - 1],
+        "source authentication password"
+    )
+    .is_err());
+    for index in [
+        portable::MAGIC.len(), // A valid but wrong domain remains authenticated.
+        portable::MAGIC.len() + 1 + 12, // Salt.
+        portable::MAGIC.len() + 1 + 12 + 16, // Wrapped-master nonce.
+        portable::MAGIC.len() + 1 + 12 + 16 + 12, // Wrapped master.
+        portable::MAGIC.len() + 1 + 88, // Content nonce.
+        original.len() - 1,    // Content authentication tag.
+    ] {
+        let mut damaged = original.clone();
+        let domain = if index == portable::MAGIC.len() {
+            damaged[index] = 2;
+            Domain::Memories
+        } else {
+            damaged[index] ^= 1;
+            Domain::Vault
+        };
+        assert!(unlock_foreign_file(domain, &damaged, "source authentication password").is_err());
+        assert!(
+            decode(Domain::Vault, &original).is_err(),
+            "failed authentication must not cache a key"
+        );
+    }
+    assert!(unlock_foreign_file(
+        Domain::Memories,
+        &original,
+        "source authentication password"
+    )
+    .is_err());
+    let error = unlock_foreign_file(Domain::Vault, &legacy, "source authentication password")
+        .expect_err("V1 metadata is absent");
+    assert!(error.downcast_ref::<MissingLegacyWrapping>().is_some());
+    assert_eq!(
+        inspect_bytes(&legacy).expect("legacy inspection"),
+        StoredFormat::LegacyInstanceBound
+    );
+}
+
+fn install_v1_fixture() -> (PathBuf, PathBuf, Vec<u8>, Vec<u8>) {
+    configure(all_protected(), "legacy upgrade password").expect("initialize credential vault");
+    let key = KeyStore::protection_key(false).expect("existing random app master");
+    let vault_path = root().expect("root").join("vault/nested/private.bin");
+    let memory_path = root()
+        .expect("root")
+        .join("memories/nested/private.tcui-memory");
+    let vault = seal(Domain::Vault.context(), b"V1 Vault body", &key).expect("V1 Vault ciphertext");
+    let memory = seal(Domain::Memories.context(), br#"{"memory":"V1 fact"}"#, &key)
+        .expect("V1 memory ciphertext");
+    io::atomic_write(&vault_path, &vault).expect("V1 Vault file");
+    io::atomic_write(&memory_path, &memory).expect("V1 Memory file");
+    let mut manifest = Manifest::new(all_protected(), Some(&key)).expect("manifest");
+    manifest.version = 1;
+    manifest.authentication = Some(manifest.tag(&key).expect("V1 authenticated metadata"));
+    io::atomic_write(
+        &manifest_path().expect("manifest path"),
+        &serde_json::to_vec(&manifest).expect("manifest JSON"),
+    )
+    .expect("V1 manifest");
+    lock().expect("V1 restart");
+    (vault_path, memory_path, vault, memory)
+}
+
+#[test]
+fn v1_normal_unlock_upgrades_complete_native_trees_durably_and_survives_restart() {
+    let environment = Environment::new();
+    let (vault_path, memory_path, _, _) = install_v1_fixture();
+    assert!(needs_portable_upgrade().expect("V1 upgrade needed"));
+    assert!(startup_requires_unlock().expect("upgrade startup gate"));
+    unlock("legacy upgrade password").expect("authenticated durable upgrade");
+    assert!(!needs_portable_upgrade().expect("V2 metadata"));
+    for (domain, path) in [
+        (Domain::Vault, &vault_path),
+        (Domain::Memories, &memory_path),
+    ] {
+        assert_eq!(
+            inspect_bytes(&std::fs::read(path).expect("upgraded file")).expect("portable format"),
+            StoredFormat::Portable { domain }
+        );
+    }
+    assert!(!environment.data().join("protection-pending.json").exists());
+    lock().expect("restart after upgrade");
+    unlock("legacy upgrade password").expect("V2 restart");
+    assert_eq!(
+        read(Domain::Vault, &vault_path).expect("upgraded content"),
+        b"V1 Vault body"
+    );
+    let copied = std::fs::read(&memory_path).expect("copied native memory");
+    lock().expect("close source");
+    select_instance(&environment, "copy-target");
+    configure(ProtectionPolicy::default(), "").expect("target");
+    unlock_foreign_file(Domain::Memories, &copied, "legacy upgrade password")
+        .expect("password-only copy unlock");
+    assert_eq!(
+        decode(Domain::Memories, &copied).expect("copied body"),
+        br#"{"memory":"V1 fact"}"#
+    );
+}
+
+#[test]
+fn v1_upgrade_refuses_active_sessions_wrong_password_and_corruption_without_replacing_sources() {
+    let _environment = Environment::new();
+    let (vault_path, memory_path, vault, memory) = install_v1_fixture();
+    assert!(unlock("wrong legacy password").is_err());
+    assert_eq!(std::fs::read(&vault_path).expect("unchanged V1"), vault);
+    let active = io::session_lock().expect("other active instance");
+    assert!(unlock("legacy upgrade password").is_err());
+    assert!(!is_unlocked().expect("failed upgrade locks session"));
+    assert_eq!(
+        std::fs::read(&vault_path).expect("no active-session overwrite"),
+        vault
+    );
+    drop(active);
+    let mut corrupt = memory.clone();
+    *corrupt.last_mut().expect("tag") ^= 1;
+    io::atomic_write(&memory_path, &corrupt).expect("corrupt V1 source");
+    assert!(unlock("legacy upgrade password").is_err());
+    assert_eq!(
+        std::fs::read(&vault_path).expect("preflight retains first source"),
+        vault
+    );
+    assert_eq!(
+        std::fs::read(&memory_path).expect("damaged source retained"),
+        corrupt
+    );
+    io::atomic_write(&memory_path, &memory).expect("restore synthetic ciphertext");
+    unlock("legacy upgrade password").expect("retry after restoring source");
+    assert_eq!(
+        read(Domain::Vault, &vault_path).expect("recover Vault"),
+        b"V1 Vault body"
+    );
+}
+
+#[test]
+fn interrupted_v1_upgrade_resumes_authenticated_v2_targets_without_a_new_master() {
+    let environment = Environment::new();
+    let (vault_path, memory_path, _, _) = install_v1_fixture();
+    // Install the same authenticated session that unlock establishes before prepare.
+    KeyStore::unlock_vault(&AppConfig::default(), "legacy upgrade password")
+        .expect("vault password");
+    let key = KeyStore::protection_key(false).expect("original master");
+    let old = load_manifest().expect("manifest").expect("V1");
+    SESSIONS.lock().expect("sessions").insert(
+        root().expect("root"),
+        Session {
+            key: Zeroizing::new(*key),
+            wrapping: KeyStore::protection_wrapping().expect("original wrapping"),
+            manifest: Some(old.clone()),
+        },
+    );
+    let target = Manifest::new(old.policy, Some(&key)).expect("V2 target");
+    migration::prepare_format_upgrade(&old, &target, &key)
+        .expect("durable V1 upgrade recovery plan");
+    // One installed file simulates an interrupted commit, not a read-side rewrite.
+    let staged = std::fs::read_dir(environment.data())
+        .expect("data entries")
+        .map(|entry| entry.expect("entry").path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".protection-migration-"))
+        })
+        .expect("stage");
+    let staged_memory = std::fs::read_dir(&staged)
+        .expect("staged entries")
+        .map(|entry| entry.expect("staged entry").path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "new"))
+        .map(|path| io::read_regular(&path).expect("staged bytes"))
+        .find(|bytes| portable::open_with_key(Domain::Memories, bytes, &key).is_ok())
+        .expect("authenticated staged memory");
+    io::atomic_write(&memory_path, &staged_memory).expect("first install");
+    lock().expect("interrupted process");
+    assert!(read(Domain::Vault, &vault_path).is_err());
+    unlock("legacy upgrade password").expect("finish original authenticated journal");
+    assert_eq!(
+        *KeyStore::protection_key(false).expect("retained master"),
+        *key
+    );
+    assert_eq!(
+        read(Domain::Vault, &vault_path).expect("Vault recovered"),
+        b"V1 Vault body"
+    );
+    assert_eq!(
+        read(Domain::Memories, &memory_path).expect("Memory recovered"),
+        br#"{"memory":"V1 fact"}"#
+    );
+    assert!(!environment.data().join("protection-pending.json").exists());
+}
+
+#[test]
+fn copied_native_portable_data_requires_adoption_and_ordinary_writes_cannot_downgrade_it() {
+    let environment = Environment::new();
+    configure(all_protected(), "copied-store source password").expect("source protection");
+    let vault = encode(Domain::Vault, b"copied private Vault body").expect("source Vault");
+    let memory =
+        encode(Domain::Memories, br#"{"memory":"copied private fact"}"#).expect("source memory");
+    lock().expect("close source");
+    select_instance(&environment, "native-adoption-target");
+    configure(ProtectionPolicy::default(), "").expect("plaintext destination");
+    initialize_password("different native destination password")
+        .expect("existing destination password vault");
+    let original_target_key = KeyStore::protection_key(false).expect("existing destination master");
+    let vault_path = root().expect("target root").join("vault/nested/copied.bin");
+    let memory_path = root()
+        .expect("target root")
+        .join("memories/nested/copied.tcui-memory");
+    io::atomic_write(&vault_path, &vault).expect("copy native Vault file");
+    io::atomic_write(&memory_path, &memory).expect("copy native Memory file");
+    for (domain, path, ciphertext) in [
+        (Domain::Vault, &vault_path, &vault),
+        (Domain::Memories, &memory_path, &memory),
+    ] {
+        let prefix = read_regular_prefix(path, NATIVE_STORE_ADOPTION_PROBE_LEN)
+            .expect("bounded regular probe");
+        assert_eq!(prefix.len(), NATIVE_STORE_ADOPTION_PROBE_LEN);
+        let error = require_native_store_adoption(domain, &prefix)
+            .expect_err("native management needs adoption");
+        assert!(read_native(domain, path)
+            .expect_err("native body read requires adoption")
+            .downcast_ref::<NativeStoreAdoptionNeeded>()
+            .is_some());
+        assert_eq!(
+            error
+                .downcast_ref::<NativeStoreAdoptionNeeded>()
+                .expect("typed adoption")
+                .domain,
+            domain
+        );
+        let error = write(domain, path, b"must not overwrite encrypted content")
+            .expect_err("no implicit downgrade");
+        assert!(error.downcast_ref::<NativeStoreAdoptionNeeded>().is_some());
+        assert_eq!(
+            std::fs::read(path).expect("unchanged encrypted file"),
+            *ciphertext
+        );
+    }
+    unlock_foreign_file(Domain::Vault, &vault, "copied-store source password")
+        .expect("authenticate source wrapping");
+    assert_eq!(
+        decode(Domain::Vault, &vault).expect("explicit import decode remains allowed"),
+        b"copied private Vault body"
+    );
+    assert!(
+        require_native_store_adoption(Domain::Vault, &vault).is_err(),
+        "source password alone does not adopt native policy"
+    );
+    assert!(write(Domain::Vault, &vault_path, b"still must not downgrade").is_err());
+    assert!(adopt_native_store(Domain::Vault, "wrong destination password").is_err());
+    assert_eq!(
+        std::fs::read(&vault_path).expect("wrong password preserves source"),
+        vault
+    );
+    assert_eq!(
+        std::fs::read(&memory_path).expect("wrong password preserves memory"),
+        memory
+    );
+    adopt_native_store(Domain::Vault, "different native destination password")
+        .expect("adopt Vault under destination protection");
+    adopt_native_store(Domain::Memories, "different native destination password")
+        .expect("adopt Memories under destination protection");
+    let target_key = KeyStore::protection_key(false).expect("destination app master");
+    assert_eq!(
+        *target_key, *original_target_key,
+        "adoption must retain the destination master"
+    );
+    for (domain, path, expected) in [
+        (
+            Domain::Vault,
+            &vault_path,
+            b"copied private Vault body".as_slice(),
+        ),
+        (
+            Domain::Memories,
+            &memory_path,
+            br#"{"memory":"copied private fact"}"#.as_slice(),
+        ),
+    ] {
+        let ciphertext = std::fs::read(path).expect("adopted ciphertext");
+        require_native_store_adoption(domain, &ciphertext)
+            .expect("protected native management allowed");
+        assert_eq!(
+            portable::open_with_key(domain, &ciphertext, &target_key)
+                .expect("destination-owned encryption"),
+            expected
+        );
+    }
+    lock().expect("restart after adoption");
+    unlock("different native destination password").expect("destination password only");
+    assert_eq!(
+        read(Domain::Vault, &vault_path).expect("adopted Vault body"),
+        b"copied private Vault body"
+    );
+    configure(
+        ProtectionPolicy::default(),
+        "different native destination password",
+    )
+    .expect("explicit decryption migration remains allowed");
+    assert_eq!(
+        std::fs::read(&vault_path).expect("explicit plaintext Vault"),
+        b"copied private Vault body"
+    );
+    assert_eq!(
+        std::fs::read(&memory_path).expect("explicit plaintext Memory"),
+        br#"{"memory":"copied private fact"}"#
+    );
+}
+
+#[test]
+fn adopting_foreign_content_in_an_already_protected_store_rewraps_it_permanently() {
+    let environment = Environment::new();
+    configure(all_protected(), "protected-copy source password").expect("source");
+    let source = encode(Domain::Vault, b"permanent protected adoption").expect("source envelope");
+    lock().expect("source lock");
+    select_instance(&environment, "already-protected-target");
+    let target_policy = ProtectionPolicy {
+        app_password: true,
+        credentials: true,
+        vault: true,
+        ..ProtectionPolicy::default()
+    };
+    configure(target_policy, "existing protected target password").expect("protected target");
+    let target_key = KeyStore::protection_key(false).expect("existing target master");
+    let path = root().expect("target root").join("vault/copied.bin");
+    io::atomic_write(&path, &source).expect("copied portable file");
+    assert!(read_native(Domain::Vault, &path)
+        .expect_err("source key is not local")
+        .downcast_ref::<PortableUnlockNeeded>()
+        .is_some());
+    unlock_foreign_file(Domain::Vault, &source, "protected-copy source password")
+        .expect("source authentication");
+    assert_eq!(
+        read_native(Domain::Vault, &path).expect("source content"),
+        b"permanent protected adoption"
+    );
+    adopt_native_store(Domain::Vault, "existing protected target password")
+        .expect("force same-policy adoption");
+    assert_eq!(policy().expect("policy"), Some(target_policy));
+    assert_eq!(
+        *KeyStore::protection_key(false).expect("retained target master"),
+        *target_key
+    );
+    let adopted = std::fs::read(&path).expect("adopted envelope");
+    assert_ne!(adopted, source);
+    assert_eq!(
+        portable::open_with_key(Domain::Vault, &adopted, &target_key)
+            .expect("destination-owned wrapping"),
+        b"permanent protected adoption"
+    );
+    lock().expect("clear source cache");
+    unlock("existing protected target password").expect("destination password only");
+    assert_eq!(
+        read_native(Domain::Vault, &path).expect("permanent adoption after restart"),
+        b"permanent protected adoption"
+    );
+}
+
+#[test]
+fn explicit_adoption_accepts_mixed_plaintext_only_in_the_selected_protected_domain() {
+    let _environment = Environment::new();
+    let password = "mixed protected native adoption password";
+    configure(all_protected(), password).expect("protected destination");
+    let data = root().expect("native root");
+    let vault = crate::storage::chat_files::ChatSavedFileStore::new(
+        data.join("vault"),
+        crate::storage::paths::TcuiDataPaths::discover(),
+    );
+    let existing = vault
+        .create_item("existing.md", b"existing encrypted Vault body", None)
+        .expect("existing indexed item");
+    let copied = vault
+        .create_item("copied.md", b"copied plaintext Vault body", None)
+        .expect("copied item identity");
+    io::atomic_write(&copied.path, b"copied plaintext Vault body")
+        .expect("simulate plaintext folder copy retaining its native identity");
+    let memory = serde_json::json!({
+        "schema_version": 1,
+        "id": 73,
+        "logical_path": "imported/fact.md",
+        "title": "Source machine fact",
+        "created_at_ms": 123,
+        "updated_at_ms": 456,
+        "markdown": "Keep this source fact unchanged.",
+        "metadata": {
+            "scope": "machine",
+            "machine": {"id": "source-machine-id", "name": "Source workstation"},
+            "tags": ["imported"],
+            "source": {"conversation_id": 91, "conversation_title": "Source discussion"}
+        }
+    });
+    let copied_memory = data.join("memories/copied.tcui-memory");
+    let existing_memory = data.join("memories/existing.tcui-memory");
+    let memory_bytes = serde_json::to_vec(&memory).expect("native memory document");
+    let mut other_memory = memory.clone();
+    other_memory["id"] = 74.into();
+    other_memory["logical_path"] = "existing/fact.md".into();
+    let other_bytes = serde_json::to_vec(&other_memory).expect("existing document");
+    write(Domain::Memories, &existing_memory, &other_bytes).expect("existing encrypted memory");
+    io::atomic_write(&copied_memory, &memory_bytes).expect("copied plaintext memory");
+
+    for (domain, path) in [
+        (Domain::Vault, &copied.path),
+        (Domain::Memories, &copied_memory),
+    ] {
+        assert!(
+            read_native(domain, path).is_err(),
+            "ordinary protected read rejects plaintext"
+        );
+        let old = load_manifest().expect("manifest").expect("configured");
+        let mut policy = old.policy;
+        match domain {
+            Domain::Vault => policy.vault = false,
+            Domain::Memories => policy.memories = false,
+            Domain::Chats => unreachable!(),
+        }
+        let key = KeyStore::protection_key(false).expect("master");
+        let target = Manifest::new(policy, Some(&key)).expect("policy transition");
+        assert!(
+            migration::prepare(Some(&old), &target, Some(&key)).is_err(),
+            "ordinary policy migration must not authorize copied plaintext"
+        );
+        assert!(migration::pending()
+            .expect("no published migration")
+            .is_none());
+    }
+    adopt_native_store(Domain::Vault, password).expect("explicit mixed Vault adoption");
+    assert!(
+        read_native(Domain::Memories, &copied_memory).is_err(),
+        "Vault adoption does not authorize Memory plaintext"
+    );
+    adopt_native_store(Domain::Memories, password).expect("explicit mixed Memory adoption");
+    lock().expect("close destination session");
+    assert!(read_native(Domain::Vault, &copied.path).is_err());
+    assert!(read_native(Domain::Memories, &copied_memory).is_err());
+    unlock(password).expect("reopen using destination password");
+    assert_eq!(
+        vault
+            .read_item(existing.id)
+            .expect("existing Vault identity"),
+        b"existing encrypted Vault body"
+    );
+    assert_eq!(
+        vault.read_item(copied.id).expect("copied Vault identity"),
+        b"copied plaintext Vault body"
+    );
+    let items = vault.list_items().expect("retained native item metadata");
+    assert!(items.iter().any(|item| item == &existing));
+    assert!(items.iter().any(|item| item == &copied));
+    for (path, expected) in [
+        (&copied_memory, &memory_bytes),
+        (&existing_memory, &other_bytes),
+    ] {
+        let stored = std::fs::read(path).expect("protected native document");
+        assert!(matches!(
+            inspect_bytes(&stored).expect("format"),
+            StoredFormat::Portable { .. }
+        ));
+        let decoded = read_native(Domain::Memories, path).expect("retained native memory");
+        assert_eq!(
+            &decoded, expected,
+            "IDs, source metadata, paths and content survive adoption"
+        );
+    }
+}
+
+#[test]
+fn adopting_memories_does_not_decrypt_or_rewrap_an_unselected_copied_vault() {
+    let environment = Environment::new();
+    configure(all_protected(), "mixed source password").expect("source");
+    let vault = encode(Domain::Vault, b"unselected private Vault bytes").expect("source Vault");
+    let memory = encode(Domain::Memories, br#"{"memory":"selected fact"}"#).expect("source memory");
+    lock().expect("source lock");
+    select_instance(&environment, "memory-only-adoption");
+    configure(ProtectionPolicy::default(), "").expect("plaintext target");
+    let vault_path = root().expect("root").join("vault/unselected.bin");
+    let memory_path = root().expect("root").join("memories/selected.tcui-memory");
+    io::atomic_write(&vault_path, &vault).expect("copy Vault");
+    io::atomic_write(&memory_path, &memory).expect("copy memory");
+    unlock_foreign_file(Domain::Memories, &memory, "mixed source password").expect("source key");
+    adopt_native_store(Domain::Memories, "new native target password")
+        .expect("enroll target and adopt only memories");
+    assert_eq!(
+        std::fs::read(&vault_path).expect("unselected ciphertext"),
+        vault
+    );
+    assert_eq!(
+        read_native(Domain::Memories, &memory_path).expect("selected body"),
+        br#"{"memory":"selected fact"}"#
+    );
+    assert!(read_native(Domain::Vault, &vault_path)
+        .expect_err("Vault still needs its own adoption")
+        .downcast_ref::<NativeStoreAdoptionNeeded>()
+        .is_some());
+    let mut target = policy().expect("target policy").expect("configured");
+    target.credentials = true;
+    assert!(
+        configure(target, "new native target password").is_err(),
+        "normal configuration must not bypass unselected native adoption"
+    );
+    assert_eq!(
+        std::fs::read(&vault_path).expect("no policy-change downgrade"),
+        vault
+    );
+    lock().expect("forget source cache");
+    unlock("new native target password").expect("restart target");
+    assert_eq!(
+        read_native(Domain::Memories, &memory_path).expect("permanent memory adoption"),
+        br#"{"memory":"selected fact"}"#
+    );
+    assert!(decode(Domain::Vault, &vault)
+        .expect_err("unselected source master was not adopted")
+        .downcast_ref::<PortableUnlockNeeded>()
+        .is_some());
+}
+
+#[test]
+fn retained_backup_body_and_hash_descriptor_recover_together_after_interrupted_protection_commit() {
+    let environment = Environment::new();
+    configure(ProtectionPolicy::default(), "").expect("plaintext setup");
+    let id = format!("{:032x}", rand::random::<u128>());
+    let retained = root()
+        .expect("root")
+        .join(".native-transfer-backups")
+        .join(&id);
+    let body_path = retained.join("root/private.bin");
+    let descriptor_path = retained.join("recovery.json");
+    let body = b"private retained replacement history";
+    let descriptor = serde_json::to_vec(&serde_json::json!({
+        "version": 1,
+        "domain": Domain::Vault,
+        "id": id,
+        "files": [{ "path": "root/private.bin", "hash": *blake3::hash(body).as_bytes() }],
+        "root_existed": true,
+        "auxiliary_existed": false,
+        "protected": false,
+        "complete": true
+    }))
+    .expect("retained descriptor");
+    io::atomic_write(&body_path, body).expect("retained original body");
+    io::atomic_write(&descriptor_path, &descriptor).expect("retained original descriptor");
+    initialize_password("retained-history recovery password").expect("enroll existing app master");
+    let old = load_manifest().expect("old metadata").expect("configured");
+    let key = KeyStore::protection_key(false).expect("existing master");
+    let target = Manifest::new(
+        ProtectionPolicy {
+            vault: true,
+            ..ProtectionPolicy::default()
+        },
+        Some(&key),
+    )
+    .expect("target metadata");
+    migration::prepare(Some(&old), &target, Some(&key)).expect("durable history migration plan");
+    let stage = std::fs::read_dir(environment.data())
+        .expect("data entries")
+        .map(|entry| entry.expect("entry").path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".protection-migration-"))
+        })
+        .expect("stage directory");
+    let mut staged_body = None;
+    let mut staged_descriptor = None;
+    for entry in std::fs::read_dir(&stage).expect("stage entries") {
+        let path = entry.expect("stage entry").path();
+        if !path.extension().is_some_and(|extension| extension == "new") {
+            continue;
+        }
+        let bytes = io::read_regular(&path).expect("staged bytes");
+        let Ok(plaintext) = portable::open_with_key(Domain::Vault, &bytes, &key) else {
+            continue;
+        };
+        let plaintext = Zeroizing::new(plaintext);
+        if plaintext.as_slice() == body {
+            staged_body = Some(bytes);
+        } else if serde_json::from_slice::<serde_json::Value>(&plaintext)
+            .ok()
+            .is_some_and(|value| {
+                value.get("id").and_then(|value| value.as_str()) == Some(id.as_str())
+            })
+        {
+            staged_descriptor = Some((path, bytes));
+        }
+    }
+    let staged_body = staged_body.expect("encrypted history target");
+    let (staged_descriptor_path, staged_descriptor_bytes) =
+        staged_descriptor.expect("encrypted rewritten descriptor");
+    io::atomic_write(&body_path, &staged_body).expect("simulate first installed history entry");
+    io::atomic_write(&staged_descriptor_path, b"damaged staged descriptor")
+        .expect("simulate staging damage");
+    lock().expect("interrupted process");
+    assert!(unlock("wrong retained-history password").is_err());
+    assert!(unlock("retained-history recovery password").is_err());
+    assert_eq!(
+        std::fs::read(&descriptor_path).expect("original descriptor retained"),
+        descriptor
+    );
+    assert_eq!(
+        std::fs::read(&body_path).expect("installed target retained"),
+        staged_body
+    );
+    assert!(environment.data().join("protection-pending.json").exists());
+    io::atomic_write(&staged_descriptor_path, &staged_descriptor_bytes)
+        .expect("restore authenticated synthetic stage");
+    unlock("retained-history recovery password").expect("finish original durable transaction");
+    let stored_body = std::fs::read(&body_path).expect("encrypted retained body");
+    let metadata: serde_json::Value = serde_json::from_slice(
+        &read_native(Domain::Vault, &descriptor_path).expect("encrypted retained descriptor"),
+    )
+    .expect("rewritten recovery JSON");
+    assert_eq!(metadata["protected"], true);
+    let recorded: [u8; 32] = serde_json::from_value(metadata["files"][0]["hash"].clone())
+        .expect("rewritten stored-byte hash");
+    assert_eq!(recorded, *blake3::hash(&stored_body).as_bytes());
+    assert_eq!(
+        read_native(Domain::Vault, &body_path).expect("retained body"),
+        body
+    );
+    assert!(!environment.data().join("protection-pending.json").exists());
+    lock().expect("restart completed migration");
+    unlock("retained-history recovery password").expect("restart with destination password");
+    assert_eq!(
+        read_native(Domain::Vault, &body_path).expect("durable retained history"),
+        body
+    );
+}
+
+#[test]
+fn initial_configuration_prompts_for_source_unlock_and_explicit_adoption_before_creating_keys() {
+    let environment = Environment::new();
+    configure(all_protected(), "first-copy source password").expect("source setup");
+    let vault = encode(Domain::Vault, b"copied before initial setup").expect("source Vault");
+    let memory =
+        encode(Domain::Memories, br#"{"memory":"first-copy fact"}"#).expect("source memory");
+    lock().expect("close source");
+    select_instance(&environment, "first-run-copied-native");
+    let vault_path = root()
+        .expect("target root")
+        .join("vault/copied-before-setup.bin");
+    let memory_path = root()
+        .expect("target root")
+        .join("memories/copied-before-setup.tcui-memory");
+    io::atomic_write(&vault_path, &vault).expect("copy Vault without instance credentials");
+    io::atomic_write(&memory_path, &memory).expect("copy Memories without instance credentials");
+    let target = all_protected();
+    let error = configure(target, "first-copy destination password")
+        .expect_err("source unlock must precede first setup");
+    assert!(error.downcast_ref::<PortableUnlockNeeded>().is_some());
+    assert!(load_manifest().expect("no policy change").is_none());
+    assert!(
+        !root().expect("root").join("tcui.db").exists(),
+        "source prompt must not generate an orphan destination key"
+    );
+    assert_eq!(std::fs::read(&vault_path).expect("unchanged source"), vault);
+    assert!(unlock_foreign_file(Domain::Vault, &vault, "wrong source password").is_err());
+    assert!(!root().expect("root").join("tcui.db").exists());
+    unlock_foreign_file(Domain::Vault, &vault, "first-copy source password")
+        .expect("source authentication");
+    for domain in [Domain::Vault, Domain::Memories] {
+        assert_eq!(
+            preflight_native_adoption(domain)
+                .expect_err("explicit adoption is still required")
+                .downcast_ref::<NativeStoreAdoptionNeeded>()
+                .expect("typed adoption")
+                .domain,
+            domain
+        );
+    }
+    assert!(configure(target, "first-copy destination password")
+        .expect_err("configuration is not an implicit adoption bypass")
+        .downcast_ref::<NativeStoreAdoptionNeeded>()
+        .is_some());
+    assert!(!root().expect("root").join("tcui.db").exists());
+    adopt_native_store(Domain::Vault, "first-copy destination password")
+        .expect("bootstrap protected Vault");
+    adopt_native_store(Domain::Memories, "first-copy destination password")
+        .expect("bootstrap protected Memories");
+    configure(target, "first-copy destination password")
+        .expect("finish remaining app and chat options");
+    assert_eq!(policy().expect("configured policy"), Some(target));
+    lock().expect("clear source cache");
+    unlock("first-copy destination password").expect("restart uses only destination password");
+    assert_eq!(
+        read_native(Domain::Vault, &vault_path).expect("native Vault"),
+        b"copied before initial setup"
+    );
+    assert_eq!(
+        read_native(Domain::Memories, &memory_path).expect("native memory"),
+        br#"{"memory":"first-copy fact"}"#
+    );
+}
+
+#[test]
+fn v1_format_upgrade_preserves_foreign_portable_files_and_metadata_without_source_unlock() {
+    let environment = Environment::new();
+    configure(all_protected(), "foreign V2 source password").expect("source setup");
+    let foreign_vault =
+        encode(Domain::Vault, b"foreign portable Vault body").expect("foreign Vault");
+    let foreign_memory =
+        encode(Domain::Memories, br#"{"memory":"foreign portable fact"}"#).expect("foreign memory");
+    let foreign_journal =
+        encode(Domain::Vault, b"opaque foreign journal framing").expect("foreign native journal");
+    let foreign_descriptor = encode(Domain::Vault, b"opaque foreign retained descriptor")
+        .expect("foreign retained descriptor");
+    lock().expect("close source");
+    select_instance(&environment, "legacy-target-with-copies");
+    let (local_vault, local_memory, _, _) = install_v1_fixture();
+    let copied_vault = root().expect("root").join("vault/foreign-portable.bin");
+    let copied_memory = root()
+        .expect("root")
+        .join("memories/foreign-portable.tcui-memory");
+    let copied_journal = root()
+        .expect("root")
+        .join("vault-native-ops/11111111111111111111111111111111/journal.json");
+    let copied_descriptor = root()
+        .expect("root")
+        .join(".native-transfer-backups/22222222222222222222222222222222/recovery.json");
+    let copied_backup_body = copied_descriptor
+        .parent()
+        .expect("backup parent")
+        .join("root/foreign.bin");
+    for (path, bytes) in [
+        (&copied_vault, &foreign_vault),
+        (&copied_memory, &foreign_memory),
+        (&copied_journal, &foreign_journal),
+        (&copied_descriptor, &foreign_descriptor),
+        (&copied_backup_body, &foreign_vault),
+    ] {
+        io::atomic_write(path, bytes).expect("copy portable source without its credentials");
+    }
+    unlock("legacy upgrade password")
+        .expect("format-only unlock must not need foreign V2 passwords");
+    assert!(!needs_portable_upgrade().expect("V2 local manifest"));
+    assert_eq!(
+        read_native(Domain::Vault, &local_vault).expect("upgraded local Vault"),
+        b"V1 Vault body"
+    );
+    assert_eq!(
+        read_native(Domain::Memories, &local_memory).expect("upgraded local memory"),
+        br#"{"memory":"V1 fact"}"#
+    );
+    for (path, bytes) in [
+        (&copied_vault, &foreign_vault),
+        (&copied_memory, &foreign_memory),
+        (&copied_journal, &foreign_journal),
+        (&copied_descriptor, &foreign_descriptor),
+        (&copied_backup_body, &foreign_vault),
+    ] {
+        assert_eq!(
+            std::fs::read(path).expect("byte-exact portable preservation"),
+            *bytes
+        );
+    }
+    assert!(read_native(Domain::Vault, &copied_vault)
+        .expect_err("foreign body still needs its source password")
+        .downcast_ref::<PortableUnlockNeeded>()
+        .is_some());
+    lock().expect("restart upgraded target");
+    unlock("legacy upgrade password")
+        .expect("local restart remains independent of source authentication");
+    assert_eq!(
+        read_native(Domain::Vault, &local_vault).expect("durable local upgrade"),
+        b"V1 Vault body"
+    );
+    unlock_foreign_file(Domain::Vault, &foreign_vault, "foreign V2 source password")
+        .expect("explicit later source authentication");
+    assert_eq!(
+        decode(Domain::Vault, &foreign_vault).expect("later source decode"),
+        b"foreign portable Vault body"
+    );
+    assert_eq!(
+        std::fs::read(&copied_vault).expect("source file was not implicitly adopted"),
+        foreign_vault
+    );
+}
+
+#[test]
+fn vault_only_format_upgrade_leaves_unselected_memory_records_and_cache_unchanged() {
+    let _environment = Environment::new();
+    let (vault_path, memory_path, _, _) = install_v1_fixture();
+    KeyStore::unlock_vault(&AppConfig::default(), "legacy upgrade password")
+        .expect("authenticate fixture master");
+    let key = KeyStore::protection_key(false).expect("existing master");
+    let mut manifest = load_manifest().expect("V1 metadata").expect("configured");
+    manifest.policy.memories = false;
+    manifest.authentication = Some(
+        manifest
+            .tag(&key)
+            .expect("authenticate Vault-only V1 policy"),
+    );
+    let memory = br#"{"memory":"unselected plaintext memory"}"#;
+    io::atomic_write(&memory_path, memory).expect("plaintext unselected memory");
+    io::atomic_write(
+        &manifest_path().expect("metadata path"),
+        &serde_json::to_vec(&manifest).expect("V1 JSON"),
+    )
+    .expect("Vault-only V1 metadata");
+    let cache_path = root().expect("root").join("memory.sqlite3");
+    io::atomic_write(&cache_path, b"unselected derived cache sentinel").expect("unselected cache");
+    lock().expect("restart Vault-only V1 instance");
+    unlock("legacy upgrade password").expect("upgrade only selected Vault data");
+    assert_eq!(
+        inspect_bytes(&std::fs::read(&vault_path).expect("Vault ciphertext"))
+            .expect("upgraded envelope"),
+        StoredFormat::Portable {
+            domain: Domain::Vault
+        }
+    );
+    assert_eq!(
+        std::fs::read(&memory_path).expect("unselected memory"),
+        memory
+    );
+    assert_eq!(
+        std::fs::read(&cache_path).expect("unselected cache remains"),
+        b"unselected derived cache sentinel"
+    );
+}
+
+#[test]
+fn entry_and_credential_choices_preserve_unchanged_protected_domains_without_foreign_passwords() {
+    let environment = Environment::new();
+    configure(all_protected(), "unchanged-domain source password").expect("source");
+    let foreign_vault =
+        encode(Domain::Vault, b"foreign protected Vault data").expect("source Vault");
+    let foreign_memory =
+        encode(Domain::Memories, br#"{"memory":"foreign protected fact"}"#).expect("source memory");
+    let foreign_journal =
+        encode(Domain::Vault, b"opaque foreign protected journal").expect("source journal");
+    lock().expect("close source");
+    select_instance(&environment, "independent-protected-choices");
+    let mut target = ProtectionPolicy {
+        vault: true,
+        memories: true,
+        ..ProtectionPolicy::default()
+    };
+    configure(target, "unchanged-domain target password").expect("protected target");
+    let master = KeyStore::protection_key(false).expect("existing master");
+    let wrapping = KeyStore::protection_wrapping().expect("existing master wrapping");
+    let local_path = root().expect("root").join("vault/local.bin");
+    let local = encode(Domain::Vault, b"existing local protected data").expect("local ciphertext");
+    let vault_path = root().expect("root").join("vault/foreign.bin");
+    let memory_path = root().expect("root").join("memories/foreign.tcui-memory");
+    let journal_path = root()
+        .expect("root")
+        .join("vault-native-ops/33333333333333333333333333333333/journal.json");
+    let cache_path = root().expect("root").join("memory.sqlite3");
+    for (path, bytes) in [
+        (&local_path, &local),
+        (&vault_path, &foreign_vault),
+        (&memory_path, &foreign_memory),
+        (&journal_path, &foreign_journal),
+        (&cache_path, &foreign_memory),
+    ] {
+        io::atomic_write(path, bytes).expect("existing protected bytes");
+    }
+    target.app_password = true;
+    configure(target, "unchanged-domain target password")
+        .expect("entry-only change must not need foreign source authentication");
+    target.credentials = true;
+    configure(target, "unchanged-domain target password")
+        .expect("credential-only change must not need foreign source authentication");
+    assert_eq!(
+        policy().expect("published independent choices"),
+        Some(target)
+    );
+    assert_eq!(
+        KeyStore::vault_status(&AppConfig::default())
+            .expect("credential preference")
+            .storage,
+        crate::config::key_store::CredentialStorage::Encrypted
+    );
+    assert_eq!(
+        *KeyStore::protection_key(false).expect("stable master"),
+        *master
+    );
+    assert!(KeyStore::protection_wrapping().expect("stable master wrapping") == wrapping);
+    for (path, bytes) in [
+        (&local_path, &local),
+        (&vault_path, &foreign_vault),
+        (&memory_path, &foreign_memory),
+        (&journal_path, &foreign_journal),
+        (&cache_path, &foreign_memory),
+    ] {
+        assert_eq!(
+            std::fs::read(path).expect("unchanged protected ciphertext"),
+            *bytes
+        );
+    }
+    assert_eq!(
+        read_native(Domain::Vault, &local_path).expect("local protected data"),
+        b"existing local protected data"
+    );
+    assert!(read_native(Domain::Vault, &vault_path)
+        .expect_err("unchanged foreign content still needs source authentication")
+        .downcast_ref::<PortableUnlockNeeded>()
+        .is_some());
+    assert!(read_native(Domain::Memories, &memory_path)
+        .expect_err("unchanged foreign memory still needs source authentication")
+        .downcast_ref::<PortableUnlockNeeded>()
+        .is_some());
+    lock().expect("entry gate");
+    assert!(read_native(Domain::Vault, &local_path).is_err());
+    unlock("unchanged-domain target password")
+        .expect("local restart needs only destination authentication");
+    assert_eq!(
+        read_native(Domain::Vault, &local_path).expect("local body after restart"),
+        b"existing local protected data"
+    );
+    assert!(read_native(Domain::Vault, &vault_path)
+        .expect_err("restart does not unlock foreign sources")
+        .downcast_ref::<PortableUnlockNeeded>()
+        .is_some());
 }

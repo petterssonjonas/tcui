@@ -133,7 +133,6 @@ fn vault_config_migration_legacy_json_is_never_modified_and_toml_wins_later() {
 
     assert_eq!(first.theme, "from-json");
     assert_eq!(second.theme, "from-json");
-    assert_eq!(first.default_vault_id, second.default_vault_id);
     assert_eq!(
         std::fs::read_to_string(home.json_path()).expect("read retained JSON"),
         original.replace("from-json", "modified-json")
@@ -144,11 +143,7 @@ fn vault_config_migration_legacy_json_is_never_modified_and_toml_wins_later() {
 fn vault_config_migration_normal_save_removes_legacy_keys() {
     let _guard = env_lock().lock().expect("env lock poisoned");
     let home = ConfigHome::new("vault-config-legacy-save");
-    let config = AppConfig {
-        vault_path: Some("/legacy/vault".to_string()),
-        artifact_save_dir: Some("/legacy/artifacts".to_string()),
-        ..AppConfig::default()
-    };
+    let config = AppConfig::default();
 
     config.save().expect("save config");
 

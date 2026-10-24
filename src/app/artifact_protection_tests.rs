@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::app::TuiApp;
-use crate::config::vault_profiles::VaultProfile;
 use crate::protection::{self, ProtectionPolicy};
 use crate::ui::artifact_sidebar::ArtifactHandle;
 
@@ -57,12 +56,7 @@ fn protected_memory_export_requires_confirmation_and_stale_cache_cannot_view_exp
     std::fs::create_dir_all(&external).expect("external vault");
     std::fs::write(external.join("existing.md"), b"unrelated external note")
         .expect("external sentinel");
-    let mut config = crate::config::AppConfig::load().expect("isolated config");
-    let profile = VaultProfile::new("External", &external).expect("external profile");
-    config.default_vault_id = Some(profile.id.clone());
-    config.vaults.insert(profile.id.clone(), profile);
-    config.vault_path = Some(external.display().to_string());
-    config.save().expect("save external selection");
+    let config = crate::config::AppConfig::load().expect("isolated native config");
     protection::configure(
         ProtectionPolicy {
             memories: true,
@@ -87,9 +81,8 @@ fn protected_memory_export_requires_confirmation_and_stale_cache_cannot_view_exp
         crate::storage::Storage::new().expect("chat storage"),
         Arc::new(tokio::sync::RwLock::new(config)),
         Arc::new(crate::llm::LlmClient::new()),
-        None,
     );
-    app.refresh_memory_artifacts();
+    app.refresh_memory_artifacts().expect("memory catalog");
     let artifact = app.ui.memory_artifacts[0].clone();
     let handle = artifact.handle.clone();
     assert!(matches!(handle, ArtifactHandle::Memory(_)));

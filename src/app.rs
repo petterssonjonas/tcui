@@ -28,8 +28,8 @@ pub mod tab;
 mod terminal;
 mod terminal_workspace;
 mod update;
+pub(crate) mod vault;
 pub(crate) mod vault_mutation_execute;
-mod vault_profiles;
 
 #[cfg(test)]
 #[path = "app/request_only_document_tests.rs"]
@@ -52,8 +52,8 @@ mod chat_file_lifecycle;
 mod saved_file_migration_tests;
 
 #[cfg(test)]
-#[path = "app/markdown_vault_restart_tests.rs"]
-mod markdown_vault_restart_tests;
+#[path = "app/vault_restart_tests.rs"]
+mod vault_restart_tests;
 
 pub use action::Action;
 pub use generated_file::GeneratedFile;
@@ -63,14 +63,13 @@ pub use tab::Tab;
 pub(crate) use artifacts::local_media_sources;
 pub(crate) use input::char_to_byte_index;
 
-use crate::{config::AppConfig, llm::LlmClient, obsidian::Vault, storage::Storage};
+use crate::{config::AppConfig, llm::LlmClient, storage::Storage};
 
 pub struct TuiApp {
     pub storage: Storage,
     pub(crate) chat_files: crate::storage::chat_files::ChatSavedFileStore,
     pub config: Arc<tokio::sync::RwLock<AppConfig>>,
     pub ui: crate::ui::UI,
-    pub vault: Option<Arc<Vault>>,
     pub action_tx: tokio::sync::mpsc::UnboundedSender<Action>,
     pub action_rx: tokio::sync::mpsc::UnboundedReceiver<Action>,
     pub system_prompt: String,
@@ -95,7 +94,6 @@ impl TuiApp {
         storage: Storage,
         config: Arc<tokio::sync::RwLock<AppConfig>>,
         _llm: Arc<LlmClient>,
-        vault: Option<Arc<Vault>>,
     ) -> Self {
         let mut ui = crate::ui::UI::new();
         let loaded_config_snapshot = config.try_read().ok().map(|cfg| cfg.clone());
@@ -133,9 +131,8 @@ impl TuiApp {
         ui.kitty_heading_downscale = config_snapshot.kitty_heading_downscale;
         ui.image_protocol = config_snapshot.image_protocol.clone();
         ui.web_search_enabled = config_snapshot.web_search.enabled;
-        ui.show_saved_files = config_snapshot.show_saved_files;
         ui.show_memories = config_snapshot.show_memories;
-        ui.show_markdown_vault = config_snapshot.show_markdown_vault;
+        ui.show_vault = config_snapshot.show_vault;
         ui.db_providers = Self::provider_entries_with_local(&config_snapshot, None);
         ui.panel_state = crate::tui::shell::PanelState::from_config(&config_snapshot.tui);
         ui.sidebar_open = ui.panel_state.left != crate::tui::shell::PanelMode::Closed;
@@ -204,7 +201,6 @@ impl TuiApp {
             chat_files,
             config,
             ui,
-            vault,
             action_tx,
             action_rx,
             system_prompt,
@@ -275,13 +271,20 @@ impl TuiApp {
             })
             || self.ui.ephemeral.is_some()
             || self.ui.editor_popup.is_some()
+            || self
+                .ui
+                .resource_editor
+                .as_ref()
+                .is_some_and(|editor| editor.is_dirty())
+            || self.ui.pending_protected_context.is_some()
+            || self.ui.pending_vault_mutation.is_some()
     }
 
     fn has_security_process_close_risk(&self) -> bool {
         self.ui.terminals.has_running()
             || self.ui.app_tabs.tabs().iter().any(|tab| {
                 self.ui
-                    .markdown_vault_workspaces
+                    .vault_workspaces
                     .get(tab.id())
                     .and_then(|state| state.editor.as_ref())
                     .is_some_and(|editor| editor.has_unsaved_risk())
@@ -473,7 +476,7 @@ impl TuiApp {
         }
         if self.storage.created_default_key() {
             self.ui.show_toast(format!(
-                "Back up {}; encrypted chats and memories cannot be recovered without it.",
+                "Encrypted portable Vault and Memory files use their source password. Keep {} for legacy data and reminders.",
                 Storage::chat_key_path().display()
             ));
         }

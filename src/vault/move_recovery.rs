@@ -1,8 +1,6 @@
 use std::path::Path;
 use std::time::Duration;
 
-use crate::config::vault_profiles::VaultCatalog;
-
 use super::backup::BackupStore;
 use super::move_journal::{JournalStore, MoveJournalError, MoveJournalState, MoveJournalV1};
 #[cfg(test)]
@@ -92,7 +90,7 @@ impl MoveRecoveryReport {
 }
 
 pub(crate) struct MoveRecoveryService<'a> {
-    catalog: &'a VaultCatalog,
+    data_root: &'a Path,
     mutation_lock: VaultMutationLock,
     journals: JournalStore,
     backups: BackupStore,
@@ -100,13 +98,9 @@ pub(crate) struct MoveRecoveryService<'a> {
 }
 
 impl<'a> MoveRecoveryService<'a> {
-    pub(crate) fn at_data_root(
-        catalog: &'a VaultCatalog,
-        data_root: &Path,
-        config: MoveRecoveryConfig,
-    ) -> Self {
+    pub(crate) fn at_data_root(data_root: &'a Path, config: MoveRecoveryConfig) -> Self {
         Self {
-            catalog,
+            data_root,
             mutation_lock: VaultMutationLock::at_data_root(data_root),
             journals: JournalStore::at_data_root(data_root),
             backups: BackupStore::new(data_root.join("vault-backups")),
@@ -198,7 +192,7 @@ impl<'a> MoveRecoveryService<'a> {
         let rollback = prepared
             .map_err(|_| RollbackFailure::new(RecoveryFailurePoint::PersistProgress, None))
             .and_then(|()| {
-                MoveRollback::new(self.catalog, &self.journals, &self.backups)
+                MoveRollback::new(self.data_root, &self.journals, &self.backups)
                     .rollback_guarded(guard, journal)
             })
             .and_then(|()| {

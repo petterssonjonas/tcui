@@ -12,7 +12,7 @@ fn deleting_chat_link_removes_canonical_file_and_both_listings() {
     app.delete_artifact(handle);
 
     // Then
-    assert!(app.ui.saved_artifacts.is_empty());
+    assert!(app.ui.vault_artifacts.is_empty());
     assert!(app.ui.tabs[0].temporary_artifacts.is_empty());
     assert!(!saved_dir.join("report.md").exists());
 }
@@ -24,13 +24,17 @@ fn deleting_saved_row_removes_canonical_file_and_chat_listing() {
     let saved_dir = environment.saved_dir();
     let mut app = start_app();
     save_report(&mut app, "# Report");
-    let saved_handle = ArtifactHandle::Saved(saved_dir.join("report.md"));
+    let saved_handle = app.ui.vault_artifacts[0].handle.clone();
 
     // When
     app.delete_artifact(saved_handle);
 
     // Then
-    assert!(app.ui.saved_artifacts.is_empty());
+    assert!(
+        app.ui.vault_artifacts.is_empty(),
+        "{:?}",
+        app.ui.toast_stack
+    );
     assert!(app.ui.tabs[0].temporary_artifacts.is_empty());
     assert!(!saved_dir.join("report.md").exists());
 }

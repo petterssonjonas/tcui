@@ -16,7 +16,7 @@ fn direct_save_preserves_colliding_file_and_survives_restart() {
         std::fs::read_to_string(saved_dir.join("report.md")).unwrap(),
         "existing"
     );
-    assert_eq!(app.ui.saved_artifacts.len(), 2);
+    assert_eq!(app.ui.vault_artifacts.len(), 2);
     assert_eq!(app.ui.tabs[0].temporary_artifacts.len(), 1);
     drop(app);
     let restarted = start_app();
@@ -285,7 +285,7 @@ fn chat_links_are_isolated_while_saved_files_remain_global() {
 
     // Then
     assert!(app.ui.tabs[0].temporary_artifacts.is_empty());
-    assert_eq!(app.ui.saved_artifacts.len(), 1);
+    assert_eq!(app.ui.vault_artifacts.len(), 1);
     app.load_conversation_into_tab(0, first_conversation)
         .expect("reload first chat");
     assert_eq!(app.ui.tabs[0].temporary_artifacts.len(), 1);

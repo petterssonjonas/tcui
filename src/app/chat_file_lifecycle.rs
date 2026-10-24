@@ -50,7 +50,7 @@ impl Environment {
     }
 
     fn saved_dir(&self) -> PathBuf {
-        crate::config::vault_profiles::VaultProfile::internal().root
+        crate::protection::internal_vault_root()
     }
 }
 
@@ -68,21 +68,11 @@ impl Drop for Environment {
 }
 
 fn start_app() -> TuiApp {
-    let config = AppConfig {
-        saved_files_dir: Some(
-            crate::config::vault_profiles::VaultProfile::internal()
-                .root
-                .display()
-                .to_string(),
-        ),
-        artifact_save_dir: None,
-        ..AppConfig::default()
-    };
+    let config = AppConfig::default();
     TuiApp::new(
         Storage::new().expect("create storage"),
         Arc::new(tokio::sync::RwLock::new(config)),
         Arc::new(LlmClient::new()),
-        None,
     )
 }
 

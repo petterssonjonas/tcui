@@ -9,13 +9,11 @@ use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::vault_profiles::VaultProfileId;
-
 use super::backup::StandaloneBackupId;
 use super::move_plan::{MoveCollision, MoveFileKind, MovePlan};
 use super::VaultRelativePath;
 
-const JOURNAL_VERSION: u32 = 1;
+const JOURNAL_VERSION: u32 = 2;
 const JOURNAL_FILE: &str = "journal.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -117,7 +115,6 @@ impl MoveJournalState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct MoveJournalFileRef {
-    pub(crate) profile_id: VaultProfileId,
     #[serde(with = "relative_path_serde")]
     pub(crate) path: VaultRelativePath,
 }
@@ -165,11 +162,9 @@ impl MoveJournalPlan {
             .iter()
             .map(|pair| MoveJournalPair {
                 source: MoveJournalFileRef {
-                    profile_id: pair.source().profile_id().clone(),
                     path: pair.source().path().clone(),
                 },
                 destination: MoveJournalFileRef {
-                    profile_id: pair.destination().profile_id().clone(),
                     path: pair.destination().path().clone(),
                 },
                 overwrite: pair.overwrite(),
@@ -274,6 +269,8 @@ pub(crate) struct MoveJournalV1 {
     pub(crate) plan: MoveJournalPlan,
     pub(crate) state: MoveJournalState,
     pub(crate) artifacts: Vec<MoveJournalArtifact>,
+    #[serde(default)]
+    pub(crate) native_move: Option<crate::storage::chat_files::NativeMoveSnapshot>,
 }
 
 impl MoveJournalV1 {
@@ -284,6 +281,7 @@ impl MoveJournalV1 {
             plan: MoveJournalPlan::capture(plan),
             state: MoveJournalState::Planned,
             artifacts: vec![MoveJournalArtifact::pending(); plan.file_count()],
+            native_move: None,
         }
     }
 }
@@ -322,7 +320,7 @@ pub(crate) struct JournalStore {
 impl JournalStore {
     pub(crate) fn at_data_root(data_root: &Path) -> Self {
         Self {
-            root: data_root.join("vault-ops"),
+            root: data_root.join("vault-native-ops"),
         }
     }
 
@@ -513,15 +511,62 @@ impl JournalStore {
         open_directory(&self.root, true).map(|_| ())
     }
 
+    /// Read authenticated source journals only to preserve private stage identities during rewrap.
+    pub(crate) fn protection_migration_stages(
+        &self,
+        data_root: &Path,
+        skip_portable_journals: bool,
+    ) -> color_eyre::Result<std::collections::HashSet<PathBuf>> {
+        let mut stages = std::collections::HashSet::new();
+        for operation_root in self.operation_roots()? {
+            if skip_portable_journals {
+                let prefix = crate::protection::read_regular_prefix(
+                    &operation_root.join(JOURNAL_FILE),
+                    crate::protection::NATIVE_STORE_ADOPTION_PROBE_LEN,
+                )?;
+                if matches!(
+                    crate::protection::inspect_bytes(&prefix)?,
+                    crate::protection::StoredFormat::Portable { .. },
+                ) {
+                    continue;
+                }
+            }
+            let journal = self.load_path_with_mode(&operation_root, true)?;
+            if matches!(
+                journal.state,
+                MoveJournalState::Complete | MoveJournalState::RolledBack
+            ) {
+                continue;
+            }
+            let owner = self.operation_owner(&journal.operation_id)?;
+            stages.extend(super::move_recovery_fs::protection_migration_stages(
+                data_root, &journal, owner,
+            )?);
+        }
+        Ok(stages)
+    }
+
     fn load_path(&self, operation_root: &Path) -> Result<MoveJournalV1, MoveJournalError> {
+        self.load_path_with_mode(operation_root, false)
+    }
+
+    fn load_path_with_mode(
+        &self,
+        operation_root: &Path,
+        authenticated_migration: bool,
+    ) -> Result<MoveJournalV1, MoveJournalError> {
         if operation_root.parent() != Some(self.root.as_path()) {
             return Err(MoveJournalError::Corrupt {
                 reason: "operation directory escaped journal root",
             });
         }
         let path = operation_root.join(JOURNAL_FILE);
-        let bytes = crate::protection::read(crate::protection::Domain::Vault, &path)
-            .map_err(|error| io_error("read", &path, io::Error::other(error.to_string())))?;
+        let bytes = if authenticated_migration {
+            crate::protection::read(crate::protection::Domain::Vault, &path)
+        } else {
+            crate::protection::read_native(crate::protection::Domain::Vault, &path)
+        }
+        .map_err(|error| io_error("read", &path, super::protection_io_error(error)))?;
         let version = serde_json::from_slice::<VersionProbe>(&bytes)?.version;
         if version != u64::from(JOURNAL_VERSION) {
             return Err(MoveJournalError::UnknownVersion { version });

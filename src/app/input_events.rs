@@ -143,6 +143,30 @@ impl TuiApp {
             return None;
         }
 
+        if self.ui.active_modal.is_none() && self.ui.delete_confirm.is_none() {
+            if key.code == KeyCode::Char('q')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && self.ui.resource_editor.is_some()
+            {
+                return Some(self.quit_action());
+            }
+            if let Some(editor) = self.ui.resource_editor.as_mut() {
+                return match editor.handle_key(key) {
+                    crate::ui::modals::resource_editor::EditorAction::None => None,
+                    crate::ui::modals::resource_editor::EditorAction::Save => {
+                        Some(Action::SaveResourceEditor)
+                    }
+                    crate::ui::modals::resource_editor::EditorAction::Copy => {
+                        Some(Action::CopyResourceEditor)
+                    }
+                    crate::ui::modals::resource_editor::EditorAction::Close => {
+                        self.ui.resource_editor = None;
+                        None
+                    }
+                };
+            }
+        }
+
         if self.ui.show_keybinds {
             return match key.code {
                 KeyCode::Esc | KeyCode::Enter => Some(Action::DismissKeybinds),
@@ -187,15 +211,7 @@ impl TuiApp {
         }
 
         if self.ui.pending_vault_action.is_some() {
-            if let Some(editor) = self.ui.editor_popup.as_mut() {
-                editor.handle_key(key);
-            }
-            self.resolve_pending_vault_action_after_editor_key();
-            return None;
-        }
-
-        if self.ui.vault_profile_manager.is_some() {
-            self.handle_vault_profile_key(key);
+            self.handle_pending_vault_action_key(key);
             return None;
         }
 
@@ -348,6 +364,7 @@ impl TuiApp {
             && self.ui.save_file_dialog.is_none()
             && self.ui.artifact_viewer.is_none()
             && self.ui.editor_popup.is_none()
+            && self.ui.resource_editor.is_none()
             && self.ui.list_popup.is_none()
             && !self.ui.show_session_list
         {
@@ -374,7 +391,10 @@ impl TuiApp {
                     _ => self.settings_workspace_key(key),
                 };
             }
-            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('e') {
+            if self.ui.app_tabs.active_view().is_chat()
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.code == KeyCode::Char('e')
+            {
                 self.open_chat_draft_editor();
                 return None;
             }
@@ -424,6 +444,21 @@ impl TuiApp {
                     self.prepare_artifact_save(viewer_handle);
                     None
                 }
+                KeyCode::Char('c') if !viewer.view_only => {
+                    Some(Action::CopyArtifact(viewer_handle))
+                }
+                KeyCode::Char('e') if key.modifiers.is_empty() && !viewer.view_only => {
+                    self.edit_artifact(viewer_handle);
+                    None
+                }
+                KeyCode::Delete if !viewer.view_only => {
+                    self.ui.delete_confirm = Some(viewer_handle);
+                    self.ui.artifact_viewer = None;
+                    None
+                }
+                KeyCode::Char('+') if viewer.can_insert_to_chat() => {
+                    Some(Action::InsertArtifactToChat(viewer_handle))
+                }
                 KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     Some(Action::ExportConversation)
                 }
@@ -431,7 +466,8 @@ impl TuiApp {
             };
         }
 
-        if self.ui.active_modal.is_none()
+        if self.ui.app_tabs.active_view().is_chat()
+            && self.ui.active_modal.is_none()
             && self.ui.delete_confirm.is_none()
             && !self.ui.show_session_list
             && key.code == KeyCode::Enter
@@ -599,6 +635,9 @@ impl TuiApp {
                             | crate::ui::Modal::DiscardSecurityDrafts,
                         ) => Action::ConfirmPendingDocumentDiscard,
                         Some(crate::ui::Modal::ExportChatDraft) => Action::ConfirmChatDraftExport,
+                        Some(crate::ui::Modal::ShareProtectedContext) => {
+                            Action::ConfirmProtectedContext
+                        }
                         None => Action::CancelModal,
                     })
                 }
@@ -622,7 +661,7 @@ impl TuiApp {
                 }
             }
         } else {
-            if self.markdown_vault_is_active() {
+            if self.vault_is_active() {
                 return match key.code {
                     KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
                         Some(self.quit_action())
@@ -637,17 +676,25 @@ impl TuiApp {
                         Some(Action::ToggleSettings)
                     }
                     KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.ui.app_tabs.add_placeholder();
+                        self.ui.app_tabs.add_launcher();
                         self.ui.focus = crate::tui::focus::Focus::Chat;
                         None
                     }
                     KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        let active = self.ui.app_tabs.active_index();
+                        let active = self.ui.app_tabs.active_id();
                         self.request_app_tab_close(active);
                         None
                     }
-                    _ => self.handle_markdown_vault_key(key),
+                    _ => self.handle_vault_key(key),
                 };
+            }
+            #[cfg(feature = "memory")]
+            if self.ui.app_tabs.active_view() == crate::ui::app_tabs::AppView::Memories
+                && !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            {
+                return self.handle_memories_key(key);
             }
             if !self.ui.app_tabs.active_view().is_chat() {
                 return match key.code {
@@ -664,12 +711,12 @@ impl TuiApp {
                         Some(Action::ToggleSettings)
                     }
                     KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.ui.app_tabs.add_placeholder();
+                        self.ui.app_tabs.add_launcher();
                         self.ui.focus = crate::tui::focus::Focus::Chat;
                         None
                     }
                     KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        let active = self.ui.app_tabs.active_index();
+                        let active = self.ui.app_tabs.active_id();
                         self.request_app_tab_close(active);
                         None
                     }
@@ -768,7 +815,7 @@ impl TuiApp {
                     Some(Action::ToggleArtifactSidebar)
                 }
                 KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.ui.app_tabs.add_placeholder();
+                    self.ui.app_tabs.add_launcher();
                     self.ui.focus = crate::tui::focus::Focus::Chat;
                     None
                 }
@@ -901,9 +948,9 @@ impl TuiApp {
             && self.ui.palette.is_none()
             && self.ui.settings_v2.is_none()
             && self.ui.credential_manager.is_none()
-            && self.ui.vault_profile_manager.is_none()
             && self.ui.pending_vault_mutation.is_none()
             && self.ui.editor_popup.is_none()
+            && self.ui.resource_editor.is_none()
             && self.ui.artifact_viewer.is_none()
             && self.ui.save_file_dialog.is_none()
             && self.ui.export_dialog.is_none()
@@ -1025,12 +1072,6 @@ impl TuiApp {
         down: bool,
     ) {
         let pos = ratatui::layout::Position::new(col, row);
-        if let (Some(manager), Some(area)) =
-            (self.ui.vault_profile_manager.as_mut(), self.ui.last_area)
-        {
-            manager.handle_mouse_scroll(pos, area, down);
-            return;
-        }
         if let Some(popup) = &mut self.ui.list_popup {
             let visible_rows = self
                 .ui
@@ -1057,9 +1098,18 @@ impl TuiApp {
             || self.ui.save_file_dialog.is_some()
             || self.ui.export_dialog.is_some()
             || self.ui.editor_popup.is_some()
+            || self.ui.resource_editor.is_some()
             || self.ui.show_keybinds
             || self.ui.show_session_list
         {
+            return;
+        }
+        if let Some(viewer) = &mut self.ui.artifact_viewer {
+            if down {
+                viewer.scroll = viewer.scroll.saturating_add(1);
+            } else {
+                viewer.scroll = viewer.scroll.saturating_sub(1);
+            }
             return;
         }
 
@@ -1074,26 +1124,13 @@ impl TuiApp {
             }
         }
 
-        if self.markdown_vault_is_active() {
-            let _ = self.handle_markdown_vault_mouse_scroll(pos, down);
+        if self.vault_is_active() {
+            let _ = self.handle_vault_mouse_scroll(pos, down);
             return;
         }
 
         if !self.ui.app_tabs.active_view().is_chat() {
             return;
-        }
-
-        if let Some(viewer) = &mut self.ui.artifact_viewer {
-            if let Some(area) = self.ui.chat_area {
-                if area.contains(pos) {
-                    if down {
-                        viewer.scroll = viewer.scroll.saturating_add(1);
-                    } else {
-                        viewer.scroll = viewer.scroll.saturating_sub(1);
-                    }
-                    return;
-                }
-            }
         }
 
         if let Some(section) = self.ui.artifact_sidebar_state.section_at(pos) {
@@ -1110,20 +1147,6 @@ impl TuiApp {
                             section,
                             down,
                             tab.temporary_artifacts.len(),
-                            visible,
-                        );
-                    }
-                    crate::ui::artifact_sidebar::ArtifactSection::Saved => {
-                        let visible = self
-                            .ui
-                            .artifact_sidebar_state
-                            .saved_body
-                            .map(crate::ui::artifact_sidebar::ArtifactSidebar::visible_rows)
-                            .unwrap_or(1);
-                        self.ui.artifact_sidebar_state.scroll(
-                            section,
-                            down,
-                            self.ui.saved_artifacts.len(),
                             visible,
                         );
                     }
@@ -1232,11 +1255,6 @@ impl TuiApp {
             return None;
         }
 
-        if self.ui.vault_profile_manager.is_some() {
-            self.handle_vault_profile_mouse_click(pos, area);
-            return None;
-        }
-
         if self.ui.pending_vault_action.is_some() {
             return None;
         }
@@ -1303,6 +1321,9 @@ impl TuiApp {
             return None;
         }
 
+        if self.ui.resource_editor.is_some() {
+            return None;
+        }
         if self.ui.editor_popup.is_some() {
             if let Some(chat_area) = self.ui.chat_area {
                 let popup_area = crate::ui::modals::editor_popup::popup_area_pub(chat_area);
@@ -1324,37 +1345,45 @@ impl TuiApp {
         }
 
         if self.ui.artifact_viewer.is_some() {
-            if let Some(chat_area) = self.ui.chat_area {
-                let popup_area = crate::ui::modals::artifact_viewer::popup_area(chat_area);
-                if popup_area.contains(pos) {
-                    let (close, edit, delete, insert_to_chat, handle) =
-                        self.ui.artifact_viewer.as_ref().map(|viewer| {
-                            (
-                                viewer.hit_areas.close,
-                                viewer.hit_areas.edit,
-                                viewer.hit_areas.delete,
-                                viewer.hit_areas.insert_to_chat,
-                                viewer.handle().clone(),
-                            )
-                        })?;
-                    if close.is_some_and(|area| area.contains(pos)) {
-                        self.ui.artifact_viewer = None;
-                        return None;
-                    }
-                    if edit.is_some_and(|area| area.contains(pos)) {
-                        self.ui.artifact_viewer = None;
-                        self.edit_artifact(handle);
-                        return None;
-                    }
-                    if delete.is_some_and(|area| area.contains(pos)) {
-                        self.ui.delete_confirm = Some(handle);
-                        return None;
-                    }
-                    if insert_to_chat.is_some_and(|area| area.contains(pos)) {
-                        return Some(Action::InsertArtifactToChat(handle));
-                    }
+            let viewer_area = if self.ui.app_tabs.active_view().is_chat() {
+                self.ui.chat_area.unwrap_or(area)
+            } else {
+                area
+            };
+            let popup_area = crate::ui::modals::artifact_viewer::popup_area(viewer_area);
+            if popup_area.contains(pos) {
+                let (close, edit, delete, insert_to_chat, copy, handle) =
+                    self.ui.artifact_viewer.as_ref().map(|viewer| {
+                        (
+                            viewer.hit_areas.close,
+                            viewer.hit_areas.edit,
+                            viewer.hit_areas.delete,
+                            viewer.hit_areas.insert_to_chat,
+                            viewer.hit_areas.copy,
+                            viewer.handle().clone(),
+                        )
+                    })?;
+                if close.is_some_and(|area| area.contains(pos)) {
+                    self.ui.artifact_viewer = None;
                     return None;
                 }
+                if edit.is_some_and(|area| area.contains(pos)) {
+                    self.ui.artifact_viewer = None;
+                    self.edit_artifact(handle);
+                    return None;
+                }
+                if delete.is_some_and(|area| area.contains(pos)) {
+                    self.ui.artifact_viewer = None;
+                    self.ui.delete_confirm = Some(handle);
+                    return None;
+                }
+                if copy.is_some_and(|area| area.contains(pos)) {
+                    return Some(Action::CopyArtifact(handle));
+                }
+                if insert_to_chat.is_some_and(|area| area.contains(pos)) {
+                    return Some(Action::InsertArtifactToChat(handle));
+                }
+                return None;
             }
             self.ui.artifact_viewer = None;
             return None;
@@ -1434,6 +1463,9 @@ impl TuiApp {
                             | crate::ui::Modal::DiscardSecurityDrafts,
                         ) => Action::ConfirmPendingDocumentDiscard,
                         Some(crate::ui::Modal::ExportChatDraft) => Action::ConfirmChatDraftExport,
+                        Some(crate::ui::Modal::ShareProtectedContext) => {
+                            Action::ConfirmProtectedContext
+                        }
                         None => Action::CancelModal,
                     });
                 }
@@ -1490,7 +1522,7 @@ impl TuiApp {
                     return None;
                 }
                 crate::ui::MouseAction::AppTabAdd => {
-                    self.ui.app_tabs.add_placeholder();
+                    self.ui.app_tabs.add_launcher();
                     self.ui.focus = crate::tui::focus::Focus::Chat;
                     return None;
                 }
@@ -1557,20 +1589,17 @@ impl TuiApp {
                 }
                 crate::ui::MouseAction::Launcher(action) => {
                     return match action {
-                        crate::ui::launcher::LauncherAction::MarkdownVault => {
-                            Some(Action::OpenMarkdownVaultLauncher)
+                        crate::ui::launcher::LauncherAction::Vault => {
+                            Some(Action::OpenVaultLauncher)
                         }
                         crate::ui::launcher::LauncherAction::Terminal => Some(Action::OpenTerminal),
                         crate::ui::launcher::LauncherAction::Settings => {
                             Some(Action::OpenSettingsPanel)
                         }
-                        crate::ui::launcher::LauncherAction::MemoryManagement
-                        | crate::ui::launcher::LauncherAction::System
-                        | crate::ui::launcher::LauncherAction::Research
-                        | crate::ui::launcher::LauncherAction::Todo
-                        | crate::ui::launcher::LauncherAction::Kanban
-                        | crate::ui::launcher::LauncherAction::News
-                        | crate::ui::launcher::LauncherAction::Pomodoro => None,
+                        #[cfg(feature = "memory")]
+                        crate::ui::launcher::LauncherAction::Memories => {
+                            Some(Action::OpenMemoriesLauncher)
+                        }
                     };
                 }
             }
@@ -1585,8 +1614,12 @@ impl TuiApp {
             return None;
         }
 
-        if self.markdown_vault_is_active() {
-            return self.handle_markdown_vault_mouse_click(pos);
+        if self.vault_is_active() {
+            return self.handle_vault_mouse_click(pos);
+        }
+        #[cfg(feature = "memory")]
+        if self.ui.app_tabs.active_view() == crate::ui::app_tabs::AppView::Memories {
+            return self.handle_memories_mouse(pos);
         }
 
         if !self.ui.app_tabs.active_view().is_chat() {
@@ -1838,6 +1871,12 @@ impl TuiApp {
                 }
                 crate::ui::artifact_sidebar::ArtifactSidebarAction::Save(handle) => {
                     self.prepare_artifact_save(handle);
+                }
+                crate::ui::artifact_sidebar::ArtifactSidebarAction::Context(handle) => {
+                    self.insert_artifact_to_chat(handle);
+                }
+                crate::ui::artifact_sidebar::ArtifactSidebarAction::Copy(handle) => {
+                    self.copy_artifact(handle);
                 }
                 crate::ui::artifact_sidebar::ArtifactSidebarAction::Delete(handle) => {
                     self.ui.delete_confirm = Some(handle);

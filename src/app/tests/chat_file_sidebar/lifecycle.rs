@@ -22,7 +22,7 @@ fn chat_file_sidebar_saved_delete_closes_chat_link_viewer() {
     with_sidebar_app("saved-delete-chat-viewer", |app, _| {
         // Given
         let (chat_handle, path) = create_link(app, "cross.md", b"contents");
-        let saved_handle = app.ui.saved_artifacts[0].handle.clone();
+        let saved_handle = app.ui.vault_artifacts[0].handle.clone();
         app.open_artifact(chat_handle);
         assert!(app.ui.artifact_viewer.is_some());
 
@@ -40,7 +40,7 @@ fn chat_file_sidebar_chat_delete_closes_saved_viewer() {
     with_sidebar_app("chat-delete-saved-viewer", |app, _| {
         // Given
         let (chat_handle, path) = create_link(app, "cross.md", b"contents");
-        let saved_handle = app.ui.saved_artifacts[0].handle.clone();
+        let saved_handle = app.ui.vault_artifacts[0].handle.clone();
         app.open_artifact(saved_handle);
         assert!(app.ui.artifact_viewer.is_some());
 
@@ -72,7 +72,7 @@ fn chat_file_sidebar_missing_file_refresh_removes_broken_actions() {
 
         // Then
         assert!(app.ui.tabs[0].temporary_artifacts.is_empty());
-        assert!(app.ui.saved_artifacts.is_empty());
+        assert!(app.ui.vault_artifacts.is_empty());
         assert!(app.ui.artifact_sidebar_state.action_at(old_view).is_none());
     });
 }

@@ -7,11 +7,6 @@ pub enum McpError {
     UnknownProfile,
     #[error("MCP profile '{name}' is disabled; enable it in Settings > Web search > Search API keys or MCP Servers")]
     ProfileDisabled { name: String },
-    #[error("MCP profile '{profile}' needs {env_var}; configure the vault path in Settings")]
-    MissingVaultPath {
-        profile: &'static str,
-        env_var: &'static str,
-    },
     #[error("MCP profile '{profile}' needs a stored API key; add '{key_store_name}' in Settings > Web search > Search API keys")]
     MissingApiKey {
         profile: &'static str,

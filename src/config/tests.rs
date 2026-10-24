@@ -60,13 +60,10 @@ fn load_fills_missing_xdg_fields_without_clobbering_existing_values() {
     let config = AppConfig::load().expect("load config");
 
     assert_eq!(config.theme, "solarized-dark");
-    assert_eq!(
-        config.saved_files_dir,
-        Some(data_home.join("tcui/vault").display().to_string())
-    );
+    assert!(config.saved_files_dir.is_none());
     let xdg_content = std::fs::read_to_string(&xdg_path).expect("read xdg config");
     assert!(xdg_content.contains("theme = \"solarized-dark\""));
-    assert!(xdg_content.contains("saved_files_dir ="));
+    assert!(!xdg_content.contains("saved_files_dir ="));
     assert!(!root.join("config.toml").exists());
 
     std::env::set_current_dir(original_dir).expect("restore current dir");

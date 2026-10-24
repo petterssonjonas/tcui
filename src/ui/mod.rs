@@ -15,8 +15,8 @@ pub mod command_review;
 pub mod components;
 pub(crate) mod ephemeral;
 pub mod launcher;
-pub mod markdown_vault;
-pub mod markdown_vault_workspace;
+#[cfg(feature = "memory")]
+pub(crate) mod memory_manager;
 pub mod modals;
 pub mod pending_documents;
 pub mod session_list;
@@ -28,6 +28,8 @@ pub mod terminal_workspace;
 pub mod text_selection;
 pub mod toast;
 pub mod top_bar;
+pub mod vault;
+pub mod vault_workspace;
 
 #[cfg(test)]
 mod toast_tests;
@@ -36,24 +38,24 @@ mod toast_tests;
 pub(crate) mod ephemeral_tests;
 
 #[cfg(test)]
-#[path = "markdown_vault_workspace_tests.rs"]
-mod markdown_vault_workspace_lifecycle;
+#[path = "vault_workspace_tests.rs"]
+mod vault_workspace_lifecycle;
 
 #[cfg(test)]
-#[path = "markdown_vault_workspace_ui_tests.rs"]
-mod markdown_vault_workspace_ui;
+#[path = "vault_workspace_ui_tests.rs"]
+mod vault_workspace_ui;
 
 #[cfg(test)]
-#[path = "markdown_vault_workspace_ui_edges_tests.rs"]
-mod markdown_vault_workspace_ui_edges;
+#[path = "vault_workspace_ui_edges_tests.rs"]
+mod vault_workspace_ui_edges;
 
 #[cfg(test)]
-#[path = "markdown_vault_workspace_ui_tree_tests.rs"]
-mod markdown_vault_workspace_ui_tree;
+#[path = "vault_workspace_ui_tree_tests.rs"]
+mod vault_workspace_ui_tree;
 
 #[cfg(test)]
-#[path = "markdown_vault_workspace_watcher_tests.rs"]
-mod markdown_vault_workspace_watcher;
+#[path = "vault_workspace_watcher_tests.rs"]
+mod vault_workspace_watcher;
 
 use crate::config::app_config::{HeadingDownscale, MarkdownMode, TextAlignment};
 use crate::tui::components::centered_rect;
@@ -130,7 +132,7 @@ pub struct UI {
     pub active_tab: usize,
     pub(crate) ephemeral: Option<ephemeral::EphemeralPane>,
     pub app_tabs: app_tabs::AppTabs,
-    pub markdown_vault_workspaces: markdown_vault_workspace::MarkdownVaultWorkspaceRegistry,
+    pub vault_workspaces: vault_workspace::VaultWorkspaceRegistry,
     pub terminals: terminal_workspace::TerminalWorkspace,
     pub command_review: Option<command_review::CommandReview>,
     pub settings_workspace: settings_workspace::SettingsWorkspaceState,
@@ -148,8 +150,7 @@ pub struct UI {
     pub palette: Option<crate::tui::palette::PaletteState>,
     pub settings_v2: Option<crate::tui::settings_panel::SettingsPanelState>,
     pub(crate) credential_manager: Option<crate::app::credential_manager::CredentialManager>,
-    pub vault_profile_manager: Option<crate::tui::vault_profile_ui::VaultProfileManagerState>,
-    pub pending_vault_action: Option<crate::tui::vault_profile_ui::PendingVaultAction>,
+    pub(crate) pending_vault_action: Option<crate::app::vault::PendingVaultAction>,
     pub(crate) pending_vault_mutation: Option<crate::app::submission::PendingVaultMutation>,
     pub(crate) pending_vault_mutation_areas:
         Option<modals::vault_mutation_preview::VaultMutationPreviewAreas>,
@@ -168,11 +169,15 @@ pub struct UI {
     pub artifact_sidebar_state: ArtifactSidebarState,
     pub vault_available: bool,
     pub vault_artifacts: Vec<ArtifactEntry>,
-    pub saved_artifacts: Vec<ArtifactEntry>,
     pub memory_artifacts: Vec<ArtifactEntry>,
-    pub show_saved_files: bool,
     pub show_memories: bool,
-    pub show_markdown_vault: bool,
+    pub show_vault: bool,
+    pub(crate) vault_notice: Option<String>,
+    pub(crate) memory_notice: Option<String>,
+    pub(crate) resource_editor: Option<modals::resource_editor::ResourceEditor>,
+    pub(crate) pending_protected_context: Option<crate::app::submission::PendingDocumentInput>,
+    #[cfg(feature = "memory")]
+    pub(crate) memory_manager: memory_manager::MemoryManagerState,
     pub mcps: Vec<String>,
     pub user_alignment: TextAlignment,
     pub ai_alignment: TextAlignment,
@@ -225,6 +230,7 @@ pub enum Modal {
     DiscardPendingDocuments,
     DiscardSecurityDrafts,
     ExportChatDraft,
+    ShareProtectedContext,
 }
 
 pub struct ChatTabState {
@@ -358,8 +364,7 @@ impl UI {
             terminals: terminal_workspace::TerminalWorkspace::default(),
             command_review: None,
             settings_workspace: settings_workspace::SettingsWorkspaceState::default(),
-            markdown_vault_workspaces:
-                markdown_vault_workspace::MarkdownVaultWorkspaceRegistry::default(),
+            vault_workspaces: vault_workspace::VaultWorkspaceRegistry::default(),
             panel_state: crate::tui::shell::PanelState::new(),
             sidebar_open: false,
             artifact_sidebar_open: false,
@@ -374,7 +379,6 @@ impl UI {
             palette: None,
             settings_v2: None,
             credential_manager: None,
-            vault_profile_manager: None,
             pending_vault_action: None,
             pending_vault_mutation: None,
             pending_vault_mutation_areas: None,
@@ -393,11 +397,15 @@ impl UI {
             artifact_sidebar_state: ArtifactSidebarState::default(),
             vault_available: false,
             vault_artifacts: vec![],
-            saved_artifacts: vec![],
             memory_artifacts: vec![],
-            show_saved_files: true,
             show_memories: true,
-            show_markdown_vault: true,
+            show_vault: true,
+            vault_notice: None,
+            memory_notice: None,
+            resource_editor: None,
+            pending_protected_context: None,
+            #[cfg(feature = "memory")]
+            memory_manager: memory_manager::MemoryManagerState::default(),
             mcps: vec![],
             user_alignment: TextAlignment::Right,
             ai_alignment: TextAlignment::Left,
@@ -457,7 +465,6 @@ impl UI {
             && self.palette.is_none()
             && self.settings_v2.is_none()
             && self.credential_manager.is_none()
-            && self.vault_profile_manager.is_none()
             && self.pending_vault_mutation.is_none()
             && !self.show_keybinds
             && !self.show_session_list
@@ -474,7 +481,7 @@ impl UI {
         }
         self.artifact_sidebar_state.clear_hit_areas();
         let active_app_tab_id = self.app_tabs.active_id();
-        if let Some(state) = self.markdown_vault_workspaces.get_mut(active_app_tab_id) {
+        if let Some(state) = self.vault_workspaces.get_mut(active_app_tab_id) {
             state.hit_areas.clear();
         }
 
@@ -566,7 +573,7 @@ impl UI {
                 self.render_global_overlays(f, area, 0);
                 return;
             }
-            Some(app_tabs::AppView::MarkdownVault { .. }) => {
+            Some(app_tabs::AppView::Vault) => {
                 let workspace = Rect::new(
                     area.x,
                     area.y.saturating_add(1),
@@ -574,12 +581,12 @@ impl UI {
                     area.height.saturating_sub(1),
                 );
                 let active_id = self.app_tabs.active_id();
-                if let Some(state) = self.markdown_vault_workspaces.get_mut(active_id) {
-                    markdown_vault::render_workspace(
+                if let Some(state) = self.vault_workspaces.get_mut(active_id) {
+                    vault::render_workspace(
                         f,
                         workspace,
                         state,
-                        markdown_vault::MarkdownVaultRenderProps {
+                        vault::VaultRenderProps {
                             markdown_mode: self.markdown_mode,
                             kitty_enhanced_text: self.kitty_enhanced_text,
                             kitty_heading_downscale: self.kitty_heading_downscale,
@@ -589,7 +596,7 @@ impl UI {
                     );
                 } else {
                     f.render_widget(
-                        Paragraph::new("Markdown Vault workspace unavailable")
+                        Paragraph::new("Vault workspace unavailable")
                             .style(Style::default().fg(theme.error).bg(theme.background))
                             .alignment(Alignment::Center),
                         workspace,
@@ -598,9 +605,24 @@ impl UI {
                 self.render_global_overlays(f, area, 0);
                 return;
             }
+            #[cfg(feature = "memory")]
+            Some(app_tabs::AppView::Memories) => {
+                let workspace = Rect::new(
+                    area.x,
+                    area.y.saturating_add(1),
+                    area.width,
+                    area.height.saturating_sub(1),
+                );
+                self.memory_manager.render(
+                    f,
+                    workspace,
+                    &self.memory_artifacts,
+                    self.memory_notice.as_deref(),
+                );
+                self.render_global_overlays(f, area, 0);
+                return;
+            }
             Some(app_tabs::AppView::Chat) | None => {}
-            #[cfg(test)]
-            Some(app_tabs::AppView::Placeholder { .. }) => return,
         }
 
         let status_bar_rows = self.tui_config.status_bar_rows.clamp(1, 2);
@@ -690,9 +712,8 @@ impl UI {
             content_layout[2]
         };
         let artifact_visibility = ArtifactSidebarVisibility {
-            saved_files: self.show_saved_files,
-            memories: self.show_memories,
-            markdown_vault: self.show_markdown_vault,
+            memories: cfg!(feature = "memory") && self.show_memories,
+            vault: self.show_vault,
         };
         let main_chat_index = self.main_chat_index();
 
@@ -727,7 +748,6 @@ impl UI {
                 );
                 let mut artifact_sidebar = ArtifactSidebar::new(
                     &tab_state.temporary_artifacts,
-                    &self.saved_artifacts,
                     &self.memory_artifacts,
                     &self.vault_artifacts,
                     self.vault_available,
@@ -758,7 +778,6 @@ impl UI {
             && self.palette.is_none()
             && self.settings_v2.is_none()
             && self.credential_manager.is_none()
-            && self.vault_profile_manager.is_none()
             && self.pending_vault_mutation.is_none()
             && !self.show_keybinds
             && !self.show_session_list
@@ -876,7 +895,6 @@ impl UI {
                     );
                     let mut artifact_sidebar = ArtifactSidebar::new(
                         &tab_state.temporary_artifacts,
-                        &self.saved_artifacts,
                         &self.memory_artifacts,
                         &self.vault_artifacts,
                         self.vault_available,
@@ -959,10 +977,14 @@ impl UI {
             dialog.render(f, area);
         }
 
-        if let (Some(viewer), Some(chat_area)) = (&mut self.artifact_viewer, self.chat_area) {
+        if let Some(viewer) = &mut self.artifact_viewer {
             viewer.render(
                 f,
-                chat_area,
+                if self.app_tabs.active_view().is_chat() {
+                    self.chat_area.unwrap_or(area)
+                } else {
+                    area
+                },
                 modals::artifact_viewer::ArtifactViewerProps {
                     markdown_mode: self.markdown_mode,
                     kitty_enhanced_text: self.kitty_enhanced_text,
@@ -975,6 +997,10 @@ impl UI {
 
         if let (Some(editor), Some(chat_area)) = (&mut self.editor_popup, self.chat_area) {
             editor.render(f, chat_area);
+        }
+
+        if let Some(editor) = &mut self.resource_editor {
+            editor.render(f, area);
         }
 
         if let Some(ref popup) = self.list_popup {
@@ -999,10 +1025,6 @@ impl UI {
                     .into_iter()
                     .map(|(rect, index)| (rect, MouseAction::SettingsItem(index))),
             );
-        }
-
-        if let Some(ref manager) = self.vault_profile_manager {
-            manager.render(f, area);
         }
 
         if let Some(manager) = &self.credential_manager {
@@ -1077,6 +1099,16 @@ impl UI {
                     let areas = QuitConfirmModal::new()
                         .title("Export protected draft as plaintext?")
                         .message("The external editor requires a PLAINTEXT file. TCUI uses private temporary permissions, but the editor may retain backups or copies. Export this draft? Cancel keeps it only in TCUI.")
+                        .render(f);
+                    self.modal_areas = Some(ModalAreas {
+                        yes: areas.yes,
+                        no: areas.no,
+                    });
+                }
+                Modal::ShareProtectedContext => {
+                    let areas = QuitConfirmModal::new()
+                        .title("Store protected content in an unencrypted chat?")
+                        .message("This content is encrypted at rest. When sent, it goes to the chosen provider. If this chat is saved, the content will be stored in PLAINTEXT chat history. Continue? Cancel keeps it out of this chat.")
                         .render(f);
                     self.modal_areas = Some(ModalAreas {
                         yes: areas.yes,
@@ -1321,10 +1353,11 @@ mod tests {
 
         let screen = terminal.backend().to_string();
         assert!(screen.contains("Launcher"));
-        assert!(screen.contains("Markdown Vault"));
-        assert!(screen.contains("Memory management"));
+        assert!(screen.contains("Vault"));
+        #[cfg(feature = "memory")]
+        assert!(screen.contains("Memories"));
         assert!(screen.contains("Terminal"));
-        assert!(screen.contains("Pomodoro"));
+        assert!(!screen.contains("Pomodoro"));
         assert!(!screen.contains("[New Chat]"));
         assert_eq!(
             terminal.backend().buffer()[(0, 1)].bg,

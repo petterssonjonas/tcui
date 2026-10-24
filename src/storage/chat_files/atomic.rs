@@ -43,25 +43,36 @@ impl AtomicWriter {
         contents: &[u8],
         target: AtomicWriteTarget,
     ) -> Result<(), ChatFileError> {
-        let mut temporary = self.write_temp(path, contents, target)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| io::Error::other("path has no parent"))?;
+        let directory = crate::protection::open_directory(parent, false)
+            .map_err(|error| io::Error::other(error.to_string()))?;
         let name = path
             .file_name()
             .ok_or_else(|| io::Error::other("missing filename"))?;
-        match temporary.directory.symlink_metadata(name) {
+        self.write_replace_at(&directory, name, contents, target)
+    }
+
+    pub(super) fn write_replace_at(
+        &self,
+        directory: &Dir,
+        name: &std::ffi::OsStr,
+        contents: &[u8],
+        target: AtomicWriteTarget,
+    ) -> Result<(), ChatFileError> {
+        let mut temporary = self.write_temp_in(directory.try_clone()?, contents, target)?;
+        match directory.symlink_metadata(name) {
             Ok(metadata) if !metadata.is_file() || metadata.is_symlink() => {
-                return Err(ChatFileError::NotRegularFile {
-                    path: path.to_path_buf(),
-                });
+                return Err(ChatFileError::NotRegularFile { path: name.into() });
             }
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        temporary
-            .directory
-            .rename(&temporary.name, &temporary.directory, name)?;
+        directory.rename(&temporary.name, directory, name)?;
         temporary.armed = false;
-        sync_handle(&temporary.directory)
+        sync_handle(directory)
     }
 
     pub(super) fn write_new(
@@ -88,13 +99,22 @@ impl AtomicWriter {
         contents: &[u8],
         target: AtomicWriteTarget,
     ) -> Result<TemporaryFile, ChatFileError> {
-        #[cfg(not(test))]
-        let _ = target;
         let parent = path
             .parent()
             .ok_or_else(|| io::Error::other("path has no parent"))?;
         let directory = crate::protection::open_directory(parent, false)
             .map_err(|error| io::Error::other(error.to_string()))?;
+        self.write_temp_in(directory, contents, target)
+    }
+
+    fn write_temp_in(
+        &self,
+        directory: Dir,
+        contents: &[u8],
+        target: AtomicWriteTarget,
+    ) -> Result<TemporaryFile, ChatFileError> {
+        #[cfg(not(test))]
+        let _ = target;
         let name = format!(".chat-file-{:032x}.tmp", rand::random::<u128>());
         let descriptor = openat(
             &directory,
@@ -131,8 +151,9 @@ impl AtomicWriter {
     }
 }
 
-fn sync_handle(directory: &Dir) -> Result<(), ChatFileError> {
-    rustix::fs::fsync(directory).map_err(io::Error::from)?;
+pub(super) fn sync_handle(directory: &Dir) -> Result<(), ChatFileError> {
+    // Capability directory handles can use O_PATH; reopen the retained directory for fsync.
+    directory.open(".")?.sync_all()?;
     Ok(())
 }
 

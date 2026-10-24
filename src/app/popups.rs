@@ -102,20 +102,27 @@ impl TuiApp {
     }
 
     pub(crate) fn show_local_search_popup(&mut self, query: &str) {
-        let items = self
-            .vault
-            .as_ref()
-            .and_then(|vault| vault.search(query).ok())
-            .map(|paths| {
-                paths
+        let items = crate::vault::VaultFs::open_default()
+            .and_then(|vault| vault.search(query, crate::vault::VaultSearchLimits::default()))
+            .map(|result| {
+                let mut paths = result
+                    .matches
                     .into_iter()
-                    .map(|path| path.display().to_string())
-                    .collect()
+                    .map(|entry| {
+                        crate::protection::internal_vault_root()
+                            .join(entry.path)
+                            .display()
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>();
+                paths.sort();
+                paths.dedup();
+                paths
             })
             .unwrap_or_default();
         self.ui.list_popup = Some(crate::ui::modals::list_popup::ListPopup::new(
             format!("Local Search: {}", query.trim()),
-            "No local matches. Configure vault_path to enable local search.",
+            "No local matches in the internal Vault.",
             items,
         ));
     }

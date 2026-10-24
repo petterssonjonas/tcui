@@ -9,6 +9,7 @@ pub mod chat_store;
 pub(crate) mod conversation_recall;
 pub mod crypto;
 pub mod db;
+pub(crate) mod native_transfer;
 pub mod paths;
 pub(crate) mod saved_file_migration;
 

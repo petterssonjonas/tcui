@@ -3,189 +3,116 @@
 use super::*;
 
 #[test]
-fn vault_config_migration_toml_and_json_legacy_inputs_produce_identical_stable_config() {
+fn vault_config_migration_discards_external_selection_without_importing_or_mutating_files() {
     let _guard = env_lock().lock().expect("env lock poisoned");
-    let vault_root = unique_temp_dir("vault-config-shared-root");
-    std::fs::create_dir_all(&vault_root).expect("create vault root");
-    let legacy_toml = format!(
-        "vault_path = {:?}\nartifact_save_dir = {:?}\n",
-        vault_root.display().to_string(),
-        "/tmp/legacy-saved"
+    let home = ConfigHome::new("vault-config-external");
+    let external = home.root.join("external");
+    std::fs::create_dir_all(&external).expect("create external directory");
+    std::fs::write(external.join("sentinel.md"), b"external content").expect("seed external file");
+    let original = format!(
+        "theme = \"legacy-theme\"\ndefault_model = \"retained-model\"\nvault_path = {path:?}\nartifact_save_dir = {path:?}\ndefault_vault_id = \"obsolete-id\"\nvault_operation_retention_days = 14\n[vaults.obsolete-id]\nroot = {path:?}\ndisplay_name = \"External\"\n",
+        path = external.display().to_string(),
     );
-    let legacy_json = serde_json::json!({
-        "vault_path": vault_root,
-        "artifact_save_dir": "/tmp/legacy-saved"
+    home.seed_toml(&original);
+
+    let config = AppConfig::load().expect("migrate external config");
+    crate::storage::saved_file_migration::migrate_saved_files(&config)
+        .expect("migrate native Saved files only");
+    let rewritten = std::fs::read(home.config_path()).expect("read migrated config");
+    let second = AppConfig::load().expect("reload migrated config");
+
+    assert_eq!(config.theme, "legacy-theme");
+    assert_eq!(second.default_model, "retained-model");
+    assert!(config.saved_files_dir.is_none());
+    assert_eq!(
+        std::fs::read(home.backup_path()).expect("read original backup"),
+        original.as_bytes()
+    );
+    assert_eq!(
+        std::fs::read(home.config_path()).expect("read stable config"),
+        rewritten
+    );
+    assert_eq!(
+        std::fs::read(external.join("sentinel.md")).expect("read external sentinel"),
+        b"external content"
+    );
+    assert!(!crate::protection::internal_vault_root()
+        .join("sentinel.md")
+        .exists());
+    let persisted: toml::Value =
+        toml::from_str(std::str::from_utf8(&rewritten).expect("UTF-8 config"))
+            .expect("parse config");
+    for key in [
+        "vaults",
+        "default_vault_id",
+        "vault_path",
+        "artifact_save_dir",
+        "vault_operation_retention_days",
+    ] {
+        assert!(
+            persisted.get(key).is_none(),
+            "obsolete field retained: {key}"
+        );
+    }
+}
+
+#[test]
+fn vault_config_migration_json_keeps_original_and_explicit_saved_directory() {
+    let _guard = env_lock().lock().expect("env lock poisoned");
+    let home = ConfigHome::new("vault-config-json-saved");
+    let saved = home.root.join("legacy-saved");
+    std::fs::create_dir_all(&saved).expect("create Saved directory");
+    std::fs::write(saved.join("saved.md"), b"authorized Saved content").expect("seed Saved file");
+    let original = serde_json::json!({
+        "theme": "retained-theme",
+        "saved_files_dir": saved,
+        "vault_path": "/unavailable/external",
+        "artifact_save_dir": "/other/external",
+        "vaults": { "invalid-old-id": { "root": "/unavailable/external" } },
+        "default_vault_id": "invalid-old-id"
     })
     .to_string();
+    home.seed_json(&original);
 
-    let toml_config = {
-        let home = ConfigHome::new("vault-config-toml-legacy");
-        home.seed_toml(&legacy_toml);
-        AppConfig::load().expect("migrate TOML")
-    };
-    let json_config = {
-        let home = ConfigHome::new("vault-config-json-legacy");
-        home.seed_json(&legacy_json);
-        AppConfig::load().expect("migrate JSON")
-    };
+    let config = AppConfig::load().expect("migrate JSON config");
+    let reloaded = AppConfig::load().expect("reload explicit Saved config");
+    crate::storage::saved_file_migration::migrate_saved_files(&reloaded)
+        .expect("copy explicitly configured Saved directory");
 
-    let external_profiles = |config: &AppConfig| {
-        config
-            .vaults
-            .iter()
-            .filter(|(id, _)| **id != VaultProfileId::internal())
-            .map(|(id, profile)| (id.clone(), profile.clone()))
-            .collect::<HashMap<_, _>>()
-    };
+    assert_eq!(config.saved_files_dir, Some(saved.display().to_string()));
+    assert_eq!(reloaded.saved_files_dir, config.saved_files_dir);
     assert_eq!(
-        external_profiles(&toml_config),
-        external_profiles(&json_config)
-    );
-    assert!(toml_config.vaults.contains_key(&VaultProfileId::internal()));
-    assert!(json_config.vaults.contains_key(&VaultProfileId::internal()));
-    assert_eq!(toml_config.default_vault_id, json_config.default_vault_id);
-    assert_eq!(toml_config.saved_files_dir, json_config.saved_files_dir);
-    std::fs::remove_dir_all(vault_root).expect("cleanup vault root");
-}
-
-#[test]
-fn vault_config_migration_missing_default_selects_internal_and_rewrites_only_once() {
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let home = ConfigHome::new("vault-config-default-fallback");
-    let vault_root = home.root.join("vault");
-    std::fs::create_dir_all(&vault_root).expect("create vault root");
-    let config = profile_config("First", &vault_root);
-    let expected_id = Some(VaultProfileId::internal());
-    let mut value: toml::Value = toml::from_str(&serialized_config(&config)).expect("parse TOML");
-    value
-        .as_table_mut()
-        .expect("top-level table")
-        .remove("default_vault_id");
-    let original = toml::to_string_pretty(&value).expect("serialize fallback fixture");
-    home.seed_toml(&original);
-
-    let first = AppConfig::load().expect("load fallback config");
-    let after_first = std::fs::read(home.config_path()).expect("read first rewrite");
-    let backup_after_first = std::fs::read(home.backup_path()).expect("read migration backup");
-    let second = AppConfig::load().expect("reload fallback config");
-
-    assert_eq!(first.default_vault_id, expected_id);
-    assert_eq!(second.default_vault_id, expected_id);
-    assert_eq!(
-        std::fs::read(home.config_path()).expect("read reload"),
-        after_first
-    );
-    assert_eq!(
-        std::fs::read(home.backup_path()).expect("read retained backup"),
-        backup_after_first
-    );
-    assert_eq!(backup_after_first, original.as_bytes());
-}
-
-#[test]
-fn vault_config_migration_visibility_flags_default_true() {
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let home = ConfigHome::new("vault-config-flag-defaults");
-    home.seed_toml("theme = \"system\"\n");
-
-    let config = AppConfig::load().expect("load defaults");
-
-    assert!(config.show_saved_files);
-    assert!(config.show_memories);
-    assert!(config.show_markdown_vault);
-    assert_eq!(config.default_vault_id, Some(VaultProfileId::internal()));
-    assert_eq!(
-        config.vaults[&VaultProfileId::internal()].root,
-        crate::protection::internal_vault_root()
-    );
-    assert!(crate::protection::internal_vault_root().is_dir());
-}
-
-#[test]
-fn vault_config_migration_unavailable_persisted_root_survives_unchanged() {
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let home = ConfigHome::new("vault-config-unavailable-root");
-    let vault_root = home.root.join("vanishing-vault");
-    std::fs::create_dir_all(&vault_root).expect("create vault root");
-    let config = profile_config("Missing", &vault_root);
-    let id = config.default_vault_id.clone().expect("default ID");
-    let canonical_root = config.vaults.get(&id).expect("profile").root.clone();
-    home.seed_toml(&serialized_config(&config));
-    std::fs::remove_dir_all(&vault_root).expect("remove vault root");
-
-    let loaded = AppConfig::load().expect("load unavailable profile");
-    let profile = loaded.vaults.get(&id).expect("loaded profile");
-
-    assert_eq!(profile.root, canonical_root);
-    assert!(!profile.available);
-}
-
-#[test]
-fn vault_config_migration_duplicate_profiles_fail_closed_without_rewrite() {
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let home = ConfigHome::new("vault-config-duplicate");
-    let vault_root = home.root.join("vault");
-    std::fs::create_dir_all(&vault_root).expect("create vault root");
-    let first = VaultProfile::new("Duplicate", &vault_root).expect("create first profile");
-    let second = VaultProfile::from_persisted(VaultProfileId::new(), " duplicate ", &vault_root)
-        .expect("create duplicate persisted profile");
-    let original = serialized_config(&AppConfig {
-        default_vault_id: Some(first.id.clone()),
-        vaults: HashMap::from([(first.id.clone(), first), (second.id.clone(), second)]),
-        ..AppConfig::default()
-    });
-    home.seed_toml(&original);
-
-    let result = AppConfig::load();
-
-    assert!(result.is_err());
-    assert_eq!(
-        std::fs::read_to_string(home.config_path()).expect("read original"),
+        std::fs::read_to_string(home.json_path()).expect("read original JSON"),
         original
     );
-    assert!(!home.backup_path().exists());
-}
-
-#[test]
-fn vault_config_migration_malformed_profile_id_fails_closed() {
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let home = ConfigHome::new("vault-config-malformed-id");
-    let original = "default_vault_id = \"not-an-id\"\n[vaults]\n";
-    home.seed_toml(original);
-
-    let result = AppConfig::load();
-
-    assert!(result.is_err());
     assert_eq!(
-        std::fs::read_to_string(home.config_path()).expect("read original"),
-        original
+        std::fs::read(saved.join("saved.md")).expect("read retained source"),
+        b"authorized Saved content"
+    );
+    assert_eq!(
+        std::fs::read(crate::protection::internal_vault_root().join("saved.md"))
+            .expect("read native copy"),
+        b"authorized Saved content"
     );
 }
 
 #[test]
-fn vault_config_migration_nonempty_new_catalog_and_saved_dir_win_over_legacy() {
+fn vault_config_migration_preserves_visibility_and_native_content() {
     let _guard = env_lock().lock().expect("env lock poisoned");
-    let home = ConfigHome::new("vault-config-new-precedence");
-    let vault_root = home.root.join("new-vault");
-    std::fs::create_dir_all(&vault_root).expect("create vault root");
-    let mut config = profile_config("Current", &vault_root);
-    config.saved_files_dir = Some("/new/saved".to_string());
-    let expected_id = config.default_vault_id.clone();
-    let mut value: toml::Value = toml::from_str(&serialized_config(&config)).expect("parse config");
-    let table = value.as_table_mut().expect("top-level table");
-    table.insert(
-        "vault_path".to_string(),
-        toml::Value::String("/legacy/vault".to_string()),
-    );
-    table.insert(
-        "artifact_save_dir".to_string(),
-        toml::Value::String("/legacy/saved".to_string()),
-    );
-    home.seed_toml(&toml::to_string_pretty(&value).expect("serialize fixture"));
+    let home = ConfigHome::new("vault-config-native");
+    let native = crate::protection::internal_vault_root();
+    std::fs::create_dir_all(&native).expect("create native Vault");
+    std::fs::write(native.join("existing.md"), b"native content").expect("seed native content");
+    home.seed_toml("show_saved_files = false\nshow_memories = false\nshow_markdown_vault = false\nvaults = \"obsolete malformed catalog\"\n");
 
-    let loaded = AppConfig::load().expect("load precedence config");
+    let config = AppConfig::load().expect("remove obsolete catalog");
+    let reloaded = AppConfig::load().expect("reload migrated visibility");
 
-    assert_eq!(loaded.default_vault_id, expected_id);
-    assert_eq!(loaded.saved_files_dir.as_deref(), Some("/new/saved"));
-    assert_eq!(loaded.vaults.len(), 2);
+    assert!(!config.show_memories);
+    assert!(!config.show_vault);
+    assert!(!reloaded.show_vault);
+    assert_eq!(
+        std::fs::read(native.join("existing.md")).expect("read native content"),
+        b"native content"
+    );
 }

@@ -10,7 +10,7 @@ use self::atomic::{
     acquire_lock, atomic_replace, maybe_fail, read_optional, restore_previous, write_backup_once,
     FailurePoint, CONFIG_FILE,
 };
-use self::migration::{deserialize_config, migrate_value, validate_catalog};
+use self::migration::{deserialize_config, migrate_value};
 use super::AppConfig;
 
 pub(crate) use atomic::atomic_replace_in;
@@ -53,7 +53,6 @@ pub(super) fn save(config: &AppConfig) -> Result<()> {
 fn save_with_root(config: &AppConfig, config_base: Option<PathBuf>) -> Result<()> {
     let config_root = required_root(config_base, "configuration")?;
     let _lock = acquire_lock(&config_root)?;
-    validate_catalog(config)?;
     let content = toml::to_string_pretty(config)?;
     atomic_replace(&config_root.join(CONFIG_FILE), content.as_bytes())
 }

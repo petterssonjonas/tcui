@@ -42,7 +42,7 @@ fn create_link(
 
 fn render_sidebar(
     chat_files: &[ArtifactEntry],
-    saved_files: &[ArtifactEntry],
+    vault_files: &[ArtifactEntry],
     visibility: ArtifactSidebarVisibility,
     state: &mut ArtifactSidebarState,
     width: u16,
@@ -50,7 +50,7 @@ fn render_sidebar(
 ) -> Terminal<TestBackend> {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
     {
-        let mut sidebar = ArtifactSidebar::new(chat_files, saved_files, &[], &[], false, state)
+        let mut sidebar = ArtifactSidebar::new(chat_files, &[], vault_files, true, state)
             .with_visibility(visibility);
         terminal
             .draw(|frame| sidebar.render(frame, Rect::new(0, 0, width, height)))
@@ -88,22 +88,7 @@ fn label_position(buffer: &Buffer, label: &str) -> Position {
     panic!("label {label:?} was not rendered");
 }
 
-fn assert_no_save_action(state: &ArtifactSidebarState, width: u16, height: u16) {
-    for y in 0..height {
-        for x in 0..width {
-            assert!(
-                !matches!(
-                    state.action_at(Position::new(x, y)),
-                    Some(ArtifactSidebarAction::Save(_))
-                ),
-                "unexpected Save action at ({x}, {y})"
-            );
-        }
-    }
-}
-
 const ALL_SECTIONS: ArtifactSidebarVisibility = ArtifactSidebarVisibility {
-    saved_files: true,
     memories: true,
-    markdown_vault: true,
+    vault: true,
 };

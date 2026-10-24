@@ -20,6 +20,8 @@ pub(crate) struct StartupMigration {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum MigrationError {
+    #[error("{0}")]
+    ChatFiles(#[from] crate::storage::chat_files::ChatFileError),
     #[error("Saved file migration is busy")]
     MigrationBusy,
     #[error("Saved file migration refused unsafe source {path}")]
@@ -37,7 +39,7 @@ pub(crate) enum MigrationError {
 impl SavedFileMigration {
     pub(crate) fn startup(config: Option<&AppConfig>) -> StartupMigration {
         let data_paths = TcuiDataPaths::discover();
-        let saved_root = data_paths.root.join("vault");
+        let saved_root = crate::protection::internal_vault_root();
         let warning = config.and_then(|config| migrate_saved_files(config).err());
         StartupMigration {
             saved_root,
@@ -59,6 +61,8 @@ pub(crate) fn migrate_saved_files(config: &AppConfig) -> Result<(), MigrationErr
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
+    crate::storage::chat_files::ChatSavedFileStore::new(paths.root.join("vault"), paths.clone())
+        .require_native_adoption()?;
     let pending = paths.migrations_dir.join("saved-internal-vault-v1.pending");
     crate::protection::write_plain(&pending, b"saved-internal-vault-v1\n")
         .map_err(|error| io::Error::other(error.to_string()))?;
@@ -74,7 +78,7 @@ pub(crate) fn migrate_saved_files(config: &AppConfig) -> Result<(), MigrationErr
             )
         })
         .unwrap_or_else(|| paths.root.join("artifacts"));
-    let destination = paths.root.join("vault");
+    let destination = crate::protection::internal_vault_root();
     if !source.is_absolute()
         || source.parent().is_none()
         || dirs::home_dir().as_ref() == Some(&source)
@@ -94,8 +98,7 @@ pub(crate) fn migrate_saved_files(config: &AppConfig) -> Result<(), MigrationErr
     crate::protection::open_directory(&destination, true)
         .map_err(|error| io::Error::other(error.to_string()))?;
     crate::storage::chat_files::ChatSavedFileStore::new(destination.clone(), paths.clone())
-        .verify_migrated_targets()
-        .map_err(|error| io::Error::other(error.to_string()))?;
+        .verify_migrated_targets()?;
     crate::protection::write(
         crate::protection::Domain::Vault,
         &marker,
@@ -180,9 +183,11 @@ fn copy_saved_root(source: &Path, destination: &Path) -> Result<(), MigrationErr
         }
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
+        crate::protection::require_native_store_adoption(crate::protection::Domain::Vault, &bytes)
+            .map_err(crate::storage::chat_files::ChatFileError::from_protection)?;
         let bytes = if decode_source {
             crate::protection::decode(crate::protection::Domain::Vault, &bytes)
-                .map_err(|error| io::Error::other(error.to_string()))?
+                .map_err(crate::storage::chat_files::ChatFileError::from_protection)?
         } else {
             bytes
         };
@@ -195,8 +200,13 @@ fn copy_saved_root(source: &Path, destination: &Path) -> Result<(), MigrationErr
                 }
                 let mut stored = Vec::new();
                 existing.read_to_end(&mut stored)?;
+                crate::protection::require_native_store_adoption(
+                    crate::protection::Domain::Vault,
+                    &stored,
+                )
+                .map_err(crate::storage::chat_files::ChatFileError::from_protection)?;
                 let stored = crate::protection::decode(crate::protection::Domain::Vault, &stored)
-                    .map_err(|error| io::Error::other(error.to_string()))?;
+                    .map_err(crate::storage::chat_files::ChatFileError::from_protection)?;
                 if stored != bytes {
                     return Err(MigrationError::Conflict {
                         path: destination.join(&name),
@@ -234,4 +244,61 @@ fn copy_saved_root(source: &Path, destination: &Path) -> Result<(), MigrationErr
     }
     rustix::fs::fsync(&destination_dir).map_err(io::Error::from)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{copy_saved_root, MigrationError};
+    use crate::storage::chat_files::ChatFileError;
+
+    #[test]
+    fn saved_relocation_preserves_copied_portable_source_or_destination_until_adoption() {
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
+        for source_is_portable in [false, true] {
+            let root =
+                std::env::temp_dir().join(format!("tcui-saved-adoption-{}", rand::random::<u64>()));
+            let source = root.join("source");
+            let destination = root.join("destination");
+            std::fs::create_dir_all(&source).expect("create source");
+            std::fs::create_dir_all(&destination).expect("create destination");
+            // Only framing is relevant: no decrypt or write may occur before adoption.
+            let mut portable = b"TCUI-PORTABLE\x02".to_vec();
+            portable.push(1);
+            for parameter in [65536_u32, 3, 1] {
+                portable.extend_from_slice(&parameter.to_le_bytes());
+            }
+            portable.resize(crate::protection::NATIVE_STORE_ADOPTION_PROBE_LEN, 0);
+            let source_bytes = if source_is_portable {
+                portable.as_slice()
+            } else {
+                b"plain source"
+            };
+            std::fs::write(source.join("existing.bin"), source_bytes).expect("source fixture");
+            if !source_is_portable {
+                std::fs::write(destination.join("existing.bin"), &portable)
+                    .expect("destination fixture");
+            }
+            let error = copy_saved_root(&source, &destination)
+                .expect_err("must require protected adoption");
+            assert!(matches!(
+                error,
+                MigrationError::ChatFiles(ChatFileError::NativeStoreAdoptionNeeded(_))
+            ));
+            assert_eq!(
+                std::fs::read(source.join("existing.bin")).expect("retained source"),
+                source_bytes
+            );
+            if source_is_portable {
+                assert!(!destination.join("existing.bin").exists());
+            } else {
+                assert_eq!(
+                    std::fs::read(destination.join("existing.bin")).expect("retained destination"),
+                    portable
+                );
+            }
+            std::fs::remove_dir_all(root).expect("remove isolated fixture");
+        }
+    }
 }

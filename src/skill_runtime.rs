@@ -5,10 +5,9 @@ use serde_json::{Map, Value};
 use crate::app::Message;
 use crate::config::AppConfig;
 use crate::llm::chat::{stream_chat, ChatRequest};
-use crate::mcp::{merged_configs, profile_by_name, profile_by_skill, McpClient, McpToolSummary};
+use crate::mcp::{merged_configs, profile_by_skill, McpClient, McpToolSummary};
 use crate::skills::{Skill, SkillCatalog};
 use crate::vault::read_tools::{execute_read_only, parse_read_only_operation, VaultReadOnlyLimits};
-use crate::vault::target::{VaultMention, VaultTargetResolver};
 
 pub(crate) mod vault_mutation;
 
@@ -82,7 +81,7 @@ pub(crate) async fn prepare(
     let mut vault_prepared = false;
     let mut searched_backends = [None; 4];
     for skill in skills {
-        if matches!(skill.name.as_str(), "vault" | "obsidian") {
+        if skill.name == "vault" {
             if vault_prepared {
                 continue;
             }
@@ -112,9 +111,7 @@ pub(crate) async fn prepare(
                 "gnome" => prepare_mcp(config, user_request, base_request, &skill)
                     .await
                     .map(SkillOutput::Message),
-                "vault" | "obsidian" => {
-                    prepare_vault_skill(config, user_request, base_request, &skill).await
-                }
+                "vault" => prepare_vault_skill(user_request, base_request).await,
                 _ => {
                     prepared.context.push_str(&format!(
                         "\n\nSelected skill @{}:\n{}",
@@ -151,21 +148,11 @@ pub(crate) async fn prepare(
 }
 
 async fn prepare_vault_skill(
-    config: &AppConfig,
     user_request: &str,
     base_request: &ChatRequest,
-    skill: &Skill,
 ) -> Result<SkillOutput> {
     let authorization = vault_mutation::VaultMutationAuthorization::capture(user_request)?;
-    if authorization.is_some() || !obsidian_mcp_enabled(config) || !config.vaults.is_empty() {
-        prepare_vault_native(config, user_request, base_request, authorization).await
-    } else {
-        let mut external_skill = skill.clone();
-        external_skill.name = "obsidian".to_owned();
-        prepare_mcp(config, user_request, base_request, &external_skill)
-            .await
-            .map(SkillOutput::Message)
-    }
+    prepare_vault_native(user_request, base_request, authorization).await
 }
 
 async fn prepare_mcp(
@@ -425,13 +412,6 @@ fn bound_vault_tool_data(data: &str, limit: usize) -> String {
     format!("{header}{}", truncate_chars(data, remaining))
 }
 
-fn obsidian_mcp_enabled(config: &AppConfig) -> bool {
-    merged_configs(&config.mcp_servers).iter().any(|server| {
-        profile_by_name(&server.name).is_some_and(|profile| profile.skill == "obsidian")
-            && server.enabled
-    })
-}
-
 fn vault_native_tools(
     authorization: Option<vault_mutation::VaultMutationAuthorization>,
 ) -> Vec<Value> {
@@ -466,16 +446,10 @@ fn vault_native_tools(
 }
 
 async fn prepare_vault_native(
-    config: &AppConfig,
     user_request: &str,
     base_request: &ChatRequest,
     authorization: Option<vault_mutation::VaultMutationAuthorization>,
 ) -> Result<SkillOutput> {
-    let mention = VaultMention::first_in(user_request)
-        .ok_or_else(|| eyre!("Markdown Vault mention is missing"))?;
-    let resolver = VaultTargetResolver::new(&config.vaults, config.default_vault_id.as_ref());
-    let target = resolver.resolve(user_request, mention)?;
-    let allowed_names = resolver.allowed_names();
     let tools = vault_native_tools(authorization);
     let tools_json = truncate_chars(&serde_json::to_string(&tools)?, MAX_TOOL_CATALOG_CHARS);
     let tool_scope = if authorization.is_some() {
@@ -487,26 +461,25 @@ async fn prepare_vault_native(
         "Choose exactly {tool_scope} for the request. Return JSON only as \
          {{\"tool\":\"name\",\"arguments\":{{...}}}}. Available tools:\n{tools_json}"
     );
-    let planner_input = format!(
-        "{user_request}\n\n[MARKDOWN VAULT TARGET]\nSelected: {}\nAllowed names: {}",
-        target.display_name,
-        serde_json::to_string(&allowed_names)?
-    );
-    let output = planner_completion(base_request, &system, &planner_input).await?;
+    let output = planner_completion(base_request, &system, user_request).await?;
     let json =
         extract_json_object(&output).ok_or_else(|| eyre!("planner returned invalid JSON"))?;
     let plan: ToolPlan = serde_json::from_str(json)?;
     if let Some(authorization) = authorization {
-        let kind = vault_mutation::build_kind(config, target.profile_id, authorization, &plan)?;
+        let kind = vault_mutation::build_kind(authorization, &plan)?;
         return Ok(SkillOutput::VaultMutation(kind));
     }
-    let operation = parse_read_only_operation(target.profile_id, &plan.tool, &plan.arguments)?;
-    let result = execute_read_only(&config.vaults, &operation, VaultReadOnlyLimits::default())?;
+    let operation = parse_read_only_operation(&plan.tool, &plan.arguments)?;
+    let result = execute_read_only(
+        &crate::storage::paths::TcuiDataPaths::discover().root,
+        &operation,
+        VaultReadOnlyLimits::default(),
+    )?;
     let rendered =
         bound_vault_tool_data(&result.render(), MAX_TOOL_RESULT_CHARS.saturating_sub(512));
 
     Ok(SkillOutput::Message(external_data_message(
-        &format!("Markdown Vault / {}", result.display_name),
+        "Vault",
         &rendered,
         MAX_TOOL_RESULT_CHARS,
     )))

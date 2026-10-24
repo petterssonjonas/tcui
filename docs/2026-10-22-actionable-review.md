@@ -235,9 +235,11 @@ The old 500-character literal-fact limit is gone with that API. Contextual Markd
 
 The old `backup_dir.join(model_argument)` restore implementation is gone. Native operations use `StandaloneBackupId` with a fixed `write-` plus 32-hex format (`src/vault/backup.rs:20-46`), matching profile/path checks (`mutation_plan.rs:71-87`), and confined `VaultFs` operations with no-follow traversal (`src/vault/fs.rs:337-356,504-507`). Do not reimplement the old suggested validator or downgrade this to canonicalize-then-open.
 
-Legacy access remains: `src/obsidian/vault.rs:34-44` follows normal paths; artifact writing calls it at `src/app/artifacts.rs:161-170`. Artifact insertion canonicalizes a path and then reopens the original path (`src/app/pending_documents/artifact.rs:73-82`), leaving a check/use gap. Reachability of every old temporary-artifact flow was not established, so this is not a claim that the original model-driven overwrite scenario remains intact.
+**Historical pre-cutover inventory:** `src/obsidian/vault.rs:34-44` followed normal paths; artifact writing called it at `src/app/artifacts.rs:161-170`. Artifact insertion canonicalized a path and then reopened the original path (`src/app/pending_documents/artifact.rs:73-82`), leaving a check/use gap. Reachability of every old temporary-artifact flow was not established, so this was not proof that every original model-driven overwrite path remained intact.
 
-**Fix:** migrate remaining real reads/writes to the existing confined service; remove unreachable adapters rather than adding another safety layer. Keep preview/revalidation/confirmation for mutations. The backup store's own filesystem trust is a separate boundary; a validated ID alone does not prove the store is immune to tampering.
+**Historical recommendation, implemented for the named cutover:** migrate real reads/writes to the confined service and remove obsolete adapters. Preview/revalidation/confirmation remains required for mutations. The backup store's filesystem trust is a separate boundary; a validated ID alone does not prove immunity to tampering.
+
+**Native-only follow-up:** the Obsidian adapter, external profiles, selectors, and aliases are removed. Vault access now uses the confined internal service and canonical item IDs. Context insertion reads through the native stores rather than reopening an old external path. Keep AR-07's broader local-media authorization work and separate backup-trust questions open; adapter removal is not a whole-repository security audit.
 
 **AR-17 follow-up:** protected storage now uses capability-based no-follow traversal,
 private exclusive temporary files, atomic publication, and checked durability.
@@ -360,7 +362,10 @@ password protection. Do not restore hidden save tags or automatic capture.
 
 **Implemented:** source title/optional ID, scoped metadata, metadata preview,
 persistent clarification state, native storage separation, and Trash-based
-command/UI removal with visible failures.
+command/UI removal with visible failures. The native-only follow-up adds a
+Memories tab with view/edit/delete/copy, conflict-safe saves that preserve source
+metadata, portable Add/Replace/restore, and explicit `<Memory #N>` context snapshots.
+Protected content needs consent before it enters plaintext chat history.
 
 **Remaining:** user-controlled sorting and scope/machine/subject/source/date
 filters; explicit Trash/permanent-delete management; and consistent complete
@@ -433,6 +438,9 @@ and encrypted labels. The credentials checkbox intentionally bulk-converts
 provider/search records only when changed; unchanged policy preserves explicit
 exceptions. New encrypted records require password enrollment/unlock.
 
+The following storage and external-profile description records the original
+AR-17 implementation. The native-only follow-up below replaces that profile model.
+
 Memories use the independent native directory, optional encrypted source/Trash
 and index, and explicit index repair. TCUI Internal is the fresh-configuration
 default at `$XDG_DATA_HOME/tcui/vault`; existing explicit defaults are preserved.
@@ -496,6 +504,54 @@ follows the destination. External originals and user-kept archives/backups are
 not silently rewritten. There is no password rotation/recovery, secure-erasure,
 root/account-compromise, swap, or snapshot guarantee. Remaining Memory
 management/recall work is AR-15; CI/release alignment remains AR-14.
+
+#### Native-only Vault and portable Memory follow-up
+
+The internal Vault and Memories are the only managed knowledge stores. External
+profiles and their supporting adapters are removed; existing external folders
+remain unchanged. The new-tab launcher exposes only implemented views. The right
+sidebar has Chat Artifacts, Memories, and Vault. A Chat Artifact's Vault action
+makes an independent snapshot; deleting the artifact does not delete that copy.
+
+Vault and Memory files now use self-contained portable V2 encryption. Copied
+encrypted files require source authentication and explicit adoption under the
+destination password. Add retains conflicts; Replace and Restore keep displaced
+data with matching identity metadata. Plaintext export needs consent. Legacy
+formats require source-side upgrade with their original wrapping data or key.
+Native adoption/backups allow 1 GiB per stored file; external import/export keeps
+its 64 MiB/file and 256 MiB/operation limits.
+
+Actual isolated TUI, CLI, and loopback-provider probes exercised text/binary
+editing, exact OSC 52 clipboard payloads, tagged context, discard cancellation,
+protected-to-plaintext consent, encrypted exports, copied-folder recognition,
+wrong source password without source-byte changes, adoption with a different
+destination password, plaintext Add, encrypted Replace, backup Restore, and
+encrypted Trash deletion. The real provider received native tags and captured
+content. Source-only `@save`/`@schedule` did not select host actions. A generated
+Chat Artifact's independent Vault snapshot survived deletion of the artifact.
+These probes do not certify a live model account or desktop clipboard acceptance.
+
+Independent source review found and corrected backup-policy, displaced-manifest,
+Memory symlink, Trash-only adoption, mixed plaintext adoption, and hidden-composer
+issues. Regression execution also found invalid directory-handle sync; the fix
+reopens the retained directory capability before syncing. Cache unavailability
+keeps durable Memory mutation outcomes distinct from index failures.
+
+The final implementation candidate passed pinned Rust 1.99.1 formatting, strict
+all-target Clippy in both feature configurations, an all-features build, and
+standard all-target test runs with two threads:
+
+| Configuration | Unit tests passed | Integration tests passed | Ignored |
+|---|---:|---:|---:|
+| All features | 1,295 | 18 | 3 |
+| No default features | 1,219 | 18 | 1 |
+
+The native XDG harness also reran 11 migration/restart/recovery/confinement
+scenarios with an unchanged outside sentinel. The same candidate then passed
+all runtime probes described above. Later review-document-only changes do not
+alter the exercised implementation. Hosted-check evidence belongs to the PR's
+exact head; local success is not a hosted-CI claim.
+
 
 
 
@@ -626,15 +682,15 @@ Selective protection [PR #17](https://github.com/petterssonjonas/tcui/pull/17) w
 - **AR-06 — Partly complete:** dispatch errors reach toasts; contextual saves/removals report partial index failure and retain host activity after provider failure. Connection-status misuse and other silent failures remain.
 - **AR-07 — Open:** enforce authority for URLs and local-media reads.
 - **AR-08 — Implemented:** preserve explicit host authorization for memory mutations.
-- **AR-09 — Reassess remaining cutover:** AR-17 hardens native protected IO, copy/restore, and recovery. Verify the remaining legacy adapter/caller inventory against current source.
+- **AR-09 — Named cutover implemented:** external profiles, legacy adapters, and aliases are removed. Native reads, context, and confirmed mutations use the internal store. Broader local-media authority and backup-trust review remain separate.
 - **AR-10 — Open:** bound network inputs and make insecure transport explicit.
 - **AR-11 — Open:** harden updater staging and checksum handling; coordinate release policy with CI/CD.
 - **AR-12 — Reconciliation open:** listed version ranges are now met in Cargo.lock. Run a fresh advisory scan and feature/target reachability check, then add CI advisory coverage; do not blindly repeat the old upgrade list.
 - **AR-13 — Implemented:** preserve literal tags and keep assistant text separate from host actions.
 - **AR-14 — Pending:** quicker local checks, broader CI, full main-promotion checks, Release-only packaging, and hosted enforcement. Existing-check Rust component setup is repaired in AR-17; the broader redesign is not.
-- **AR-15 — Partly implemented:** contextual skills, clarification, user/machine metadata, scoped search, native separation, selective encryption, and metadata preview work. Management consistency, automatic-recall controls, deduplication, and index efficiency remain. No replacement backend selected.
+- **AR-15 — Partly implemented:** contextual skills, clarification, scoped metadata/search, native protection, a management tab, conflict-safe edits, portable transfer, and tagged context work. Sorting/filter controls, complete Trash management, automatic-recall controls, deduplication, and index efficiency remain. No replacement backend selected.
 - **AR-16 — Locally cleared:** strict Clippy passes for all features and no default features with Rust 1.99.1. Consult the exact protection-PR candidate for hosted evidence; development CI is not the full promotion tier.
-- **AR-17 — Implemented:** first-run/later selective protection, mandatory app/chat gating, mixed credentials, independent Memories and built-in Vault, explicit external-vault copying, and authenticated recoverable migration. Verification and limits are recorded above and in PR #17.
+- **AR-17 — Implemented with native-only follow-up:** selective protection, mandatory app/chat gating, mixed credentials, separate Vault/Memories, portable encryption, explicit adoption, and authenticated recoverable migration. See the scoped runtime evidence above and exact-candidate PR checks.
 
 Next recommended item: AR-02 unless the owner selects CI/CD alignment first. The separate persistence batch passed local checks; its PR records hosted evidence. AR-04/05 remain separate. Follow §5 for later batches. Retain the current memory backend unless the owner chooses a replacement.
 
@@ -661,12 +717,12 @@ Keep clarification across restart, scoped source metadata, truthful partial
 outcomes, and persisted host activity. Do not restore literal-suffix saving,
 automatic capture, or hidden response-tag actions.
 
-AR-17 is implemented, not an encryption plan. Preserve independent native
-Memories and built-in Vault storage, selectable protection, mandatory app/chat
-startup gating, mixed provider connections, lifecycle quiescence, and
-authenticated recoverable migration. External vaults remain plaintext;
-explicit copies follow the destination's policy. Keep the privacy limits.
-Use AR-17 and the PR for current verification, not old checkpoint counts.
+AR-17 and the native-only follow-up are implemented, not encryption plans.
+Preserve separate Vault and Memories, portable password-wrapped files,
+explicit source adoption, selectable protection, mandatory app/chat startup
+gating, mixed provider connections, truthful partial outcomes, and recovery.
+There are no external Vault profiles. Manual imports copy into native stores.
+Keep the privacy limits and use current PR evidence, not old checkpoint counts.
 
 First reconcile the remaining concerns against current source. The separate
 AR-03/shared-key/reminder persistence patch passed the local checks recorded in §1.

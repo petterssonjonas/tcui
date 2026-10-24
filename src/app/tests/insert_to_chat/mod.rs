@@ -9,13 +9,13 @@ mod origins;
 fn queue_document(app: &mut TuiApp, source: &str, name: &str, content: &[u8]) {
     let runtime = tokio::runtime::Runtime::new().expect("create runtime");
     runtime
-        .block_on(
-            app.dispatch(Action::QueuePendingDocument(PendingDocumentInput {
+        .block_on(app.dispatch(Action::QueuePendingDocument(
+            PendingDocumentInput::Document {
                 source_identity: source.to_string(),
                 display_name: name.to_string(),
                 bytes: content.to_vec(),
-            })),
-        )
+            },
+        )))
         .expect("queue pending document");
 }
 
