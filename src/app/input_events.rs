@@ -41,6 +41,9 @@ impl TuiApp {
             "/skills" => Some(Action::ShowSkillsPopup),
             "/mcp" => Some(Action::ShowMcpPopup),
             "/settings" => Some(Action::OpenSettingsPanel),
+            "/security" => Some(Action::OpenSecurity),
+            "/unlock" => Some(Action::UnlockApplication),
+            "/lock" => Some(Action::LockApplication),
             "/terminal" => Some(Action::OpenTerminal),
             "/providers" | "/connect" => Some(Action::OpenProviders),
             "/vault" => Some(Action::OpenCredentialVault),
@@ -113,6 +116,9 @@ impl TuiApp {
     }
 
     pub(crate) fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> Option<Action> {
+        if self.security_restart.is_some() {
+            return None;
+        }
         if key.kind != crossterm::event::KeyEventKind::Press {
             return None;
         }
@@ -448,9 +454,10 @@ impl TuiApp {
                 match tab.input_content.split_whitespace().next() {
                     Some("/vault") => Some(Action::OpenCredentialVault),
                     Some("/connect" | "/providers") => Some(Action::OpenProviders),
-                    Some("/fork" | "/temp" | "/cancel" | "/steer") => {
-                        self.action_for_slash_command(&tab.input_content)
-                    }
+                    Some(
+                        "/fork" | "/temp" | "/cancel" | "/steer" | "/security" | "/unlock"
+                        | "/lock",
+                    ) => self.action_for_slash_command(&tab.input_content),
                     _ => None,
                 }
             });
@@ -587,9 +594,11 @@ impl TuiApp {
                     self.ui.active_modal = None;
                     Some(match modal {
                         Some(crate::ui::Modal::QuitConfirm) => Action::ConfirmQuit,
-                        Some(crate::ui::Modal::DiscardPendingDocuments) => {
-                            Action::ConfirmPendingDocumentDiscard
-                        }
+                        Some(
+                            crate::ui::Modal::DiscardPendingDocuments
+                            | crate::ui::Modal::DiscardSecurityDrafts,
+                        ) => Action::ConfirmPendingDocumentDiscard,
+                        Some(crate::ui::Modal::ExportChatDraft) => Action::ConfirmChatDraftExport,
                         None => Action::CancelModal,
                     })
                 }
@@ -879,6 +888,9 @@ impl TuiApp {
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> Option<Action> {
+        if self.security_restart.is_some() {
+            return None;
+        }
         use crossterm::event::{MouseButton, MouseEventKind};
 
         self.cancel_escape = None;
@@ -940,6 +952,13 @@ impl TuiApp {
                 let pos = ratatui::layout::Position::new(mouse.column, mouse.row);
                 if !self.ui.text_selection.is_active() {
                     return None;
+                }
+                if let Some(viewer) = self.ui.artifact_viewer.as_ref() {
+                    if let Err(error) = self.require_artifact_access(viewer.handle()) {
+                        self.ui.text_selection.cancel();
+                        self.ui.show_toast(error.to_string());
+                        return None;
+                    }
                 }
                 if let Some(text) = self.ui.text_selection.finish(pos) {
                     if !text.is_empty() {
@@ -1191,6 +1210,9 @@ impl TuiApp {
     }
 
     pub(crate) fn handle_mouse_click(&mut self, col: u16, row: u16) -> Option<Action> {
+        if self.security_restart.is_some() {
+            return None;
+        }
         let pos = ratatui::layout::Position::new(col, row);
         let area = self.ui.last_area?;
 
@@ -1407,9 +1429,11 @@ impl TuiApp {
                     self.ui.active_modal = None;
                     return Some(match modal {
                         Some(crate::ui::Modal::QuitConfirm) => Action::ConfirmQuit,
-                        Some(crate::ui::Modal::DiscardPendingDocuments) => {
-                            Action::ConfirmPendingDocumentDiscard
-                        }
+                        Some(
+                            crate::ui::Modal::DiscardPendingDocuments
+                            | crate::ui::Modal::DiscardSecurityDrafts,
+                        ) => Action::ConfirmPendingDocumentDiscard,
+                        Some(crate::ui::Modal::ExportChatDraft) => Action::ConfirmChatDraftExport,
                         None => Action::CancelModal,
                     });
                 }
@@ -1870,6 +1894,231 @@ mod tests {
     fn arm_escape(app: &mut TuiApp) {
         let id = register_request(app);
         app.cancel_escape = Some((id, std::time::Instant::now()));
+    }
+
+    #[test]
+    fn security_commands_are_local_controls_even_without_a_provider() {
+        for (input, restart) in [
+            (
+                "/security",
+                crate::protection::ui::SecurityRestart::Configure,
+            ),
+            ("/unlock", crate::protection::ui::SecurityRestart::Unlock),
+            (" /lock ", crate::protection::ui::SecurityRestart::Lock),
+        ] {
+            crate::app::tests::with_test_app("security-slash-controls", |app| {
+                let runtime = tokio::runtime::Runtime::new().expect("runtime");
+                for character in input.chars() {
+                    if let Some(action) = app.handle_key(key(KeyCode::Char(character))) {
+                        runtime.block_on(app.dispatch(action)).expect("typed input");
+                    }
+                }
+                let action = app.handle_key(key(KeyCode::Enter)).expect("local command");
+                runtime
+                    .block_on(app.dispatch(action))
+                    .expect("local control");
+                while app.security_restart.is_none() {
+                    let Ok(action) = app.action_rx.try_recv() else {
+                        break;
+                    };
+                    runtime
+                        .block_on(app.dispatch(action))
+                        .expect("queued control");
+                }
+                assert_eq!(app.security_restart, Some(restart));
+                assert!(app.ui.protection_blocked);
+                assert!(app.ui.tabs[0].input_content.is_empty());
+                assert!(app.ui.tabs[0].messages.is_empty());
+            });
+        }
+    }
+
+    #[test]
+    fn lock_waits_for_inserted_document_discard_before_clearing_caches() {
+        crate::app::tests::with_test_app("security-document-discard", |app| {
+            let document = crate::app::submission::PendingDocument::snapshot(
+                "security-test",
+                "private.md",
+                b"private draft",
+            )
+            .expect("snapshot");
+            app.pending_documents_mut()
+                .insert(document)
+                .expect("insert");
+            app.lock_application().expect("request lock");
+            assert!(app.security_restart.is_none());
+            assert!(app.has_pending_documents());
+            assert!(matches!(
+                app.ui.active_modal,
+                Some(crate::ui::Modal::DiscardSecurityDrafts)
+            ));
+            app.confirm_pending_document_discard()
+                .expect("confirm discard");
+            assert!(app.pending_documents.is_empty());
+            assert_eq!(
+                app.security_restart,
+                Some(crate::protection::ui::SecurityRestart::Lock)
+            );
+        });
+    }
+
+    #[test]
+    fn palette_security_transition_cannot_discard_composer_or_history_drafts_without_consent() {
+        crate::app::tests::with_test_app("security-composer-discard", |app| {
+            app.replace_input_content("unsent private message".into());
+            app.ui.tabs[0].input_history_draft = Some("original unsent draft".into());
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            runtime
+                .block_on(app.dispatch(Action::OpenSecurity))
+                .expect("palette action");
+            assert_eq!(
+                app.ui.active_modal,
+                Some(crate::ui::Modal::DiscardSecurityDrafts)
+            );
+            assert!(app.security_restart.is_none());
+            let cancel = app
+                .handle_key(key(KeyCode::Esc))
+                .expect("cancel confirmation");
+            runtime
+                .block_on(app.dispatch(cancel))
+                .expect("cancel transition");
+            assert_eq!(app.ui.tabs[0].input_content, "unsent private message");
+            assert_eq!(
+                app.ui.tabs[0].input_history_draft.as_deref(),
+                Some("original unsent draft")
+            );
+            assert!(app.pending_document_discard_action.is_none());
+            assert!(!app.ui.protection_blocked);
+
+            app.ui.tabs[0].input_content.clear();
+            app.unlock_application();
+            assert_eq!(
+                app.ui.active_modal,
+                Some(crate::ui::Modal::DiscardSecurityDrafts)
+            );
+            app.confirm_pending_document_discard()
+                .expect("explicit discard");
+            assert!(app.ui.tabs[0].input_history_draft.is_none());
+            assert!(app.ui.protection_blocked);
+        });
+    }
+
+    #[test]
+    fn security_transitions_require_consent_before_closing_a_real_terminal() {
+        crate::app::tests::with_test_app("security-terminal-consent", |app| {
+            crate::protection::configure(
+                crate::protection::ProtectionPolicy {
+                    app_password: true,
+                    ..Default::default()
+                },
+                "terminal-consent-password",
+            )
+            .expect("initialize unlocked protection");
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            let terminal = runtime
+                .block_on(
+                    crate::ui::modals::terminal_editor::TerminalEditorState::new_shell(
+                        Some("/bin/sh"),
+                        &std::env::temp_dir(),
+                        ratatui::layout::Rect::new(0, 0, 80, 24),
+                    ),
+                )
+                .expect("real shell PTY");
+            let id = app
+                .ui
+                .terminals
+                .insert(crate::ui::terminal_workspace::TerminalSession {
+                    terminal,
+                    cwd: std::env::temp_dir(),
+                    host: "localhost".into(),
+                });
+            for restart in [
+                crate::protection::ui::SecurityRestart::Configure,
+                crate::protection::ui::SecurityRestart::Unlock,
+                crate::protection::ui::SecurityRestart::Lock,
+                crate::protection::ui::SecurityRestart::InitializePassword,
+            ] {
+                app.request_security_restart(restart);
+                assert_eq!(
+                    app.ui.active_modal,
+                    Some(crate::ui::Modal::DiscardSecurityDrafts)
+                );
+                assert!(app.security_restart.is_none());
+                let cancel = app.handle_key(key(KeyCode::Esc)).expect("cancel action");
+                runtime.block_on(app.dispatch(cancel)).expect("cancel");
+                assert!(app.security_restart.is_none());
+                assert!(app.pending_document_discard_action.is_none());
+                assert!(!app.ui.protection_blocked);
+                assert!(crate::protection::is_unlocked().expect("key remains unlocked"));
+                assert!(!app
+                    .ui
+                    .terminals
+                    .sessions
+                    .get_mut(&id)
+                    .expect("same session")
+                    .terminal
+                    .poll_output());
+            }
+            app.unlock_application();
+            let confirm = app
+                .handle_key(key(KeyCode::Char('y')))
+                .expect("confirm action");
+            runtime.block_on(app.dispatch(confirm)).expect("confirm");
+            assert_eq!(
+                app.security_restart,
+                Some(crate::protection::ui::SecurityRestart::Unlock)
+            );
+            assert!(app.ui.terminals.has_running());
+            runtime
+                .block_on(app.quiesce_for_security_restart())
+                .expect("teardown");
+            assert!(app.ui.terminals.sessions[&id].terminal.is_done());
+        });
+    }
+
+    #[test]
+    fn security_transition_includes_unfocused_temporary_drafts() {
+        crate::app::tests::with_test_app("security-ephemeral-discard", |app| {
+            app.open_ephemeral().expect("temporary chat");
+            app.replace_input_content("temporary unsent draft".into());
+            let index = app.ui.active_tab;
+            app.focus_chat_pane(0);
+            app.lock_application().expect("lock request");
+            assert_eq!(
+                app.ui.active_modal,
+                Some(crate::ui::Modal::DiscardSecurityDrafts)
+            );
+            assert!(app.security_restart.is_none());
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            runtime
+                .block_on(app.dispatch(Action::CancelModal))
+                .expect("cancel");
+            assert_eq!(app.ui.tabs[index].input_content, "temporary unsent draft");
+            assert!(app.ui.ephemeral.is_some());
+        });
+    }
+
+    #[test]
+    fn protected_chat_editor_requires_plaintext_export_consent_before_creating_a_file() {
+        crate::app::tests::with_test_app("security-chat-editor-consent", |app| {
+            crate::protection::configure(
+                crate::protection::ProtectionPolicy {
+                    chats: true,
+                    ..Default::default()
+                },
+                "editor-test-password",
+            )
+            .expect("protect chats");
+            app.replace_input_content("protected draft canary".into());
+            app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+            assert!(app.ui.editor_popup.is_none());
+            assert_eq!(app.ui.active_modal, Some(crate::ui::Modal::ExportChatDraft));
+            let cancel = app.handle_key(key(KeyCode::Esc)).expect("cancel export");
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            runtime.block_on(app.dispatch(cancel)).expect("cancel");
+            assert!(app.ui.editor_popup.is_none());
+            assert_eq!(app.ui.tabs[0].input_content, "protected draft canary");
+        });
     }
 
     #[test]

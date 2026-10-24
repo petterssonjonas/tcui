@@ -1,5 +1,9 @@
 pub(crate) fn canonical_provider_name(name: &str) -> String {
-    match name.trim().to_lowercase().as_str() {
+    match crate::config::key_store::provider_base_name(name)
+        .trim()
+        .to_lowercase()
+        .as_str()
+    {
         "google ai" | "google" | "gemini" => "Gemini".to_string(),
         "openai" => "OpenAI".to_string(),
         "codex" | "openai codex" | "openai oauth" => "Codex".to_string(),

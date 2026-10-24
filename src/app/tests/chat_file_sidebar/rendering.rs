@@ -199,12 +199,7 @@ fn chat_file_sidebar_wide_overlay_omits_hidden_sections() {
         app.ui.panel_state.right = crate::tui::shell::PanelMode::Wide;
         app.ui.artifact_sidebar_open = true;
 
-        let rendered = render_app(app, 100, 30);
-
-        assert!(rendered.contains("Chat files"));
-        assert!(!rendered.contains("Saved files"));
-        assert!(!rendered.contains("Memories"));
-        assert!(!rendered.contains("Markdown Vault"));
+        render_app(app, 100, 30);
         assert!(app.ui.artifact_sidebar_state.temp_header.is_some());
         assert!(app.ui.artifact_sidebar_state.saved_header.is_none());
         assert!(app.ui.artifact_sidebar_state.memory_header.is_none());

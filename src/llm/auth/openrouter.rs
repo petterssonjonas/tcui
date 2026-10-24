@@ -28,13 +28,33 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) struct OpenRouterAdapter {
     endpoints: OpenRouterEndpoints,
     http: OAuthJsonService,
+    connection: String,
+    storage: Option<crate::config::key_store::CredentialStorage>,
 }
 
 impl OpenRouterAdapter {
     pub(crate) fn production() -> Result<Self, OpenRouterError> {
         let endpoints = OpenRouterEndpoints::production()?;
         let http = OAuthJsonService::hardened(REQUEST_TIMEOUT)?;
-        Ok(Self { endpoints, http })
+        Ok(Self {
+            endpoints,
+            http,
+            connection: "OpenRouter OAuth".into(),
+            storage: None,
+        })
+    }
+
+    pub(crate) fn for_connection(mut self, connection: &str) -> Self {
+        self.connection = connection.to_owned();
+        self
+    }
+
+    pub(crate) fn with_storage(
+        mut self,
+        storage: crate::config::key_store::CredentialStorage,
+    ) -> Self {
+        self.storage = Some(storage);
+        self
     }
 
     pub(crate) fn begin_headless(
@@ -110,16 +130,18 @@ impl OpenRouterAdapter {
             .await?;
         let response = serde_json::from_slice::<ExchangeCodeResponse>(&response)
             .map_err(|_| OpenRouterError::MalformedResponse)?;
-        persist_exchanged_key(config, response.key, cancellation)
+        persist_exchanged_key(
+            config,
+            response.key,
+            cancellation,
+            &self.connection,
+            self.storage,
+        )
     }
 
-    pub(crate) fn logout(config: &AppConfig) -> Result<bool, OpenRouterError> {
-        KeyStore::remove_api_key(
-            config,
-            "OpenRouter OAuth",
-            ApiKeyCredentialSource::OpenRouterPkce,
-        )
-        .map_err(|_| OpenRouterError::CredentialStore)
+    pub(crate) fn logout(config: &AppConfig, connection: &str) -> Result<bool, OpenRouterError> {
+        KeyStore::remove_api_key(config, connection, ApiKeyCredentialSource::OpenRouterPkce)
+            .map_err(|_| OpenRouterError::CredentialStore)
     }
 }
 
@@ -127,9 +149,11 @@ pub(super) fn persist_exchanged_key(
     config: &AppConfig,
     key: String,
     cancellation: &OAuthCancellation,
+    connection: &str,
+    storage: Option<crate::config::key_store::CredentialStorage>,
 ) -> Result<(), OpenRouterError> {
     let credential = ApiKeyCredential::new(
-        "OpenRouter OAuth",
+        connection,
         key,
         ApiKeyCredentialOwnership::Tcui,
         ApiKeyCredentialSource::OpenRouterPkce,
@@ -138,8 +162,12 @@ pub(super) fn persist_exchanged_key(
     if cancellation.is_cancelled() {
         return Err(OpenRouterError::OAuth(OAuthError::Cancelled));
     }
-    KeyStore::upsert_credential(config, &Credential::ApiKey(credential))
-        .map_err(|_| OpenRouterError::CredentialStore)
+    let credential = Credential::ApiKey(credential);
+    match storage {
+        Some(storage) => KeyStore::upsert_credential_with_storage(config, &credential, storage),
+        None => KeyStore::upsert_credential(config, &credential),
+    }
+    .map_err(|_| OpenRouterError::CredentialStore)
 }
 
 #[derive(Clone)]
@@ -190,6 +218,8 @@ impl OpenRouterAdapter {
                 key_exchange: endpoints.key_exchange,
             },
             http: OAuthJsonService::hardened(timeout)?,
+            connection: "OpenRouter OAuth".into(),
+            storage: None,
         })
     }
 }

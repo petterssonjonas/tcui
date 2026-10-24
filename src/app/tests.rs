@@ -20,7 +20,7 @@ fn unique_temp_dir(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("tcui-{label}-{}-{nanos}", std::process::id()))
 }
 
-pub(super) fn with_test_app(label: &str, test: impl FnOnce(&mut TuiApp)) {
+pub(crate) fn with_test_app(label: &str, test: impl FnOnce(&mut TuiApp)) {
     let mut config = AppConfig {
         providers: crate::config::app_config::provider_presets(),
         ..AppConfig::default()
@@ -35,15 +35,68 @@ pub(super) fn with_test_app(label: &str, test: impl FnOnce(&mut TuiApp)) {
     with_test_app_config(label, config, test);
 }
 
-pub(super) fn with_test_app_config(label: &str, config: AppConfig, test: impl FnOnce(&mut TuiApp)) {
+struct AppFixtureEnvironment {
+    root: std::path::PathBuf,
+    previous: [(&'static str, Option<std::ffi::OsString>); 4],
+}
+
+impl Drop for AppFixtureEnvironment {
+    fn drop(&mut self) {
+        let _ = crate::protection::lock();
+        for (name, value) in &self.previous {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+pub(crate) fn with_test_app_config(
+    label: &str,
+    mut config: AppConfig,
+    test: impl FnOnce(&mut TuiApp),
+) {
     let _guard = env_lock().lock().expect("env lock poisoned");
+    let previous_internal = config
+        .vaults
+        .get(&crate::config::vault_profiles::VaultProfileId::internal())
+        .map(|profile| profile.root.clone());
     let root = unique_temp_dir(label);
     let data_home = root.join("data-home");
     let config_home = root.join("config-home");
+    let cache_home = root.join("cache-home");
+    let home = root.join("home");
+    let _environment = AppFixtureEnvironment {
+        root,
+        previous: ["XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "HOME"]
+            .map(|name| (name, std::env::var_os(name))),
+    };
     std::fs::create_dir_all(&data_home).expect("create data dir");
     std::fs::create_dir_all(&config_home).expect("create config dir");
+    std::fs::create_dir_all(&cache_home).expect("create cache dir");
+    std::fs::create_dir_all(&home).expect("create home dir");
     std::env::set_var("XDG_DATA_HOME", &data_home);
     std::env::set_var("XDG_CONFIG_HOME", &config_home);
+    std::env::set_var("XDG_CACHE_HOME", &cache_home);
+    std::env::set_var("HOME", &home);
+    let internal = crate::config::vault_profiles::VaultProfile::internal();
+    if config.saved_files_dir.as_deref().map(std::path::Path::new) == previous_internal.as_deref() {
+        config.saved_files_dir = Some(internal.root.display().to_string());
+    }
+    if config.vault_path.as_deref().map(std::path::Path::new) == previous_internal.as_deref() {
+        config.vault_path = Some(internal.root.display().to_string());
+    }
+    if config
+        .artifact_save_dir
+        .as_deref()
+        .map(std::path::Path::new)
+        == previous_internal.as_deref()
+    {
+        config.artifact_save_dir = Some(internal.root.display().to_string());
+    }
+    config.vaults.insert(internal.id.clone(), internal);
 
     let storage = Storage::new().expect("create storage");
     if !config.providers.is_empty() {
@@ -64,10 +117,6 @@ pub(super) fn with_test_app_config(label: &str, config: AppConfig, test: impl Fn
         None,
     );
     test(&mut app);
-
-    std::fs::remove_dir_all(&root).expect("cleanup temp dir");
-    std::env::remove_var("XDG_DATA_HOME");
-    std::env::remove_var("XDG_CONFIG_HOME");
 }
 
 #[test]
@@ -1695,20 +1744,29 @@ fn refresh_vault_artifacts_uses_configured_path_without_runtime_vault() {
 
 #[cfg(feature = "memory")]
 #[test]
-fn refresh_memory_artifacts_expands_tilde_vault_path() {
+fn refresh_memory_artifacts_uses_independent_store_with_external_vault_selected() {
     let _guard = env_lock().lock().expect("env lock poisoned");
-    let root = unique_temp_dir("memory-tilde-vault");
+    let root = unique_temp_dir("memory-independent-vault");
     let home = root.join("home");
     let data_home = root.join("data-home");
     let config_home = root.join("config-home");
+    let cache_home = root.join("cache-home");
+    let previous = ["HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"]
+        .map(|name| (name, std::env::var_os(name)));
     let vault = home.join("Documents/My Vault");
     std::fs::create_dir_all(&vault).expect("create vault dir");
+    std::fs::write(
+        vault.join("preferences.md"),
+        b"external note is not a memory",
+    )
+    .expect("external sentinel");
     std::fs::create_dir_all(&data_home).expect("create data dir");
     std::fs::create_dir_all(&config_home).expect("create config dir");
     std::fs::create_dir_all(config_home.join("tcui")).expect("create tcui config dir");
     std::env::set_var("HOME", &home);
     std::env::set_var("XDG_DATA_HOME", &data_home);
     std::env::set_var("XDG_CONFIG_HOME", &config_home);
+    std::env::set_var("XDG_CACHE_HOME", &cache_home);
 
     let mut config = AppConfig::default();
     config.memory.enabled = true;
@@ -1723,9 +1781,7 @@ fn refresh_memory_artifacts_expands_tilde_vault_path() {
         None,
     );
 
-    let store =
-        crate::memory::MemoryStore::open(&vault, &crate::memory::MemoryStore::default_cache_path())
-            .expect("open memory store");
+    let store = crate::memory::MemoryStore::open_default().expect("open independent memory store");
     store
         .write(
             std::path::Path::new("preferences.md"),
@@ -1743,9 +1799,21 @@ fn refresh_memory_artifacts_expands_tilde_vault_path() {
             ..
         }] if path == std::path::Path::new("preferences.md")
     ));
+    assert!(app.ui.memory_artifacts[0]
+        .path
+        .as_ref()
+        .expect("physical memory path")
+        .starts_with(crate::storage::paths::TcuiDataPaths::discover().memories_dir));
+    assert_eq!(
+        std::fs::read(vault.join("preferences.md")).expect("external file unchanged"),
+        b"external note is not a memory"
+    );
 
     std::fs::remove_dir_all(&root).expect("cleanup temp dir");
-    std::env::remove_var("HOME");
-    std::env::remove_var("XDG_DATA_HOME");
-    std::env::remove_var("XDG_CONFIG_HOME");
+    for (name, previous) in previous {
+        match previous {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
 }

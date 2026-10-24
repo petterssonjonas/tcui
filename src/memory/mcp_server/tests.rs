@@ -72,3 +72,91 @@ fn stdio_protocol_lists_and_calls_memory_tools() {
     fs::remove_dir_all(vault).expect("temporary vault cleanup");
     std::env::remove_var("XDG_DATA_HOME");
 }
+
+#[test]
+fn memory_mcp_rejects_content_and_mutation_after_session_lock() {
+    let _guard = crate::test_support::env_lock().lock().expect("env lock");
+    let fixture = crate::memory::protection_tests::Fixture::new();
+    fixture.configure(true);
+    let store = MemoryStore::open_default().expect("protected store");
+    store
+        .write(
+            Path::new("fact.md"),
+            "# Fact\n\nRust is preferred.\n",
+            false,
+        )
+        .expect("protected note");
+    let server = MemoryMcp::new(store);
+    crate::protection::lock().expect("lock");
+    assert!(server
+        .memory_read(rmcp::handler::server::wrapper::Parameters(
+            super::ReadParams {
+                path: "fact.md".to_string()
+            },
+        ))
+        .is_err());
+    assert!(server
+        .memory_search(rmcp::handler::server::wrapper::Parameters(
+            super::SearchParams {
+                query: "Rust".to_string(),
+                limit: 1
+            },
+        ))
+        .is_err());
+    assert!(server.memory_status().is_err());
+    assert!(server.memory_reindex().is_err());
+    assert!(server
+        .memory_write(rmcp::handler::server::wrapper::Parameters(
+            super::WriteParams {
+                path: "blocked.md".to_string(),
+                markdown: "Blocked".to_string(),
+                overwrite: false
+            },
+        ))
+        .is_err());
+    assert!(server
+        .memory_forget(rmcp::handler::server::wrapper::Parameters(
+            super::ForgetParams {
+                path: "fact.md".to_string()
+            },
+        ))
+        .is_err());
+}
+
+#[test]
+fn memory_mcp_respects_app_entry_lock_even_when_memory_is_unprotected() {
+    let _guard = crate::test_support::env_lock().lock().expect("env lock");
+    let _fixture = crate::memory::protection_tests::Fixture::new();
+    crate::protection::configure(
+        crate::protection::ProtectionPolicy {
+            app_password: true,
+            ..crate::protection::ProtectionPolicy::default()
+        },
+        "memory-test-password",
+    )
+    .expect("app entry protection");
+    let store = MemoryStore::open_default().expect("unprotected memories");
+    store
+        .write(
+            Path::new("fact.md"),
+            "# Fact\n\nRust is preferred.\n",
+            false,
+        )
+        .expect("note");
+    let server = MemoryMcp::new(store.clone());
+    crate::protection::lock().expect("lock app");
+    assert!(
+        store.read(Path::new("fact.md")).is_err(),
+        "app entry lock protects every content route"
+    );
+    assert!(
+        server
+            .memory_read(rmcp::handler::server::wrapper::Parameters(
+                super::ReadParams {
+                    path: "fact.md".to_string()
+                },
+            ))
+            .is_err(),
+        "headless MCP must enforce the app entry password"
+    );
+}

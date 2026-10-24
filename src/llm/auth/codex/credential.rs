@@ -123,10 +123,11 @@ pub(crate) fn read_external_credential() -> Result<Option<CodexCredential>, Code
     Ok(None)
 }
 
-pub(crate) fn resolve_credential(
+pub(crate) fn resolve_connection(
     config: &AppConfig,
+    connection: &str,
 ) -> Result<Option<CodexCredential>, CodexResolutionError> {
-    if let Some(credential) = KeyStore::get_oauth(config, "Codex")? {
+    if let Some(credential) = KeyStore::get_oauth(config, connection)? {
         if credential.ownership != OAuthCredentialOwnership::Tcui
             || credential.source != OAuthCredentialSource::NativeOAuth
         {

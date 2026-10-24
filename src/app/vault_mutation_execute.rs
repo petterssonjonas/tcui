@@ -121,7 +121,7 @@ pub(crate) fn execute(
                 .map_err(map_move_error)?;
             Ok(VaultMutationToolResult {
                 operation_id: outcome.operation_id.to_string(),
-                mutation: "move",
+                mutation: if plan.copy_only() { "copy" } else { "move" },
                 affected,
             })
         }
@@ -137,17 +137,19 @@ pub(crate) fn affected_paths(kind: &VaultMutationKind) -> Vec<VaultMutationAffec
             .iter()
             .flat_map(|pair| {
                 [
-                    VaultMutationAffectedPath {
+                    (!plan.copy_only()).then(|| VaultMutationAffectedPath {
                         profile_id: pair.source().profile_id().clone(),
                         path: pair.source().path().clone(),
                         change: VaultWatchChange::Remove,
-                    },
-                    VaultMutationAffectedPath {
+                    }),
+                    Some(VaultMutationAffectedPath {
                         profile_id: pair.destination().profile_id().clone(),
                         path: pair.destination().path().clone(),
                         change: VaultWatchChange::Create,
-                    },
+                    }),
                 ]
+                .into_iter()
+                .flatten()
             })
             .collect(),
     }
@@ -234,11 +236,11 @@ fn map_move_error(error: MoveExecuteError) -> VaultMutationExecutionError {
         | MoveExecuteError::UnapprovedCollision { .. }
         | MoveExecuteError::Io { .. }
         | MoveExecuteError::Journal(_) => VaultMutationExecutionError::Failed {
-            message: "Vault move failed; rollback completed or no disk work started",
+            message: "Vault transfer failed; rollback completed or no disk work started",
         },
         #[cfg(test)]
         MoveExecuteError::InjectedFailure { .. } => VaultMutationExecutionError::Failed {
-            message: "Vault move failed; rollback completed or no disk work started",
+            message: "Vault transfer failed; rollback completed or no disk work started",
         },
     }
 }

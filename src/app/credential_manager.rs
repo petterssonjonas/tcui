@@ -57,6 +57,8 @@ pub(crate) struct CredentialManager {
     presets: Vec<ProviderConfig>,
     secrets: Vec<SecretEntry>,
     draft: Option<ProviderConfig>,
+    storage: CredentialStorage,
+    closing: bool,
     search_service: Option<SearchBackend>,
     search_services: [SearchServiceState; 3],
     after_unlock: AfterUnlock,
@@ -102,6 +104,8 @@ impl CredentialManager {
             presets: crate::config::app_config::provider_presets(),
             secrets: Vec::new(),
             draft: None,
+            storage: CredentialStorage::Encrypted,
+            closing: false,
             search_service: None,
             search_services: std::array::from_fn(|_| SearchServiceState::default()),
             after_unlock: AfterUnlock::Vault,
@@ -124,16 +128,17 @@ impl CredentialManager {
         self.error = None;
     }
 
+    fn choose_storage(&mut self, config: &AppConfig) -> Result<(), String> {
+        self.storage = KeyStore::vault_status(config)
+            .map_err(|error| error.to_string())?
+            .storage;
+        self.go(Screen::Storage);
+        self.selected = usize::from(self.storage == CredentialStorage::Plaintext);
+        Ok(())
+    }
+
     fn preset_choices(&self) -> Vec<&ProviderConfig> {
-        self.presets
-            .iter()
-            .filter(|preset| {
-                !self
-                    .providers
-                    .iter()
-                    .any(|provider| provider.name.eq_ignore_ascii_case(&preset.name))
-            })
-            .collect()
+        self.presets.iter().collect()
     }
 
     fn accepts_input(&self) -> bool {
@@ -203,6 +208,9 @@ impl CredentialManager {
     }
 
     pub(crate) fn render(&self, frame: &mut Frame, area: Rect) {
+        if self.closing {
+            return;
+        }
         let popup = crate::tui::components::centered_rect(86, 82, area);
         frame.render_widget(Clear, popup);
         let title = if self.search_service.is_some()
@@ -277,13 +285,13 @@ impl CredentialManager {
             }
             Screen::Vault => {
                 lines.push(Line::from(self.notice.as_str()));
-                lines.push(Line::from("Storage changes convert ALL provider and search credentials. Machine secrets always stay encrypted."));
+                lines.push(Line::from("Defaults apply only to new credentials. Existing connections keep their storage; machine secrets always stay encrypted."));
                 rows.extend(
                     [
                         "Unlock / initialize vault",
                         "Lock vault",
-                        "Store ALL provider/search credentials: encrypted vault",
-                        "Store ALL provider/search credentials: plaintext SQLite (NOT encrypted)",
+                        "Default for NEW credentials: encrypted vault",
+                        "Default for NEW credentials: plaintext SQLite (NOT encrypted)",
                         "+ Machine password",
                         "+ SSH private key",
                         "Import legacy credentials (explicit)",
@@ -305,11 +313,11 @@ impl CredentialManager {
                 "↑/↓ select · Enter edit/apply · c copy · d delete · s search keys · p providers · Esc close"
             }
             Screen::Storage => {
-                lines.push(Line::from("Choose storage for ALL provider and search credentials. Existing records are converted; machine secrets stay encrypted."));
+                lines.push(Line::from("Choose storage for this connection only. Other saved credentials are not converted. Plaintext credentials remain readable while locked."));
                 rows.extend(
                     [
                         "Password-encrypted tcui-credentials vault",
-                        "Plaintext application SQLite database for ALL credentials (NOT encrypted)",
+                        "Plaintext application SQLite database (NOT encrypted)",
                     ]
                     .into_iter()
                     .map(str::to_string),
@@ -340,9 +348,9 @@ impl CredentialManager {
                 lines.push(Line::from(format!(
                     "API key for {}:",
                     self.search_service
-                        .map(SearchBackend::label)
+                        .map(|service| std::borrow::Cow::Borrowed(service.label()))
                         .or_else(|| self.draft.as_ref().map(provider_label))
-                        .unwrap_or("provider")
+                        .unwrap_or_else(|| "provider".into())
                 )));
                 lines.push(Line::from("Saved only in your selected credential storage. Never read from environment files."));
                 if self
@@ -482,7 +490,7 @@ fn connected_providers(config: &AppConfig) -> Vec<ProviderConfig> {
         .collect()
 }
 
-fn provider_label(provider: &ProviderConfig) -> &str {
+fn provider_label(provider: &ProviderConfig) -> std::borrow::Cow<'_, str> {
     crate::ui::provider_display_name(&provider.name)
 }
 
@@ -518,6 +526,21 @@ fn validate_endpoint(endpoint: &str) -> Result<(), &'static str> {
 }
 
 impl TuiApp {
+    pub(crate) async fn stop_credential_login(&mut self) {
+        let Some(manager) = self.ui.credential_manager.as_mut() else {
+            return;
+        };
+        if let Some(cancel) = manager.oauth_cancel.take() {
+            cancel.cancel();
+        }
+        if let Some(task) = manager.oauth_result.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        manager.oauth_response = None;
+        manager.oauth_events = None;
+    }
+
     pub(crate) fn open_credential_manager(&mut self, vault: bool) {
         let Ok(config) = self.config.try_read().map(|c| c.clone()) else {
             return;
@@ -580,7 +603,7 @@ impl TuiApp {
                     .clone_from(&server.transport);
             }
         }
-        manager.notice = "Keys use your vault/plaintext storage preference. Environment keys are never imported. Select the automatic source in Web search settings.".into();
+        manager.notice = "Choose storage for each key. Existing credentials are never converted by adding a connection. Environment keys are never imported. Select the automatic source in Web search settings.".into();
     }
 
     fn set_search_profile(
@@ -616,23 +639,6 @@ impl TuiApp {
         self.ui.settings_workspace.load(&updated);
         *current = updated.clone();
         Ok(updated)
-    }
-
-    pub(crate) fn prompt_credential_vault_at_launch(&mut self) {
-        let Ok(config) = self.config.try_read().map(|c| c.clone()) else {
-            return;
-        };
-        match KeyStore::vault_status(&config) {
-            Ok(status) if status.initialized && !status.unlocked => {
-                let mut manager = CredentialManager::new(&config, true);
-                manager.go(Screen::Unlock);
-                self.ui.credential_manager = Some(manager);
-            }
-            Err(_) => self
-                .ui
-                .show_toast("Credential storage could not be opened. Use /vault to retry.".into()),
-            _ => {}
-        }
     }
 
     pub(crate) fn open_manual_model(&mut self, model: &str) {
@@ -671,7 +677,7 @@ impl TuiApp {
         match KeyStore::vault_status(config) {
             Ok(status) => {
                 manager.notice = format!(
-                    "Vault: {} · provider storage: {}{}",
+                    "Vault: {} · new credential default: {}{}",
                     if !status.initialized {
                         "not initialized"
                     } else if status.unlocked {
@@ -702,13 +708,40 @@ impl TuiApp {
         }
     }
 
+    fn request_application_password(
+        &mut self,
+        manager: &mut CredentialManager,
+        initialize: bool,
+    ) -> Result<(), String> {
+        if initialize {
+            self.initialize_application_password()?;
+        } else {
+            self.unlock_application();
+        }
+        manager.input.zeroize();
+        manager.password.zeroize();
+        manager.secret_value.zeroize();
+        manager.draft = None;
+        manager.closing = true;
+        Ok(())
+    }
+
     fn request_vault_unlock(
+        &mut self,
         config: &AppConfig,
         manager: &mut CredentialManager,
         after: AfterUnlock,
     ) -> Result<(), String> {
+        let status = KeyStore::vault_status(config).map_err(|error| error.to_string())?;
+        if crate::protection::configured().map_err(|failure| {
+            let error = failure.to_string();
+            manager.input.zeroize();
+            self.lock_application_after_error(error.clone());
+            error
+        })? {
+            return self.request_application_password(manager, !status.initialized);
+        }
         manager.after_unlock = after;
-        let status = KeyStore::vault_status(config).map_err(|e| e.to_string())?;
         manager.go(if status.initialized {
             Screen::Unlock
         } else {
@@ -718,6 +751,9 @@ impl TuiApp {
     }
 
     fn begin_provider_credentials(config: &AppConfig, manager: &mut CredentialManager) {
+        if let Some(provider) = &manager.draft {
+            crate::llm::auth::invalidate_provider_refreshes(&provider.name);
+        }
         if manager
             .draft
             .as_ref()
@@ -730,10 +766,12 @@ impl TuiApp {
             let (cancellation, cancel) = crate::llm::auth::tui::oauth_cancellation();
             let (response_tx, response_rx) = tokio::sync::mpsc::channel(1);
             let snapshot = config.clone();
+            let storage = manager.storage;
             manager.oauth_result = Some(tokio::spawn(async move {
                 crate::llm::auth::tui::login(
                     &provider,
                     snapshot,
+                    storage,
                     events_tx,
                     cancellation,
                     response_rx,
@@ -758,12 +796,10 @@ impl TuiApp {
     ) -> Result<(), String> {
         match manager.after_unlock {
             AfterUnlock::Provider => {
-                KeyStore::set_storage_preference(config, CredentialStorage::Encrypted)
-                    .map_err(|e| e.to_string())?;
                 Self::begin_provider_credentials(config, manager);
             }
             AfterUnlock::Storage => {
-                KeyStore::set_storage_preference(config, CredentialStorage::Encrypted)
+                KeyStore::set_storage_default(config, CredentialStorage::Encrypted)
                     .map_err(|e| e.to_string())?;
                 manager.go(Screen::Vault);
                 self.refresh_vault_manager(config, manager);
@@ -849,12 +885,27 @@ impl TuiApp {
     }
 
     pub(crate) fn handle_credential_manager_key(&mut self, key: KeyEvent) {
+        if self.security_restart.is_some() {
+            return;
+        }
         let Some(mut manager) = self.ui.credential_manager.take() else {
             return;
         };
+        if manager.closing {
+            self.ui.credential_manager = Some(manager);
+            return;
+        }
         if key.code == KeyCode::Esc
             || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
         {
+            if let Some(task) = &manager.oauth_result {
+                if let Some(cancel) = &manager.oauth_cancel {
+                    cancel.cancel();
+                }
+                task.abort();
+                manager.closing = true;
+                self.ui.credential_manager = Some(manager);
+            }
             return;
         }
         let Ok(config) = self.config.try_read().map(|c| c.clone()) else {
@@ -995,6 +1046,7 @@ impl TuiApp {
                     .providers
                     .get(manager.selected.saturating_sub(1))
                     .ok_or("Select a connection first.")?;
+                crate::llm::auth::invalidate_provider_refreshes(&provider.name);
                 let mut current = self
                     .config
                     .try_write()
@@ -1051,12 +1103,12 @@ impl TuiApp {
             Screen::SearchKeys => {
                 manager.search_service = Some(SearchBackend::SERVICES[manager.selected]);
                 manager.draft = None;
-                manager.go(Screen::Storage);
+                manager.choose_storage(config)?;
             }
             Screen::Providers if manager.selected == 0 => manager.go(Screen::Presets),
             Screen::Providers => {
                 manager.draft = manager.providers.get(manager.selected - 1).cloned();
-                manager.go(Screen::Storage);
+                manager.choose_storage(config)?;
             }
             Screen::Presets => {
                 let provider = manager
@@ -1065,31 +1117,36 @@ impl TuiApp {
                     .map(|p| (*p).clone());
                 manager.draft = provider;
                 if manager.draft.is_some() {
-                    manager.go(Screen::Storage);
+                    manager.choose_storage(config)?;
                 } else {
                     manager.go(Screen::Name);
                 }
             }
             Screen::Storage => {
-                if manager.selected == 0 {
-                    let status = KeyStore::vault_status(config).map_err(|e| e.to_string())?;
-                    if !status.unlocked {
-                        Self::request_vault_unlock(config, manager, AfterUnlock::Provider)?;
-                    } else {
-                        KeyStore::set_storage_preference(config, CredentialStorage::Encrypted)
-                            .map_err(|e| e.to_string())?;
-                        Self::begin_provider_credentials(config, manager);
-                    }
+                manager.storage = if manager.selected == 0 {
+                    CredentialStorage::Encrypted
                 } else {
-                    KeyStore::set_storage_preference(config, CredentialStorage::Plaintext)
-                        .map_err(|e| e.to_string())?;
+                    CredentialStorage::Plaintext
+                };
+                if let Some(provider) = &mut manager.draft {
+                    provider.name =
+                        KeyStore::connection_id(config, &provider.name, manager.storage)
+                            .map_err(|e| e.to_string())?;
+                }
+                if manager.storage == CredentialStorage::Encrypted
+                    && !KeyStore::vault_status(config)
+                        .map_err(|e| e.to_string())?
+                        .unlocked
+                {
+                    self.request_vault_unlock(config, manager, AfterUnlock::Provider)?;
+                } else {
                     Self::begin_provider_credentials(config, manager);
                 }
             }
             Screen::Vault => match manager.selected {
-                0 => Self::request_vault_unlock(config, manager, AfterUnlock::Vault)?,
+                0 => self.request_vault_unlock(config, manager, AfterUnlock::Vault)?,
                 1 => {
-                    KeyStore::lock_vault(config).map_err(|e| e.to_string())?;
+                    self.lock_application()?;
                     self.refresh_vault_manager(config, manager);
                     self.queue_connection_check_for_active_tab();
                 }
@@ -1098,15 +1155,15 @@ impl TuiApp {
                         .map_err(|e| e.to_string())?
                         .unlocked
                     {
-                        KeyStore::set_storage_preference(config, CredentialStorage::Encrypted)
+                        KeyStore::set_storage_default(config, CredentialStorage::Encrypted)
                             .map_err(|e| e.to_string())?;
                         self.refresh_vault_manager(config, manager);
                     } else {
-                        Self::request_vault_unlock(config, manager, AfterUnlock::Storage)?;
+                        self.request_vault_unlock(config, manager, AfterUnlock::Storage)?;
                     }
                 }
                 3 => {
-                    KeyStore::set_storage_preference(config, CredentialStorage::Plaintext)
+                    KeyStore::set_storage_default(config, CredentialStorage::Plaintext)
                         .map_err(|e| e.to_string())?;
                     self.refresh_vault_manager(config, manager);
                 }
@@ -1170,6 +1227,7 @@ impl TuiApp {
                     );
                 }
                 if name.eq_ignore_ascii_case(crate::config::LOCAL_PROVIDER_NAME)
+                    || name.contains("::")
                     || config
                         .providers
                         .iter()
@@ -1197,11 +1255,27 @@ impl TuiApp {
                 if let Some(provider) = &mut manager.draft {
                     provider.endpoint = manager.input.trim().to_string();
                 }
-                manager.go(Screen::Storage);
+                manager.choose_storage(config)?;
             }
             Screen::Unlock => {
-                KeyStore::unlock_vault(config, &manager.input).map_err(|e| e.to_string())?;
+                if crate::protection::configured().map_err(|failure| {
+                    let error = failure.to_string();
+                    manager.input.zeroize();
+                    self.lock_application_after_error(error.clone());
+                    error
+                })? {
+                    let initialized = KeyStore::vault_status(config)
+                        .map_err(|error| error.to_string())?
+                        .initialized;
+                    return self.request_application_password(manager, !initialized);
+                }
+                let result = KeyStore::unlock_vault(config, &manager.input);
                 manager.input.zeroize();
+                if let Err(failure) = result {
+                    let error = failure.to_string();
+                    self.lock_application_after_error(error.clone());
+                    return Err(error);
+                }
                 self.after_vault_unlock(config, manager)?;
             }
             Screen::NewPassword => {
@@ -1225,10 +1299,11 @@ impl TuiApp {
                     return Err("Enter an API key.".into());
                 }
                 if let Some(service) = manager.search_service {
-                    KeyStore::set(
+                    KeyStore::set_with_storage(
                         config,
                         Self::search_key_name(config, service)?,
                         manager.input.trim(),
+                        manager.storage,
                     )
                     .map_err(|error| error.to_string())?;
                     let updated =
@@ -1244,8 +1319,13 @@ impl TuiApp {
                     return Ok(());
                 }
                 let provider = manager.draft.as_ref().ok_or("Select a provider first.")?;
-                KeyStore::set(config, &provider.name, manager.input.trim())
-                    .map_err(|e| e.to_string())?;
+                KeyStore::set_with_storage(
+                    config,
+                    &provider.name,
+                    manager.input.trim(),
+                    manager.storage,
+                )
+                .map_err(|e| e.to_string())?;
                 self.persist_connection(manager)?;
             }
             Screen::OAuthResponse => {
@@ -1317,6 +1397,13 @@ impl TuiApp {
         let Some(mut manager) = self.ui.credential_manager.take() else {
             return;
         };
+        if manager.closing {
+            if let Some(task) = manager.oauth_result.take() {
+                task.abort();
+                let _ = task.await;
+            }
+            return;
+        }
         if let Some(events) = manager.oauth_events.as_mut() {
             while let Ok(event) = events.try_recv() {
                 match event {
@@ -1610,7 +1697,7 @@ mod tests {
             );
             assert_eq!(
                 KeyStore::vault_status(&config).expect("storage").storage,
-                CredentialStorage::Plaintext
+                CredentialStorage::Encrypted
             );
             assert!(app.ui.tabs[0].messages.is_empty());
             assert!(app.ui.tabs[0].input_content.is_empty());
@@ -1683,7 +1770,6 @@ mod tests {
             KeyStore::set(&config, "Exa Search", "chat-only-canary").expect("chat credential");
             app.open_search_credentials();
             press(app, KeyCode::Enter);
-            press(app, KeyCode::Down);
             press(app, KeyCode::Enter);
             paste(app, "must-not-overwrite");
             press(app, KeyCode::Enter);
@@ -1751,7 +1837,7 @@ mod tests {
                 );
                 assert_eq!(
                     KeyStore::vault_status(&config).expect("status").storage,
-                    CredentialStorage::Plaintext
+                    CredentialStorage::Encrypted
                 );
                 assert_eq!(app.ui.visible_providers.len(), 1);
                 assert!(app.ui.tabs[0].messages.is_empty());
@@ -1811,7 +1897,7 @@ mod tests {
     }
 
     #[test]
-    fn vault_initialization_machine_key_crud_and_launch_cancel_are_isolated_from_chat() {
+    fn vault_initialization_and_machine_key_crud_preserve_chat_during_manual_unlock() {
         super::super::tests::with_test_app_config(
             "credential-vault-ui",
             AppConfig::default(),
@@ -1880,31 +1966,21 @@ mod tests {
                 assert!(KeyStore::list_secrets(&config)
                     .expect("removed secret")
                     .is_empty());
-                app.ui
-                    .credential_manager
-                    .as_mut()
-                    .expect("manager")
-                    .selected = 1;
-                press(app, KeyCode::Enter);
+                KeyStore::lock_vault(&config).expect("simulate locked session");
                 assert!(!KeyStore::vault_status(&config).expect("locked").unlocked);
-                app.prompt_credential_vault_at_launch();
+                app.open_credential_manager(true);
+                press(app, KeyCode::Enter);
                 assert!(matches!(
                     app.ui
                         .credential_manager
                         .as_ref()
-                        .expect("launch unlock")
+                        .expect("manual unlock")
                         .screen,
                     Screen::Unlock
                 ));
-                paste(app, "wrong-password");
+                paste(app, "long explicit vault password");
                 press(app, KeyCode::Enter);
-                assert!(app
-                    .ui
-                    .credential_manager
-                    .as_ref()
-                    .expect("unlock error")
-                    .error
-                    .is_some());
+                assert!(KeyStore::vault_status(&config).expect("unlocked").unlocked);
                 press(app, KeyCode::Esc);
                 assert!(app.ui.credential_manager.is_none());
                 assert!(app.ui.tabs[0].messages.is_empty());
@@ -2012,7 +2088,7 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_provider_metadata_remains_visible_when_launch_unlock_is_cancelled() {
+    fn encrypted_provider_metadata_remains_visible_when_manual_unlock_is_cancelled() {
         super::super::tests::with_test_app_config(
             "credential-locked-provider",
             AppConfig::default(),
@@ -2029,7 +2105,8 @@ mod tests {
                 app.ui.db_providers = TuiApp::provider_entries_with_local(&config, None);
                 KeyStore::lock_vault(&config).expect("lock");
                 app.refresh_visible_selectors();
-                app.prompt_credential_vault_at_launch();
+                app.open_credential_manager(true);
+                press(app, KeyCode::Enter);
                 press(app, KeyCode::Esc);
                 assert!(app.ui.credential_manager.is_none());
                 assert_eq!(app.ui.visible_providers.len(), 1);
@@ -2043,6 +2120,470 @@ mod tests {
                         .providers
                         .len(),
                     1
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn adding_plaintext_provider_keeps_locked_encrypted_connection_and_labels() {
+        super::super::tests::with_test_app_config(
+            "provider-manager-mixed",
+            AppConfig::default(),
+            |app| {
+                let mut config = app.config.blocking_read().clone();
+                config
+                    .providers
+                    .push(crate::config::app_config::provider_presets().remove(0));
+                KeyStore::initialize_vault(&config, "mixed-provider-password").expect("initialize");
+                KeyStore::set(&config, "OpenAI", "encrypted-original")
+                    .expect("encrypted connection");
+                KeyStore::lock_vault(&config).expect("restart locked");
+                *app.config.blocking_write() = config.clone();
+                app.ui.db_providers = TuiApp::provider_entries_with_local(&config, None);
+                app.open_credential_manager(false);
+                press(app, KeyCode::Enter);
+                press(app, KeyCode::Enter);
+                press(app, KeyCode::Down);
+                press(app, KeyCode::Enter);
+                paste(app, "plaintext-second");
+                press(app, KeyCode::Enter);
+                let updated = app.config.blocking_read().clone();
+                assert_eq!(updated.providers.len(), 2);
+                assert!(updated
+                    .providers
+                    .iter()
+                    .any(|provider| provider.name == "OpenAI"));
+                assert!(updated
+                    .providers
+                    .iter()
+                    .any(|provider| provider.name == "OpenAI::plaintext"));
+                assert!(KeyStore::get(&updated, "OpenAI").is_err());
+                assert_eq!(
+                    KeyStore::get(&updated, "OpenAI::plaintext")
+                        .expect("plaintext")
+                        .as_deref(),
+                    Some("plaintext-second")
+                );
+                let manager = app.ui.credential_manager.as_ref().expect("manager");
+                assert_eq!(manager.providers.len(), 2);
+                assert_eq!(provider_label(&manager.providers[0]), "OpenAI (encrypted)");
+                assert_eq!(
+                    crate::ui::provider_display_name("OpenAI"),
+                    "OpenAI (encrypted)"
+                );
+                assert_eq!(
+                    crate::ui::provider_display_name("OpenAI::plaintext"),
+                    "OpenAI"
+                );
+                KeyStore::unlock_vault(&updated, "mixed-provider-password").expect("unlock");
+                assert_eq!(
+                    KeyStore::get(&updated, "OpenAI")
+                        .expect("encrypted preserved")
+                        .as_deref(),
+                    Some("encrypted-original")
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn encrypted_creation_prompts_before_credentials_without_converting_plaintext() {
+        super::super::tests::with_test_app_config(
+            "provider-manager-unlock-new",
+            AppConfig::default(),
+            |app| {
+                let config = app.config.blocking_read().clone();
+                KeyStore::set_with_storage(
+                    &config,
+                    "Existing",
+                    "plaintext-original",
+                    CredentialStorage::Plaintext,
+                )
+                .expect("existing plaintext");
+                KeyStore::initialize_vault(&config, "creation-password").expect("initialize");
+                KeyStore::lock_vault(&config).expect("lock");
+                app.open_credential_manager(false);
+                press(app, KeyCode::Enter);
+                press(app, KeyCode::Enter);
+                press(app, KeyCode::Enter);
+                assert!(matches!(
+                    app.ui.credential_manager.as_ref().expect("manager").screen,
+                    Screen::Unlock
+                ));
+                assert_eq!(
+                    KeyStore::get(&config, "Existing")
+                        .expect("plaintext untouched")
+                        .as_deref(),
+                    Some("plaintext-original")
+                );
+                paste(app, "wrong-password");
+                press(app, KeyCode::Enter);
+                let manager = app.ui.credential_manager.as_ref().expect("manager");
+                assert!(manager.error.is_some());
+                assert!(matches!(manager.screen, Screen::Unlock));
+                assert!(!KeyStore::has_credential(&config, "OpenAI").expect("not created"));
+            },
+        );
+    }
+
+    #[cfg(feature = "memory")]
+    #[test]
+    fn configured_unlock_leaves_live_keys_intact_and_blocks_cached_content_before_gate() {
+        use crate::protection::ui::SecurityRestart;
+        use crate::protection::ProtectionPolicy;
+
+        super::super::tests::with_test_app_config(
+            "credential-unlock-before-teardown",
+            AppConfig::default(),
+            |app| {
+                crate::protection::configure(
+                    ProtectionPolicy {
+                        app_password: true,
+                        memories: true,
+                        vault: true,
+                        ..ProtectionPolicy::default()
+                    },
+                    "protected-cache-password",
+                )
+                .expect("configure protected domains");
+                let marker = "PRIVATE42";
+                let store =
+                    crate::memory::MemoryStore::open_default().expect("native memory store");
+                store
+                    .write(std::path::Path::new("cached-memory.md"), marker, false)
+                    .expect("protected memory");
+                let path = store.active_documents().expect("active memory")[0]
+                    .0
+                    .clone();
+                let stored = std::fs::read(&path).expect("encrypted fixture");
+                app.refresh_memory_artifacts();
+                let handle = app
+                    .ui
+                    .memory_artifacts
+                    .iter()
+                    .find(|artifact| artifact.path.as_ref() == Some(&path))
+                    .expect("native memory artifact")
+                    .handle
+                    .clone();
+                app.open_artifact(handle.clone());
+                let mut terminal =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30))
+                        .expect("terminal");
+                terminal
+                    .draw(|frame| app.ui.render(frame))
+                    .expect("render loaded memory");
+                let loaded = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .flat_map(|cell| cell.symbol().chars())
+                    .filter(|character| !character.is_whitespace())
+                    .collect::<String>();
+                assert!(
+                    loaded.contains(marker),
+                    "fixture must contain an already-visible decrypted memory: {loaded:?}; viewer={}, chat_area={:?}",
+                    app.ui.artifact_viewer.is_some(), app.ui.chat_area
+                );
+
+                app.open_credential_manager(true);
+                let manager = app.ui.credential_manager.as_mut().expect("manager");
+                manager.go(Screen::Unlock);
+                manager.input = "wrong-password".into();
+                press(app, KeyCode::Enter);
+                assert_eq!(app.security_restart, Some(SecurityRestart::Unlock));
+                assert!(app.ui.protection_blocked);
+                assert!(crate::protection::is_unlocked().expect("live session"),
+                    "password authentication must wait until requests are persisted and the app is dropped");
+                assert!(app
+                    .ui
+                    .credential_manager
+                    .as_ref()
+                    .expect("manager")
+                    .input
+                    .is_empty());
+
+                // The standalone gate may fail only after runtime teardown. Keep the stale cache
+                // here deliberately to prove pending transitions cannot render or reopen it.
+                assert!(crate::protection::unlock("wrong-password").is_err());
+                assert!(crate::protection::startup_requires_unlock().expect("mandatory gate"));
+                press(app, KeyCode::Esc);
+                assert_eq!(app.security_restart, Some(SecurityRestart::Unlock));
+                assert!(app.ui.protection_blocked);
+                assert!(
+                    app.ui.artifact_viewer.is_some(),
+                    "retain the already-open decrypted viewer"
+                );
+                terminal
+                    .draw(|frame| app.ui.render(frame))
+                    .expect("render blocked transition");
+                let blocked = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .flat_map(|cell| cell.symbol().chars())
+                    .filter(|character| !character.is_whitespace())
+                    .collect::<String>();
+                assert!(!blocked.contains(marker));
+                app.ui.artifact_viewer = None;
+                app.open_artifact(handle.clone());
+                assert!(app.ui.artifact_viewer.is_none());
+                app.prepare_artifact_save(handle.clone());
+                assert!(app.ui.export_dialog.is_none());
+                app.delete_artifact(handle);
+                assert_eq!(std::fs::read(&path).expect("locked memory remains"), stored);
+                crate::protection::lock().expect("clear test session");
+            },
+        );
+    }
+
+    #[test]
+    fn failed_legacy_reauthentication_forces_restart_and_cannot_be_cancelled_back_to_cache() {
+        use crate::protection::ui::SecurityRestart;
+        super::super::tests::with_test_app_config(
+            "credential-failed-reauthentication",
+            AppConfig::default(),
+            |app| {
+                let config = app.config.blocking_read().clone();
+                KeyStore::initialize_vault(&config, "existing-password").expect("initialize");
+                app.open_credential_manager(true);
+                let manager = app.ui.credential_manager.as_mut().expect("manager");
+                manager.go(Screen::Unlock);
+                manager.input = "wrong-password".into();
+                manager.secret_value = "PRIVATE_CACHED_CREDENTIAL_MARKER".into();
+                press(app, KeyCode::Enter);
+                assert_eq!(app.security_restart, Some(SecurityRestart::Lock));
+                assert!(app
+                    .security_notice
+                    .as_ref()
+                    .is_some_and(|notice| notice.contains("authentication failed")));
+                assert!(app.ui.protection_blocked);
+                assert!(!KeyStore::vault_status(&config).expect("status").unlocked);
+                press(app, KeyCode::Esc);
+                assert_eq!(app.security_restart, Some(SecurityRestart::Lock));
+                assert!(app.ui.credential_manager.is_some());
+                let mut terminal =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30))
+                        .expect("terminal");
+                terminal
+                    .draw(|frame| app.ui.render(frame))
+                    .expect("blocked render");
+                let rendered = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>();
+                assert!(!rendered.contains("PRIVATE_CACHED_CREDENTIAL_MARKER"));
+            },
+        );
+    }
+
+    #[test]
+    fn configured_plaintext_first_encrypted_creation_and_vault_setup_request_standalone_initialization(
+    ) {
+        use crate::protection::ui::SecurityRestart;
+        use crate::protection::ProtectionPolicy;
+
+        for provider_creation in [true, false] {
+            super::super::tests::with_test_app_config(
+                "credential-plaintext-initialization",
+                AppConfig::default(),
+                |app| {
+                    crate::protection::configure(ProtectionPolicy::default(), "")
+                        .expect("plaintext first-run policy");
+                    let config = app.config.blocking_read().clone();
+                    KeyStore::set_with_storage(
+                        &config,
+                        "Existing",
+                        "plaintext-sibling",
+                        CredentialStorage::Plaintext,
+                    )
+                    .expect("existing plaintext connection");
+                    if provider_creation {
+                        app.open_credential_manager(false);
+                        press(app, KeyCode::Enter);
+                        press(app, KeyCode::Enter);
+                        assert_eq!(
+                            app.ui
+                                .credential_manager
+                                .as_ref()
+                                .expect("storage")
+                                .selected,
+                            1
+                        );
+                        press(app, KeyCode::Up);
+                        press(app, KeyCode::Enter);
+                    } else {
+                        app.open_credential_manager(true);
+                        press(app, KeyCode::Enter);
+                    }
+                    assert_eq!(
+                        app.security_restart,
+                        Some(SecurityRestart::InitializePassword)
+                    );
+                    assert!(app.ui.protection_blocked);
+                    assert!(
+                        !KeyStore::vault_status(&config)
+                            .expect("not yet initialized")
+                            .initialized
+                    );
+                    assert_eq!(
+                        crate::protection::policy().expect("same policy"),
+                        Some(ProtectionPolicy::default())
+                    );
+                    assert_eq!(
+                        KeyStore::vault_status(&config)
+                            .expect("default unchanged")
+                            .storage,
+                        CredentialStorage::Plaintext
+                    );
+                    assert_eq!(
+                        KeyStore::get(&config, "Existing")
+                            .expect("sibling preserved")
+                            .as_deref(),
+                        Some("plaintext-sibling")
+                    );
+                    assert!(!KeyStore::has_credential(&config, "OpenAI").expect("not created"));
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn storage_screen_uses_saved_default_and_explicit_choice_stays_local() {
+        super::super::tests::with_test_app_config(
+            "credential-storage-default",
+            AppConfig::default(),
+            |app| {
+                let config = app.config.blocking_read().clone();
+                KeyStore::initialize_vault(&config, "default-choice-password").expect("initialize");
+                KeyStore::set_with_storage(
+                    &config,
+                    "OpenAI",
+                    "encrypted-original",
+                    CredentialStorage::Encrypted,
+                )
+                .expect("encrypted sibling");
+                KeyStore::set_storage_default(&config, CredentialStorage::Plaintext)
+                    .expect("saved plaintext default");
+                app.open_credential_manager(false);
+                press(app, KeyCode::Enter);
+                press(app, KeyCode::Enter);
+                assert_eq!(
+                    app.ui
+                        .credential_manager
+                        .as_ref()
+                        .expect("storage")
+                        .selected,
+                    1
+                );
+                press(app, KeyCode::Up);
+                press(app, KeyCode::Enter);
+                assert!(matches!(
+                    app.ui
+                        .credential_manager
+                        .as_ref()
+                        .expect("explicit encrypted")
+                        .screen,
+                    Screen::ApiKey
+                ));
+                assert_eq!(
+                    KeyStore::vault_status(&config)
+                        .expect("saved default")
+                        .storage,
+                    CredentialStorage::Plaintext
+                );
+                app.open_credential_manager(false);
+                press(app, KeyCode::Enter);
+                press(app, KeyCode::Enter);
+                assert_eq!(
+                    app.ui
+                        .credential_manager
+                        .as_ref()
+                        .expect("saved choice")
+                        .selected,
+                    1
+                );
+                press(app, KeyCode::Enter);
+                paste(app, "plaintext-new");
+                press(app, KeyCode::Enter);
+                assert_eq!(
+                    KeyStore::get(&config, "OpenAI::plaintext")
+                        .expect("new plaintext")
+                        .as_deref(),
+                    Some("plaintext-new")
+                );
+                assert_eq!(
+                    KeyStore::get(&config, "OpenAI")
+                        .expect("encrypted sibling intact")
+                        .as_deref(),
+                    Some("encrypted-original")
+                );
+                assert_eq!(
+                    KeyStore::provider_storage(&config, "OpenAI").expect("encrypted storage"),
+                    Some(CredentialStorage::Encrypted)
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn locked_oauth_metadata_survives_manual_unlock_cancel_without_changing_tokens() {
+        use crate::config::key_store::{
+            OAuthCredential, OAuthCredentialOwnership, OAuthCredentialSource,
+        };
+
+        super::super::tests::with_test_app_config(
+            "credential-locked-oauth",
+            AppConfig::default(),
+            |app| {
+                let mut config = app.config.blocking_read().clone();
+                let provider = crate::config::app_config::provider_presets()
+                    .into_iter()
+                    .find(|provider| provider.name == "Codex")
+                    .expect("Codex preset");
+                config.providers.push(provider);
+                KeyStore::initialize_vault(&config, "oauth-manual-password").expect("initialize");
+                let credential = OAuthCredential {
+                    provider: "Codex".into(),
+                    access_token: "oauth-access-preserved".into(),
+                    refresh_token: Some("oauth-refresh-preserved".into()),
+                    expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                    account_id: Some("original-account".into()),
+                    ownership: OAuthCredentialOwnership::Tcui,
+                    source: OAuthCredentialSource::NativeOAuth,
+                };
+                KeyStore::upsert_oauth_with_storage(
+                    &config,
+                    &credential,
+                    CredentialStorage::Encrypted,
+                )
+                .expect("OAuth connection");
+                *app.config.blocking_write() = config.clone();
+                app.ui.db_providers = TuiApp::provider_entries_with_local(&config, None);
+                KeyStore::lock_vault(&config).expect("restart locked");
+                app.refresh_visible_selectors();
+                app.open_credential_manager(true);
+                press(app, KeyCode::Enter);
+                press(app, KeyCode::Esc);
+                assert!(app.ui.credential_manager.is_none());
+                assert_eq!(app.ui.visible_providers.len(), 1);
+                assert!(KeyStore::get_oauth(&config, "Codex").is_err());
+                app.open_credential_manager(false);
+                let manager = app.ui.credential_manager.as_ref().expect("connections");
+                assert_eq!(manager.providers[0].name, "Codex");
+                assert_eq!(
+                    provider_label(&manager.providers[0]),
+                    "OpenAI OAuth (encrypted)"
+                );
+                KeyStore::unlock_vault(&config, "oauth-manual-password").expect("manual unlock");
+                assert_eq!(
+                    KeyStore::get_oauth(&config, "Codex").expect("OAuth preserved"),
+                    Some(credential)
                 );
             },
         );

@@ -10,6 +10,30 @@ TCUI is functional but still a work in progress and not yet ready for a general 
 cargo run
 ```
 
+## App protection
+
+On first launch, `/security` lets you independently select an app-entry password,
+credentials, chats, Memories, and the built-in Vault for protection. Reopen
+`/security` later to change the selection. One shared password unlocks selected
+domains with `/unlock`; `/lock` stops tracked work, persists state, and clears
+the app session. Running terminals, unsaved editors, and pending drafts require
+discard confirmation for a voluntary transition; cancelling preserves them.
+Forced revocation fails closed.
+
+Protected chats or an app-entry password require a startup unlock before config
+and stores open; cancelling exits. With only optional domains protected, cancelling
+unlock leaves those domains locked and the other app surfaces usable. App-entry
+protection alone does not encrypt unchecked stores.
+
+Protection uses a random master secret wrapped by the password-based credential
+store, with domain-separated authenticated encryption. There is no password
+recovery or rotation feature. Configuration, profile names, paths, filenames,
+and logs are not encrypted by these switches. External originals and user-kept
+archives or backups may remain readable; TCUI does not silently rewrite or delete them.
+Copies into chats, exports, or provider requests follow the destination's privacy
+rules, not the source's. Locking cannot recall provider-sent data or protect
+against the OS account, root, swap, snapshots, or forensic recovery of deleted bytes.
+
 ## Conversations and response control
 
 Each response has a request ID, an origin conversation ID, and a destination
@@ -27,7 +51,7 @@ can run requests independently.
   known history and partial response. The request keeps its original request
   and origin IDs, but uses the new destination ID. Recovery does not overwrite
   unreadable or corrupt chat files.
-- `/fork` creates and selects an independent, encrypted conversation named
+- `/fork` creates and selects an independent persistent conversation named
   **`Fork of <title>`** in the sidebar. It includes a partial response already received,
   but the original request continues only in its original destination. The fork
   retains the provider, model, and reasoning selection. Send or clear pending
@@ -78,8 +102,8 @@ pane instead creates a persistent continuation in main and leaves the pane open.
 
 ### Relevant context from other chats
 
-Before a request, TCUI searches a bounded set of local, encrypted chat documents
-for matching words. It can send **up to three excerpts, at most 3,000 characters
+Before a request, TCUI searches a bounded set of local chat documents, encrypted
+when chat protection is selected, for matching words. It can send **up to three excerpts, at most 3,000 characters
 total**, to the selected provider. Each excerpt includes its conversation ID,
 title, and role and is marked as untrusted evidence, not instructions. This is
 automatic and independent of the optional Memory feature: content from another
@@ -99,8 +123,8 @@ conversations or execute hidden memory directives. Titles come from the first
 user message, with a five-word and 16-Unicode-character limit before an
 optional ellipsis.
 
-With Memory enabled and a vault configured, select a skill anywhere in your
-own prompt, or use `/skill <name> <request>`:
+With Memory enabled, select a skill anywhere in your own prompt, or use
+`/skill <name> <request>`. Memory does not require a Markdown Vault profile:
 
 ```text
 This machine is used for local CI @remember that, and the configuration we have set up this session.
@@ -143,23 +167,25 @@ Open the right sidebar with `Ctrl+Right`, then use **Memories → View** to
 inspect the note and its stored metadata. **Insert to chat** copies the note
 into the next request. The copy remains in chat history after memory deletion.
 
-A requested memory removal moves the record to Trash and updates the index.
-Sidebar **Delete** still removes the active file directly. Neither path erases
-existing chat copies. Unified deletion, sorting, and filters remain under AR-15.
-Completed saves/removals are reported separately from index failures.
+A requested memory removal or sidebar **Delete** moves the record to Trash and
+updates the index. Failures are reported rather than presented as successful
+deletion. Neither path erases existing chat copies. Sorting, filters, and further
+recall/management work remain under AR-15. Completed source operations are
+reported separately from index failures.
 
-Saved records survive chat closure and restart. **They are not protected by
-the credential-vault password.** Chats and memory records currently use a
-local key file; the SQLite search cache is not password-encrypted. App-wide
-password protection is a planned migration under AR-17, not an implemented
-security guarantee.
+Saved records live independently in `$XDG_DATA_HOME/tcui/memories` (normally
+`~/.local/share/tcui/memories`). `/security` can protect Memories with the shared
+password, independently of chats and Vault. Protected search indexes are
+encrypted serialized SQLite on disk and queried in RAM, without plaintext
+SQLite sidecars. A corrupt index does not prevent reading or listing source
+records; repair is explicit and does not rewrite the sources.
 
 Automatic capture remains removed. Automatic recall still runs for ordinary
 prompts when Memory is enabled. Explicit memory tasks use their own bounded
 retrieval instead of a second automatic memory injection. There is no
 independent automatic-recall switch or multi-device synchronization yet.
 See the [actionable review](docs/2026-10-22-actionable-review.md) for the
-remaining memory work and encryption plan.
+remaining memory work.
 
 ## Settings
 
@@ -342,17 +368,20 @@ presented as successful searches.
 
 ## Authentication
 
-Choose password-encrypted storage or explicit plaintext SQLite storage when
-connecting. `/vault` manages the **tcui-credentials** vault, including machine
-passwords and multiline SSH private keys. An initialized vault prompts for its
-password at launch; cancelling keeps encrypted credentials locked without
-closing the app. Reopen it with `/vault`.
+Choose password-encrypted or explicit plaintext SQLite storage for each
+connection. Encrypted and plaintext provider/search records, including OAuth
+tokens, can coexist; encrypted entries carry an encrypted label. Lookups use
+exact connection IDs, and saving cannot silently replace an opposite-storage
+record. `/vault` manages **tcui-credentials**, including machine passwords and
+multiline SSH private keys, which always remain encrypted.
 
-Storage choice applies to **all provider and search credentials**, including OAuth tokens.
-Machine passwords and SSH keys always stay encrypted. Plaintext credentials are
-readable by anyone who can read the app database; encryption cannot protect
-copies or backups made before conversion. Keep your vault password safe: there
-is no password recovery.
+The `/vault` storage default applies to new records, not a silent bulk conversion.
+Changing the credentials checkbox in `/security` intentionally converts provider
+and search records and sets that default; leaving it unchanged preserves
+per-record exceptions. If the first encrypted connection follows plaintext-only
+setup, enroll the shared password, then reopen `/connect`. `/unlock` unlocks all
+selected domains. Plaintext credentials and pre-conversion backups remain
+readable to anyone with filesystem access. There is no password recovery.
 
 OpenRouter uses documented PKCE authorization. OpenAI OAuth uses TCUI's native
 Codex flow, which is experimental and non-endorsed. Anthropic Agent SDK uses an
@@ -436,11 +465,14 @@ configured ntfy for delivery after disconnecting.
 
 ## Markdown Vault
 
-Markdown Vault connects TCUI to ordinary folders of Markdown files. Add one or
-more folders in **Settings → Markdown Vault → Manage vault profiles**, give each
-profile a display name, and choose a default. Open a workspace from the `+` tab
-launcher, then use its Tree, Viewer, and terminal Editor, or address a profile
-from Chat with `@vault`:
+Markdown Vault includes **TCUI Internal**, rooted at
+`$XDG_DATA_HOME/tcui/vault` (normally `~/.local/share/tcui/vault`). It is the
+default for a fresh configuration; existing defaults and later explicit default
+choices are preserved. Its folder cannot be relocated or removed through the
+profile manager, but its display name can change. `/security` optionally
+encrypts its contents, backups, link manifests, journals, and stages. Add ordinary
+plaintext external folders in **Settings → Markdown Vault → Manage vault profiles**.
+Open a workspace from the `+` tab launcher or address a profile from Chat:
 
 ```text
 @vault list my notes
@@ -448,15 +480,21 @@ from Chat with `@vault`:
 @vault vault:Personal search for "renewal date"
 ```
 
-Workspace tabs are ephemeral and are not restored after TCUI restarts; profile
-configuration persists. Vault mutations require an exact preview and explicit
-confirmation. Generated files are stored once in **Saved files**; **Chat files**
-shows conversation-scoped links to those canonical files with View and Del
-actions, but no Save action. Deleting a file from either section removes that
-physical file and all of its links, while deleting a conversation removes only
-its links and preserves the Saved files. For `@save`, TCUI saves the model's
-complete file body directly and replaces the visible response with
-`Saved as <filename>`.
+Workspace tabs are ephemeral; profile configuration persists. Vault mutations
+require an exact preview and explicit confirmation. Native `@vault copy`
+copies regular files, including binary files, byte-for-byte between named
+profiles without moving sources or removing chat links. External destinations
+are intentionally plaintext. **Saved files** also provides a direct **Export**
+control; exporting protected content or opening a plaintext terminal-editor copy
+requires explicit consent.
+
+Generated files and downloaded/chat artifacts are canonical files in TCUI
+Internal's **Saved files**. **Chat files** contains conversation-scoped links
+with View and Del actions, not duplicate files. Deleting a conversation removes
+only its links. For `@save`, a successful save replaces the visible response with
+`Saved as <filename>`; a save failure retains the original response and reports
+the error. A missing legacy Saved mount blocks mutation or protection migration
+instead of being recreated; remount it and retry with the same initialized password.
 
 **Insert to chat** keeps removable document chips in the composer until send.
 Sending expands their snapshots in insertion order into the ordinary user

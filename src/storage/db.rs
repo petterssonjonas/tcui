@@ -37,6 +37,7 @@ impl Storage {
     }
 
     pub fn new() -> Result<Self> {
+        crate::protection::require(crate::protection::Domain::Chats)?;
         let paths = TcuiDataPaths::discover();
         paths.ensure_layout()?;
         let conn = Connection::open(&paths.database)?;
@@ -59,11 +60,17 @@ impl Storage {
             "ALTER TABLE models ADD COLUMN supported_reasoning_efforts TEXT NOT NULL DEFAULT '[]'",
             [],
         );
-        let shared_key = SharedKey::load_or_create_default(&paths)?;
-        Self::from_parts(conn, paths, shared_key.key, shared_key.created_default_key)
+        let (shared_key, created_default_key) = if crate::protection::configured()? {
+            (None, false)
+        } else {
+            let loaded = SharedKey::load_or_create_default(&paths)?;
+            (Some(loaded.key), loaded.created_default_key)
+        };
+        Self::from_parts(conn, paths, shared_key, created_default_key)
     }
 
     pub fn new_with_key(shared_key: SharedKey) -> Result<Self> {
+        crate::protection::require(crate::protection::Domain::Chats)?;
         let paths = TcuiDataPaths::discover();
         paths.ensure_layout()?;
         let conn = Connection::open(&paths.database)?;
@@ -86,16 +93,19 @@ impl Storage {
             "ALTER TABLE models ADD COLUMN supported_reasoning_efforts TEXT NOT NULL DEFAULT '[]'",
             [],
         );
-        Self::from_parts(conn, paths, shared_key, false)
+        Self::from_parts(conn, paths, Some(shared_key), false)
     }
 
     fn from_parts(
         mut conn: Connection,
         paths: TcuiDataPaths,
-        shared_key: SharedKey,
+        shared_key: Option<SharedKey>,
         created_default_key: bool,
     ) -> Result<Self> {
-        let chat_store = ChatStore::new(paths.clone(), shared_key.clone());
+        let chat_store = match shared_key {
+            Some(key) => ChatStore::new(paths, key),
+            None => ChatStore::managed(paths),
+        };
         chat_store.archive_legacy_chats(&mut conn)?;
         let storage = Self {
             conn,

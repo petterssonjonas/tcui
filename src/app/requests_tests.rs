@@ -1,5 +1,5 @@
 use super::*;
-use crate::app::action::{AssistantFinalization, GeneratedFileFinalization};
+use crate::app::action::{Action, AssistantFinalization, GeneratedFileFinalization};
 use crate::app::submission::{InputSubmission, PreparedUserTurn};
 use crate::app::tests::with_test_app;
 
@@ -29,6 +29,72 @@ fn complete(app: &mut TuiApp, id: SubmissionId, content: &str) {
     })
     .expect("finalize request");
     app.finish_request(id).expect("finish request");
+}
+
+#[test]
+fn ordinary_lock_save_failure_keeps_partial_response_and_keys_for_retry() {
+    with_test_app("security-lock-save-retry", |app| {
+        crate::protection::configure(
+            crate::protection::ProtectionPolicy {
+                app_password: true,
+                chats: true,
+                ..Default::default()
+            },
+            "lock-test-password",
+        )
+        .expect("protect chats");
+        let conversation = app.ui.tabs[0].active_conversation;
+        let id = register(app, conversation, conversation);
+        app.append_request_content(id, "partial response", false)
+            .unwrap();
+        app.action_tx
+            .send(Action::StreamResponse(id, " already queued".into()))
+            .unwrap();
+        app.lock_application().expect("request ordinary lock");
+        let paths = crate::storage::paths::TcuiDataPaths::discover();
+        let backup = paths.root.join("chats-save-failure-backup");
+        std::fs::rename(&paths.chats_dir, &backup).expect("retain fixture chats");
+        std::fs::write(&paths.chats_dir, b"temporary save obstruction")
+            .expect("inject save failure");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let error = runtime
+            .block_on(app.quiesce_for_security_restart())
+            .expect_err("save must fail");
+        assert!(app.recover_security_restart(&error));
+        assert!(crate::protection::is_unlocked().unwrap());
+        assert!(crate::protection::require_app().is_ok());
+        assert!(!app.ui.protection_blocked);
+        assert!(app.security_restart.is_none());
+        assert!(app.requests[&id].messages[1]
+            .content
+            .contains("partial response already queued"));
+
+        std::fs::remove_file(&paths.chats_dir).expect("remove fixture obstruction");
+        std::fs::rename(&backup, &paths.chats_dir).expect("restore fixture chats");
+        app.lock_application().expect("retry ordinary lock");
+        runtime
+            .block_on(app.quiesce_for_security_restart())
+            .expect("retry save");
+        assert!(app.requests.is_empty());
+        assert_eq!(
+            app.storage.get_messages(conversation).unwrap()[1].content,
+            "partial response already queued\n\n[Response cancelled]"
+        );
+    });
+}
+
+#[test]
+fn forced_revocation_never_recovers_into_the_cached_application() {
+    with_test_app("security-forced-revocation", |app| {
+        app.lock_application_after_error("credential authentication failed".into());
+        let error = color_eyre::eyre::eyre!("partial response could not be saved");
+        assert!(!app.recover_security_restart(&error));
+        assert!(app.ui.protection_blocked);
+        assert_eq!(
+            app.security_restart,
+            Some(crate::protection::ui::SecurityRestart::Lock)
+        );
+    });
 }
 
 #[test]

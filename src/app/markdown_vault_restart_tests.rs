@@ -48,7 +48,11 @@ fn markdown_vault_restart_persists_profiles_and_default_but_not_workspace_tabs()
     let first = VaultProfile::new("First", &first_root).expect("create first profile");
     let second = VaultProfile::new("Second", &second_root).expect("create second profile");
     let second_id = second.id.clone();
-    let mut catalog = VaultCatalog::default();
+    let initial = AppConfig::load().expect("load normalized built-in profile");
+    let mut catalog = VaultCatalog {
+        profiles: initial.vaults,
+        default_id: initial.default_vault_id,
+    };
     catalog.add(first).expect("persist first profile");
     catalog.add(second).expect("persist second profile");
     catalog

@@ -54,8 +54,14 @@ fn cancelled_after_http_before_persist_preserves_prior_key(
 
     // When
     handle.cancel();
-    let error = persist_exchanged_key(&config, exchanged_key, &cancellation)
-        .expect_err("cancelled persistence must not upsert a credential");
+    let error = persist_exchanged_key(
+        &config,
+        exchanged_key,
+        &cancellation,
+        "OpenRouter OAuth",
+        None,
+    )
+    .expect_err("cancelled persistence must not upsert a credential");
     let retained = KeyStore::get_credential(&config, "OpenRouter OAuth")?;
     let retained_bytes = std::fs::read(environment.key_file())?;
 

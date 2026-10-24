@@ -24,6 +24,18 @@ const CURRENT_STORE_VERSION: u32 = 1;
 
 pub struct KeyStore;
 
+/// Connection identity stays separate from its provider family and display label.
+pub(crate) fn provider_base_name(provider: &str) -> &str {
+    match provider.rsplit_once("::") {
+        Some((base, suffix))
+            if matches!(suffix.split(':').next(), Some("encrypted" | "plaintext")) =>
+        {
+            base
+        }
+        _ => provider,
+    }
+}
+
 impl KeyStore {
     pub fn new() -> Self {
         Self
@@ -33,11 +45,86 @@ impl KeyStore {
         _config: &AppConfig,
         provider: &str,
     ) -> std::result::Result<bool, KeyStoreError> {
-        let _keys = vault::session()?;
-        Vault::open()?.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM tcui_credentials WHERE id=?1 AND kind IN ('api_key','api_key_owned','oauth'))",
-            [provider], |row| row.get(0),
-        ).map_err(|_| KeyStoreError::Read)
+        Ok(Self::provider_storage(_config, provider)?.is_some())
+    }
+
+    /// Returns storage metadata without decrypting or requiring an unlocked vault.
+    pub fn provider_storage(
+        _config: &AppConfig,
+        provider: &str,
+    ) -> std::result::Result<Option<CredentialStorage>, KeyStoreError> {
+        Vault::open()?.provider_storage(provider)
+    }
+
+    /// Finds a separate identity when changing storage, never replacing another connection.
+    pub(crate) fn connection_id(
+        _config: &AppConfig,
+        provider: &str,
+        storage: CredentialStorage,
+    ) -> std::result::Result<String, KeyStoreError> {
+        let store = Vault::open()?;
+        if store
+            .provider_storage(provider)?
+            .is_none_or(|existing| existing == storage)
+        {
+            return Ok(provider.to_owned());
+        }
+        let base = provider_base_name(provider);
+        let suffix = if storage == CredentialStorage::Encrypted {
+            "encrypted"
+        } else {
+            "plaintext"
+        };
+        let mut candidate = format!("{base}::{suffix}");
+        let mut number = 2_u64;
+        while store
+            .provider_storage(&candidate)?
+            .is_some_and(|existing| existing != storage)
+        {
+            candidate = format!("{base}::{suffix}:{number}");
+            number = number
+                .checked_add(1)
+                .ok_or(KeyStoreError::InvalidCredentialPayload)?;
+        }
+        Ok(candidate)
+    }
+
+    /// Changes the default for new records only; existing credentials are untouched.
+    pub fn set_storage_default(
+        _config: &AppConfig,
+        storage: CredentialStorage,
+    ) -> std::result::Result<(), KeyStoreError> {
+        Vault::open()?.set_default(storage)
+    }
+
+    pub(crate) fn protection_key(
+        create: bool,
+    ) -> std::result::Result<Zeroizing<[u8; 32]>, KeyStoreError> {
+        let keys = vault::session()?;
+        let store = Vault::open()?;
+        store.require_key(&keys)?;
+        store.transaction(|| {
+            if let Some(payload) = store.read("app_data_key", "master", &keys)? {
+                let bytes: [u8; 32] = payload
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| KeyStoreError::InvalidCredentialPayload)?;
+                return Ok(Zeroizing::new(bytes));
+            }
+            if !create {
+                return Err(KeyStoreError::InvalidCredentialPayload);
+            }
+            let key = Zeroizing::new(rand::random::<[u8; 32]>());
+            store.write(
+                "app_data_key",
+                "master",
+                "Application data key",
+                key.as_ref(),
+                CredentialStorage::Encrypted,
+                &keys,
+            )?;
+            Ok(key)
+        })
     }
 
     pub fn vault_status(config: &AppConfig) -> std::result::Result<VaultStatus, KeyStoreError> {
@@ -95,6 +182,7 @@ impl KeyStore {
         ))
     }
 
+    #[cfg(test)]
     pub fn set(
         _config: &AppConfig,
         provider: &str,
@@ -111,7 +199,36 @@ impl KeyStore {
                 provider,
                 provider,
                 key.trim().as_bytes(),
-                store.preference()?,
+                store.selected_storage(provider, None)?,
+                &keys,
+            )
+        })
+    }
+
+    pub fn set_with_storage(
+        _config: &AppConfig,
+        provider: &str,
+        key: &str,
+        storage: CredentialStorage,
+    ) -> std::result::Result<(), KeyStoreError> {
+        if key.trim().is_empty() {
+            return Err(KeyStoreError::InvalidCredentialPayload);
+        }
+        let keys = vault::session()?;
+        let store = Vault::open()?;
+        store.transaction(|| {
+            if store
+                .provider_storage(provider)?
+                .is_some_and(|existing| existing != storage)
+            {
+                return Err(KeyStoreError::InvalidCredentialPayload);
+            }
+            store.write(
+                "api_key",
+                provider,
+                provider,
+                key.trim().as_bytes(),
+                storage,
                 &keys,
             )
         })
@@ -150,6 +267,21 @@ impl KeyStore {
         _config: &AppConfig,
         credential: &OAuthCredential,
     ) -> std::result::Result<(), KeyStoreError> {
+        Self::write_oauth(credential, None)
+    }
+
+    pub(crate) fn upsert_oauth_with_storage(
+        _config: &AppConfig,
+        credential: &OAuthCredential,
+        storage: CredentialStorage,
+    ) -> std::result::Result<(), KeyStoreError> {
+        Self::write_oauth(credential, Some(storage))
+    }
+
+    fn write_oauth(
+        credential: &OAuthCredential,
+        storage: Option<CredentialStorage>,
+    ) -> std::result::Result<(), KeyStoreError> {
         credential.validate()?;
         let keys = vault::session()?;
         let store = Vault::open()?;
@@ -163,9 +295,54 @@ impl KeyStore {
                 &credential.provider,
                 &credential.provider,
                 &payload,
-                store.preference()?,
+                store.selected_storage(&credential.provider, storage)?,
                 &keys,
             )
+        })
+    }
+
+    /// Replaces only the credential a refresh actually used, preserving its storage.
+    pub(crate) fn replace_oauth_if_current(
+        _config: &AppConfig,
+        expected: &OAuthCredential,
+        replacement: &OAuthCredential,
+        is_current: impl FnOnce() -> bool,
+    ) -> std::result::Result<bool, KeyStoreError> {
+        replacement.validate()?;
+        if replacement.provider != expected.provider {
+            return Err(KeyStoreError::ProviderMismatch);
+        }
+        let keys = vault::session()?;
+        let store = Vault::open()?;
+        store.transaction(|| {
+            if !is_current() {
+                return Ok(false);
+            }
+            let Some(payload) = store.read("oauth", &expected.provider, &keys)? else {
+                return Ok(false);
+            };
+            let current = OAuthCredential::from_payload(
+                serde_json::from_slice(&payload).map_err(|_| KeyStoreError::InvalidOauthPayload)?,
+            )?;
+            if current != *expected {
+                return Ok(false);
+            }
+            let storage = store
+                .provider_storage(&expected.provider)?
+                .ok_or(KeyStoreError::InvalidOauthPayload)?;
+            let payload = Zeroizing::new(
+                serde_json::to_vec(&StoredOAuthCredential::from(replacement))
+                    .map_err(|_| KeyStoreError::Serialize)?,
+            );
+            store.write(
+                "oauth",
+                &replacement.provider,
+                &replacement.provider,
+                &payload,
+                storage,
+                &keys,
+            )?;
+            Ok(true)
         })
     }
 
@@ -401,4 +578,4 @@ mod oauth_persistence_tests;
 #[cfg(test)]
 mod parent_security_tests;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;

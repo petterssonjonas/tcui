@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::Path;
 
 use super::atomic::{sync_directory, AtomicWriteTarget};
@@ -63,19 +62,27 @@ impl ChatSavedFileStore {
         conversation_id: i64,
     ) -> Result<(), ChatFileError> {
         validate_conversation_id(conversation_id)?;
-        crate::storage::paths::ensure_directory(&self.paths.chat_file_links_dir)?;
+        crate::protection::require(crate::protection::Domain::Vault)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        crate::protection::open_directory(&self.paths.chat_file_links_dir, true)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let empty = crate::protection::encode(crate::protection::Domain::Vault, b"")
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
         self.writer.write_replace(
             &self.orphan_marker_path(conversation_id),
-            b"",
+            &empty,
             AtomicWriteTarget::OrphanMarker,
         )
     }
 
     pub(crate) fn cleanup_orphans(&self) -> Result<usize, ChatFileError> {
+        crate::protection::require(crate::protection::Domain::Vault)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
         let _lock = GlobalLinkLock::acquire(&self.paths)?;
-        crate::storage::paths::ensure_directory(&self.paths.chat_file_links_dir)?;
+        let directory = crate::protection::open_directory(&self.paths.chat_file_links_dir, true)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
         let mut markers = Vec::new();
-        for entry in fs::read_dir(&self.paths.chat_file_links_dir)? {
+        for entry in directory.entries()? {
             let entry = entry?;
             if !entry.file_type()?.is_file() {
                 continue;
@@ -90,13 +97,13 @@ impl ChatSavedFileStore {
                 continue;
             };
             if conversation_id > 0 {
-                markers.push((conversation_id, entry.path()));
+                markers.push((conversation_id, entry.file_name()));
             }
         }
         markers.sort_by_key(|(conversation_id, _)| *conversation_id);
         for (conversation_id, marker) in &markers {
             self.remove_conversation_links_locked(*conversation_id)?;
-            fs::remove_file(marker)?;
+            directory.remove_file(marker)?;
             sync_directory(&self.paths.chat_file_links_dir)?;
         }
         Ok(markers.len())
@@ -130,7 +137,14 @@ impl ChatSavedFileStore {
         let target = self.saved_path(filename);
         self.target_is_regular(&target)?;
         let tombstone = self.allocate_tombstone(filename);
-        fs::rename(&target, &tombstone)?;
+        let directory = self.open_saved_root()?;
+        directory.rename(
+            target.file_name().ok_or(ChatFileError::InvalidFileName)?,
+            &directory,
+            tombstone
+                .file_name()
+                .ok_or(ChatFileError::InvalidFileName)?,
+        )?;
         sync_directory(&self.saved_root)?;
 
         let prior = manifest;
@@ -167,10 +181,19 @@ impl ChatSavedFileStore {
         target: &Path,
         operation: &'static str,
     ) -> Result<(), ChatFileError> {
-        fs::rename(tombstone, target).map_err(|rollback| ChatFileError::RollbackFailed {
-            operation,
-            rollback,
-        })?;
+        let directory = self.open_saved_root()?;
+        directory
+            .rename(
+                tombstone
+                    .file_name()
+                    .ok_or(ChatFileError::InvalidFileName)?,
+                &directory,
+                target.file_name().ok_or(ChatFileError::InvalidFileName)?,
+            )
+            .map_err(|rollback| ChatFileError::RollbackFailed {
+                operation,
+                rollback,
+            })?;
         sync_directory(&self.saved_root)
     }
 
@@ -196,7 +219,11 @@ impl ChatSavedFileStore {
         {
             return Err(ChatFileError::InjectedTombstoneRemoveFailure);
         }
-        fs::remove_file(tombstone)?;
+        self.open_saved_root()?.remove_file(
+            tombstone
+                .file_name()
+                .ok_or(ChatFileError::InvalidFileName)?,
+        )?;
         Ok(())
     }
 

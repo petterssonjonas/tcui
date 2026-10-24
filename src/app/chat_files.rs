@@ -19,6 +19,7 @@ impl TuiApp {
         completion.message.conversation_id = route.destination_conversation_id;
         completion.message.request = Some(route);
         let source_content = completion.message.content.clone();
+        let mut artifact_error = None;
         let import_media = match completion.generated_file {
             crate::app::action::GeneratedFileFinalization::NotRequested => {
                 route.destination_conversation_id > 0
@@ -34,10 +35,10 @@ impl TuiApp {
                         true
                     }
                     Err(error) => {
-                        completion.message.content = "Could not save generated file.".to_string();
                         self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::Failed;
                         self.ui.connection_message =
                             Some(format!("Generated file save failed: {error}"));
+                        artifact_error = Some(error);
                         false
                     }
                 }
@@ -78,7 +79,10 @@ impl TuiApp {
         for index in 0..self.ui.tabs.len() {
             self.refresh_tab_conversations(index)?;
         }
-        Ok(())
+        match artifact_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     pub(crate) fn persist_generated_file(
@@ -166,7 +170,7 @@ impl TuiApp {
                 continue;
             };
             if conversation_id < 0 {
-                let bytes = std::fs::read(&path)?;
+                let bytes = crate::vault::read_artifact_path(&path)?;
                 let name = path
                     .file_name()
                     .and_then(|name| name.to_str())

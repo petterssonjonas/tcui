@@ -47,6 +47,42 @@ fn launcher_zero_one_many_profiles_choose_deterministically() {
 }
 
 #[test]
+fn launcher_activates_explicit_external_default_with_builtin_present() {
+    let root = TestDir::new("launcher-external-default");
+    let external = root.child("external");
+    let mut catalog = VaultCatalog::default();
+    let internal_id = catalog
+        .add(VaultProfile::internal())
+        .expect("add internal profile");
+    let external_id = add_profile(&mut catalog, "ZZ External", &external);
+    catalog
+        .set_default(&external_id)
+        .expect("set external default");
+    let mut tabs = AppTabs::default();
+    let launcher_id = tabs.add_launcher();
+
+    let LauncherEntry::Choose(mut chooser) =
+        launcher_entry(&catalog, launcher_id, root.path()).expect("chooser")
+    else {
+        panic!("builtin and external profiles must open chooser");
+    };
+
+    assert_eq!(chooser.selected_profile_id(), Some(&external_id));
+    assert_eq!(
+        chooser.handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &HashSet::new(),
+        ),
+        crate::tui::vault_profile_ui::VaultProfileUiCommand::Activate {
+            launcher_id,
+            profile_id: external_id.clone(),
+        }
+    );
+    assert_eq!(chooser.catalog().default_id, Some(external_id));
+    assert!(chooser.catalog().get(&internal_id).is_some());
+}
+
+#[test]
 fn launcher_replacement_preserves_id_and_existing_profile_is_focused() {
     // Given
     let root = TestDir::new("launcher-activation");

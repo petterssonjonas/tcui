@@ -44,21 +44,15 @@ impl TuiApp {
     }
 
     fn read_saved_artifact(&self, path: &Path) -> Result<Vec<u8>, InsertArtifactError> {
-        let root = canonical(&self.export_base_dir())?;
-        let path = canonical(path)?;
-        if !path.starts_with(root) {
-            return Err(InsertArtifactError::Unavailable);
-        }
-        std::fs::read(path).map_err(|_| InsertArtifactError::Unavailable)
+        self.chat_files
+            .read_saved_path(path)
+            .map_err(|_| InsertArtifactError::Unavailable)
     }
 
     #[cfg(feature = "memory")]
     fn read_memory_artifact(&self, path: &Path) -> Result<Vec<u8>, InsertArtifactError> {
-        let store = crate::memory::MemoryStore::open(
-            &self.memory_vault_root(),
-            &crate::memory::MemoryStore::default_cache_path(),
-        )
-        .map_err(|_| InsertArtifactError::Unavailable)?;
+        let store = crate::memory::MemoryStore::open_default()
+            .map_err(|_| InsertArtifactError::Unavailable)?;
         store
             .read(path)
             .map(String::into_bytes)
@@ -81,15 +75,6 @@ impl TuiApp {
             .read_file(path)
             .map(String::into_bytes)
             .map_err(|_| InsertArtifactError::Unavailable)
-    }
-
-    #[cfg(feature = "memory")]
-    fn memory_vault_root(&self) -> PathBuf {
-        self.configured_document_vault_root().unwrap_or_else(|_| {
-            crate::storage::paths::TcuiDataPaths::discover()
-                .root
-                .join("vault")
-        })
     }
 
     fn configured_document_vault_root(&self) -> Result<PathBuf, InsertArtifactError> {

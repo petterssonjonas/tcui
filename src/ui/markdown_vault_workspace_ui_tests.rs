@@ -94,6 +94,9 @@ fn rendered(terminal: &Terminal<TestBackend>) -> String {
 
 #[test]
 fn markdown_vault_workspace_ui_two_tabs_keep_tree_viewer_and_editor_state_independent() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = UiFixture::new("independent-state");
     let (_tabs, mut workspaces, first_tab, second_tab) = fixture.activate_two();
     let first = workspaces.get_mut_for_test(first_tab).expect("first state");
@@ -116,6 +119,9 @@ fn markdown_vault_workspace_ui_two_tabs_keep_tree_viewer_and_editor_state_indepe
 
 #[test]
 fn markdown_vault_workspace_ui_binary_metadata_is_visible_and_edit_is_blocked() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = UiFixture::new("binary");
     let (_tabs, mut workspaces, first_tab, _second_tab) = fixture.activate_two();
     let state = workspaces.get_mut_for_test(first_tab).expect("first state");
@@ -135,6 +141,9 @@ fn markdown_vault_workspace_ui_binary_metadata_is_visible_and_edit_is_blocked() 
 
 #[test]
 fn markdown_vault_workspace_ui_render_replaces_chat_chrome_but_keeps_top_bar_and_footer() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = UiFixture::new("render");
     let mut ui = UI::new();
     let launcher = ui.app_tabs.add_launcher();
@@ -175,6 +184,9 @@ fn markdown_vault_workspace_ui_render_replaces_chat_chrome_but_keeps_top_bar_and
 
 #[test]
 fn markdown_vault_workspace_ui_tiny_terminal_keeps_minimum_size_guard() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = UiFixture::new("tiny");
     let mut ui = UI::new();
     let launcher = ui.app_tabs.add_launcher();
@@ -197,6 +209,9 @@ fn markdown_vault_workspace_ui_tiny_terminal_keeps_minimum_size_guard() {
 
 #[test]
 fn markdown_vault_workspace_ui_keyboard_cycles_visible_panes_and_scrolls_focused_viewer() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = UiFixture::new("keyboard");
     let (_tabs, mut workspaces, first_tab, _second_tab) = fixture.activate_two();
     let state = workspaces.get_mut_for_test(first_tab).expect("first state");
@@ -215,6 +230,9 @@ fn markdown_vault_workspace_ui_keyboard_cycles_visible_panes_and_scrolls_focused
 
 #[test]
 fn markdown_vault_workspace_ui_finished_editor_returns_focus_to_viewer() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = UiFixture::new("finished-editor");
     let (_tabs, mut workspaces, first_tab, _second_tab) = fixture.activate_two();
     let (mut editor, _probe) =
@@ -236,6 +254,9 @@ fn markdown_vault_workspace_ui_finished_editor_returns_focus_to_viewer() {
 
 #[test]
 fn markdown_vault_workspace_ui_profile_dropdown_routes_selected_rebind() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = UiFixture::new("profile-dropdown");
     let (_tabs, mut workspaces, first_tab, _second_tab) = fixture.activate_two();
     let state = workspaces.get_mut_for_test(first_tab).expect("first state");

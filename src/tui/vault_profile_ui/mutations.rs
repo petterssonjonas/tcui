@@ -126,6 +126,9 @@ impl VaultProfileManagerState {
                 .into(),
             );
         };
+        if current.root == crate::protection::internal_vault_root() {
+            return self.fail(VaultProfileError::BuiltinProfile.into());
+        }
         let replacement =
             match VaultProfile::from_persisted(id.clone(), &current.display_name, root) {
                 Ok(profile) if profile.available => profile,

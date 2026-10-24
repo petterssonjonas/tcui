@@ -203,6 +203,54 @@ impl Vault {
         })
     }
 
+    pub fn provider_storage(&self, id: &str) -> Result<Option<CredentialStorage>> {
+        let encrypted: Option<bool> = self.conn.query_row(
+            "SELECT MAX(encrypted) FROM tcui_credentials WHERE id=?1 AND kind IN ('api_key','api_key_owned','oauth')",
+            [id], |row| row.get(0),
+        ).map_err(|_| KeyStoreError::Read)?;
+        Ok(encrypted.map(|encrypted| {
+            if encrypted {
+                CredentialStorage::Encrypted
+            } else {
+                CredentialStorage::Plaintext
+            }
+        }))
+    }
+
+    pub fn selected_storage(
+        &self,
+        id: &str,
+        selected: Option<CredentialStorage>,
+    ) -> Result<CredentialStorage> {
+        if let Some(storage) = self.provider_storage(id)? {
+            if selected.is_some_and(|selected| selected != storage) {
+                return Err(KeyStoreError::InvalidCredentialPayload);
+            }
+            return Ok(storage);
+        }
+        if let Some(storage) = selected {
+            return Ok(storage);
+        }
+        match id
+            .rsplit_once("::")
+            .and_then(|(_, suffix)| suffix.split(':').next())
+        {
+            Some("encrypted") => Ok(CredentialStorage::Encrypted),
+            Some("plaintext") => Ok(CredentialStorage::Plaintext),
+            _ => self.preference(),
+        }
+    }
+
+    pub fn set_default(&self, storage: CredentialStorage) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE tcui_credential_vault SET preference=?1 WHERE singleton=1",
+                [storage == CredentialStorage::Encrypted],
+            )
+            .map_err(|_| KeyStoreError::Write)?;
+        Ok(())
+    }
+
     pub fn require_key<'a>(&self, keys: &'a UnlockKeys) -> Result<&'a [u8; 32]> {
         keys.get(&self.path)
             .map(|key| &**key)
@@ -450,7 +498,7 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Record> {
 }
 
 pub(super) fn is_machine_kind(kind: &str) -> bool {
-    matches!(kind, "machine_password" | "ssh_key")
+    matches!(kind, "machine_password" | "ssh_key" | "app_data_key")
 }
 
 fn derive_key(password: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>> {

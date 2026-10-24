@@ -187,8 +187,10 @@ async fn documented_code_creation_exchange_resolve_and_local_logout_round_trip(
     ))
     .await?;
     let stored = KeyStore::get_credential(&config, "OpenRouter OAuth")?;
-    let removed = crate::llm::auth::openrouter::OpenRouterAdapter::logout(&config)?;
-    let removed_again = crate::llm::auth::openrouter::OpenRouterAdapter::logout(&config)?;
+    let removed =
+        crate::llm::auth::openrouter::OpenRouterAdapter::logout(&config, "OpenRouter OAuth")?;
+    let removed_again =
+        crate::llm::auth::openrouter::OpenRouterAdapter::logout(&config, "OpenRouter OAuth")?;
     let requests = fixture.finish().await?;
 
     // Then

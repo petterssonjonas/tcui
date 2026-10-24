@@ -104,6 +104,7 @@ fn bootstrap_layout(_config: &AppConfig) -> Result<()> {
         std::fs::create_dir_all(config_root.join(dir))?;
     }
     std::fs::create_dir_all(data_root())?;
+    crate::storage::paths::ensure_directory(&crate::protection::internal_vault_root())?;
     Ok(())
 }
 

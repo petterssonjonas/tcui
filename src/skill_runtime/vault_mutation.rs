@@ -18,6 +18,7 @@ pub(crate) enum VaultMutationAction {
     Write,
     Restore,
     Move,
+    Copy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +26,7 @@ pub(crate) enum VaultMutationTool {
     Write,
     Restore,
     Move,
+    Copy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,9 +47,23 @@ impl VaultMutationAuthorization {
             ("write", VaultMutationAction::Write),
             ("restore", VaultMutationAction::Restore),
             ("move", VaultMutationAction::Move),
+            ("copy", VaultMutationAction::Copy),
         ]
         .into_iter()
-        .filter_map(|(verb, action)| words.contains(verb).then_some(action))
+        .filter_map(|(verb, action)| {
+            let present = if action == VaultMutationAction::Copy {
+                user_request.split_whitespace().any(|token| {
+                    token
+                        .trim_matches(|c: char| {
+                            !c.is_alphanumeric() && !matches!(c, '.' | '/' | '\\')
+                        })
+                        .eq_ignore_ascii_case("copy")
+                })
+            } else {
+                words.contains(verb)
+            };
+            present.then_some(action)
+        })
         .collect::<Vec<_>>();
         match actions.as_slice() {
             [] => Ok(None),
@@ -81,6 +97,7 @@ impl VaultMutationAuthorization {
             (VaultMutationAction::Write, VaultMutationTool::Write)
                 | (VaultMutationAction::Restore, VaultMutationTool::Restore)
                 | (VaultMutationAction::Move, VaultMutationTool::Move)
+                | (VaultMutationAction::Copy, VaultMutationTool::Copy)
         )
     }
 }
@@ -109,29 +126,34 @@ pub(crate) fn tool_catalog(authorization: VaultMutationAuthorization) -> Vec<Val
                 "required": ["path", "backup"]
             }
         })],
-        VaultMutationAction::Move => vec![serde_json::json!({
-            "name": "move_notes",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "moves": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "source_profile": {"type": "string"},
-                                "source_path": {"type": "string"},
-                                "destination_profile": {"type": "string"},
-                                "destination_path": {"type": "string"}
-                            },
-                            "required": ["source_profile", "source_path", "destination_profile", "destination_path"]
-                        }
-                    }
-                },
-                "required": ["moves"]
-            }
-        })],
+        VaultMutationAction::Move => vec![transfer_tool("move_notes", "moves")],
+        VaultMutationAction::Copy => vec![transfer_tool("copy_notes", "copies")],
     }
+}
+
+fn transfer_tool(name: &str, collection: &str) -> Value {
+    serde_json::json!({
+        "name": name,
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                (collection): {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "source_profile": {"type": "string"},
+                            "source_path": {"type": "string"},
+                            "destination_profile": {"type": "string"},
+                            "destination_path": {"type": "string"}
+                        },
+                        "required": ["source_profile", "source_path", "destination_profile", "destination_path"]
+                    }
+                }
+            },
+            "required": [collection]
+        }
+    })
 }
 
 pub(crate) fn build_kind(
@@ -148,6 +170,7 @@ pub(crate) fn build_kind(
         "write_note" => VaultMutationTool::Write,
         "restore_note" => VaultMutationTool::Restore,
         "move_notes" => VaultMutationTool::Move,
+        "copy_notes" => VaultMutationTool::Copy,
         _ => {
             return Err(eyre!(
                 "planner selected an unauthorized Vault mutation tool"
@@ -182,22 +205,28 @@ pub(crate) fn build_kind(
                 backup,
             )?))
         }
-        VaultMutationTool::Move => {
+        VaultMutationTool::Move | VaultMutationTool::Copy => {
+            let collection = if tool == VaultMutationTool::Copy {
+                "copies"
+            } else {
+                "moves"
+            };
             let moves = plan
                 .arguments
-                .get("moves")
+                .get(collection)
                 .cloned()
-                .ok_or_else(|| eyre!("missing moves argument"))?;
+                .ok_or_else(|| eyre!("missing {collection} argument"))?;
             let moves: Vec<MoveInput> = serde_json::from_value(moves)?;
             let pairs = moves
                 .into_iter()
                 .map(|input| input.into_pair(&catalog, authorization.overwrite_allowed))
                 .collect::<Result<Vec<_>>>()?;
-            Ok(VaultMutationKind::Move(MovePlan::build(
-                pairs,
-                &catalog,
-                |_| false,
-            )?))
+            let transfer = if tool == VaultMutationTool::Copy {
+                MovePlan::build_copy(pairs, &catalog, |_| false)?
+            } else {
+                MovePlan::build(pairs, &catalog, |_| false)?
+            };
+            Ok(VaultMutationKind::Move(transfer))
         }
     }
 }

@@ -6,6 +6,8 @@ use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+#[cfg(unix)]
+use cap_std::fs::OpenOptionsExt as _;
 use cap_std::fs::{Dir, OpenOptions};
 
 use crate::config::vault_profiles::{VaultCatalog, VaultProfileId};
@@ -145,8 +147,10 @@ impl<'a> MoveExecutor<'a> {
         }
         self.transition(guard, journal, MoveJournalState::DestinationsCommitted)?;
         self.transition(guard, journal, MoveJournalState::SourcesRemoving)?;
-        for index in 0..plan.file_count() {
-            self.remove_source(guard, plan, journal, index)?;
+        if !plan.copy_only() {
+            for index in 0..plan.file_count() {
+                self.remove_source(guard, plan, journal, index)?;
+            }
         }
         self.complete_backups(guard, journal)?;
         self.transition(guard, journal, MoveJournalState::Complete)
@@ -275,15 +279,36 @@ impl<'a> MoveExecutor<'a> {
         journal.artifacts[index].staged_path = Some(staged_path.clone());
         self.persist_artifacts(guard, journal)?;
         let root = self.open_profile(pair.destination().profile_id())?;
+        let destination_root = &self
+            .catalog
+            .get(pair.destination().profile_id())
+            .ok_or_else(|| VaultWriteError::UnknownProfile {
+                profile_id: pair.destination().profile_id().to_string(),
+            })?
+            .root;
+        let source_bytes = super::encode_root(
+            &destination_root.join(pair.destination().path().as_path()),
+            &source_bytes,
+        )
+        .map_err(|source| io_error("encrypt stage", staged_path.as_path(), source))?;
         let (parent, name) = open_parent(&root, staged_path.as_path(), true)?;
         let mut options = OpenOptions::new();
         options
             .write(true)
             .create_new(true)
             .follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        options.mode(0o600);
         let mut staged = parent
             .open_with(&name, &options)
             .map_err(|source| io_error("create stage for", staged_path.as_path(), source))?;
+        journal.artifacts[index].staged_identity =
+            Some(super::move_journal::StageIdentity::capture(
+                &staged
+                    .metadata()
+                    .map_err(|source| io_error("identify stage", staged_path.as_path(), source))?,
+            ));
+        self.persist_artifacts(guard, journal)?;
         maybe_fail(FailurePoint::StageWrite)?;
         staged
             .write_all(&source_bytes)
@@ -388,7 +413,14 @@ impl<'a> MoveExecutor<'a> {
         opened
             .read_to_end(&mut bytes)
             .map_err(|source| io_error("read", file.path().as_path(), source))?;
-        Ok(bytes)
+        let profile =
+            self.catalog
+                .get(file.profile_id())
+                .ok_or_else(|| VaultWriteError::UnknownProfile {
+                    profile_id: file.profile_id().to_string(),
+                })?;
+        super::decode_root(&profile.root.join(file.path().as_path()), bytes)
+            .map_err(|source| io_error("decrypt", file.path().as_path(), source))
     }
 
     fn open_profile(&self, profile_id: &VaultProfileId) -> Result<Dir, MoveExecuteError> {
@@ -398,8 +430,15 @@ impl<'a> MoveExecutor<'a> {
                 .ok_or_else(|| VaultWriteError::UnknownProfile {
                     profile_id: profile_id.to_string(),
                 })?;
-        Dir::open_ambient_dir(&profile.root, cap_std::ambient_authority())
-            .map_err(|source| io_error("open profile", &profile.root, source))
+        super::require_root(&profile.root)
+            .map_err(|source| io_error("unlock before accessing", &profile.root, source))?;
+        crate::protection::open_directory(&profile.root, false).map_err(|error| {
+            io_error(
+                "open profile",
+                &profile.root,
+                io::Error::other(error.to_string()),
+            )
+        })
     }
 }
 

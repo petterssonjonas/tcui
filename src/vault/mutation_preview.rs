@@ -52,6 +52,9 @@ fn move_preview(
     catalog: &VaultCatalog,
 ) -> Result<VaultMutationPreview, VaultMutationPlanError> {
     let mut rows = Vec::with_capacity(plan.file_count().saturating_mul(2).saturating_add(1));
+    if plan.copy_only() {
+        rows.push("Copy files; source documents and their chat links remain unchanged".to_string());
+    }
     let mut confirm_enabled = true;
     for ((pair, precondition), collision) in plan
         .pairs()

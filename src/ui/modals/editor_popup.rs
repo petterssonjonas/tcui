@@ -14,25 +14,20 @@ use crate::vault::ValidatedEditorTarget;
 
 pub struct EditorPopupState {
     artifact_name: String,
-    chat_draft_path: Option<PathBuf>,
+    chat_draft: Option<ChatDraftFile>,
     terminal: TerminalEditorState,
     close_hit_area: Option<Rect>,
 }
 
 impl EditorPopupState {
+    pub fn new_chat_draft(content: &str, area: Rect) -> Result<Self, String> {
+        let draft = ChatDraftFile::new(content).map_err(|error| error.to_string())?;
+        let mut popup = Self::new(draft.path(), area)?;
+        popup.chat_draft = Some(draft);
+        Ok(popup)
+    }
+
     pub fn new(path: &Path, area: Rect) -> Result<Self, String> {
-        Self::new_with_chat_draft(path, None, area)
-    }
-
-    pub fn new_chat_draft(path: &Path, area: Rect) -> Result<Self, String> {
-        Self::new_with_chat_draft(path, Some(path.to_path_buf()), area)
-    }
-
-    fn new_with_chat_draft(
-        path: &Path,
-        chat_draft_path: Option<PathBuf>,
-        area: Rect,
-    ) -> Result<Self, String> {
         let artifact_name = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -46,7 +41,7 @@ impl EditorPopupState {
             .map_err(|error| error.to_string())?;
         Ok(Self {
             artifact_name,
-            chat_draft_path,
+            chat_draft: None,
             terminal,
             close_hit_area: None,
         })
@@ -142,21 +137,65 @@ impl EditorPopupState {
         self.close_hit_area
     }
 
-    pub fn chat_draft_path(&self) -> Option<&Path> {
-        self.chat_draft_path.as_deref()
-    }
-
-    /// Takes the draft path so `Drop` will not delete the file before the caller reads it.
-    pub fn take_chat_draft_path(&mut self) -> Option<PathBuf> {
-        self.chat_draft_path.take()
+    /// Retains ownership of the private draft until the caller has imported its contents.
+    pub(crate) fn take_chat_draft(&mut self) -> Option<ChatDraftFile> {
+        self.chat_draft.take()
     }
 }
 
 impl Drop for EditorPopupState {
     fn drop(&mut self) {
-        if let Some(path) = &self.chat_draft_path {
-            let _ = std::fs::remove_file(path);
+        self.terminal.confirm_close();
+    }
+}
+
+pub(crate) struct ChatDraftFile {
+    directory: PathBuf,
+    path: PathBuf,
+}
+
+impl ChatDraftFile {
+    fn new(content: &str) -> std::io::Result<Self> {
+        use std::io::Write;
+        let directory =
+            std::env::temp_dir().join(format!("tcui-chat-draft-{:032x}", rand::random::<u128>()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
         }
+        builder.create(&directory)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let path = directory.join("draft.md");
+        let mut file = match options.open(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                let _ = std::fs::remove_dir(&directory);
+                return Err(error);
+            }
+        };
+        let draft = Self { directory, path };
+        file.write_all(content.as_bytes())?;
+        Ok(draft)
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ChatDraftFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        // Never recursively remove editor-created files or any directory we did not create.
+        let _ = std::fs::remove_dir(&self.directory);
     }
 }
 
@@ -208,6 +247,31 @@ mod tests {
     use tokio::runtime::Builder;
 
     #[test]
+    #[cfg(unix)]
+    fn chat_draft_file_is_private_and_cleanup_never_removes_editor_owned_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let draft = super::ChatDraftFile::new("private draft").expect("private draft");
+        let path = draft.path().to_path_buf();
+        let directory = path.parent().unwrap().to_path_buf();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "private draft");
+        let editor_owned = directory.join("editor-owned-file");
+        std::fs::write(&editor_owned, "keep").unwrap();
+        drop(draft);
+        assert!(!path.exists());
+        assert_eq!(std::fs::read_to_string(&editor_owned).unwrap(), "keep");
+        std::fs::remove_file(editor_owned).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
     fn markdown_vault_baseline_editor_content_stays_inside_inner_gutter() {
         let path = std::env::temp_dir().join("編輯器.md");
         std::fs::write(&path, "editor body\n").expect("write temp file");
@@ -227,7 +291,7 @@ mod tests {
             .expect("runtime");
         runtime.block_on(async {
             let area = Rect::new(0, 0, 80, 24);
-            let mut popup = EditorPopupState::new_chat_draft(&path, area).expect("popup state");
+            let mut popup = EditorPopupState::new(&path, area).expect("popup state");
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
             tokio::time::sleep(Duration::from_millis(20)).await;
             let _ = popup.poll_output();
@@ -276,7 +340,7 @@ mod tests {
             .expect("runtime");
         runtime.block_on(async {
             let area = Rect::new(0, 0, 4, 2);
-            let mut popup = EditorPopupState::new_chat_draft(&path, area).expect("popup state");
+            let mut popup = EditorPopupState::new(&path, area).expect("popup state");
             let mut terminal = Terminal::new(TestBackend::new(4, 2)).expect("test terminal");
             tokio::time::sleep(Duration::from_millis(20)).await;
             let _ = popup.poll_output();

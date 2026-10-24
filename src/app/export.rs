@@ -5,6 +5,7 @@ impl TuiApp {
         let Some(dialog) = self.ui.save_file_dialog.clone() else {
             return Ok(());
         };
+        self.require_artifact_access(&dialog.artifact.handle)?;
 
         let trimmed_path = dialog.path_input.trim();
         if trimmed_path.is_empty() {
@@ -17,21 +18,25 @@ impl TuiApp {
             std::path::Path::new(trimmed_path),
             dirs::home_dir().as_deref(),
         );
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            std::fs::create_dir_all(parent)?;
-        }
-        match &dialog.artifact.content {
-            Some(content) => std::fs::write(&path, content.as_bytes())?,
+        let bytes = match &dialog.artifact.content {
+            Some(content) => content.as_bytes().to_vec(),
             None => {
                 let Some(source) = &dialog.artifact.path else {
                     return Ok(());
                 };
-                std::fs::copy(source, &path)?;
+                match &dialog.artifact.handle {
+                    crate::ui::artifact_sidebar::ArtifactHandle::ChatFile {
+                        conversation_id,
+                        id,
+                    } => self.chat_files.open_link(*conversation_id, *id)?,
+                    crate::ui::artifact_sidebar::ArtifactHandle::Saved(path) => {
+                        self.chat_files.read_saved_path(path)?
+                    }
+                    _ => crate::vault::read_artifact_path(source)?,
+                }
             }
-        }
+        };
+        crate::vault::write_artifact_path(&path, &bytes)?;
 
         self.ui.save_file_dialog = None;
         self.promote_temporary_artifact_if_vault_path(&dialog.artifact.handle, &path);
@@ -42,18 +47,8 @@ impl TuiApp {
     }
 
     pub(crate) fn export_base_dir(&self) -> std::path::PathBuf {
-        self.config
-            .try_read()
-            .ok()
-            .and_then(|cfg| cfg.saved_files_dir.clone())
-            .map(|path| {
-                crate::app::generated_file::expand_user_path(
-                    std::path::Path::new(&path),
-                    dirs::home_dir().as_deref(),
-                )
-            })
-            .or_else(dirs::download_dir)
-            .or_else(|| std::env::current_dir().ok())
+        dirs::download_dir()
+            .or_else(dirs::home_dir)
             .unwrap_or_else(|| std::path::PathBuf::from("."))
     }
 
@@ -88,6 +83,10 @@ impl TuiApp {
     }
 
     pub(crate) fn open_memory_export_dialog(&mut self, logical_path: std::path::PathBuf) {
+        if let Err(error) = crate::protection::require(crate::protection::Domain::Memories) {
+            self.ui.show_toast(error.to_string());
+            return;
+        }
         #[cfg(feature = "memory")]
         {
             let item_name = self
@@ -139,16 +138,7 @@ impl TuiApp {
             }
             #[cfg(feature = "memory")]
             crate::ui::modals::export_dialog::ExportTarget::Memory(path) => {
-                let config = self.config.blocking_read().clone();
-                let vault = config
-                    .vault_path
-                    .as_deref()
-                    .map(std::path::Path::new)
-                    .ok_or_else(|| color_eyre::eyre::eyre!("Markdown Vault is not configured"))?;
-                let store = crate::memory::MemoryStore::open(
-                    vault,
-                    &crate::memory::MemoryStore::default_cache_path(),
-                )?;
+                let store = crate::memory::MemoryStore::open_default()?;
                 let document = store
                     .find_document_by_logical_path(&path)?
                     .ok_or_else(|| color_eyre::eyre::eyre!("memory is unavailable"))?;

@@ -77,7 +77,7 @@ impl VaultRestorePlan {
         backup_id: StandaloneBackupId,
     ) -> Result<Self, VaultMutationPlanError> {
         let profile = profile(catalog, &profile_id)?;
-        let current = read_text(profile, &path)?;
+        let current = read_bytes(profile, &path)?;
         let loaded = BackupStore::new(data_root.join("vault-backups")).load(&backup_id)?;
         if loaded.envelope.state != BackupState::Complete
             || loaded.envelope.profile_id != profile_id.to_string()
@@ -86,19 +86,28 @@ impl VaultRestorePlan {
             return Err(VaultMutationPlanError::BackupTargetMismatch);
         }
         let backup = identity(loaded.contents.as_deref());
-        let replacement = match loaded.contents {
-            Some(bytes) => {
-                String::from_utf8(bytes).map_err(|_| VaultMutationPlanError::BackupIsNotUtf8)?
-            }
-            None => String::new(),
+        let replacement = loaded.contents.as_deref().unwrap_or_default();
+        let original = current.as_deref().unwrap_or_default();
+        let diff = match (
+            std::str::from_utf8(original),
+            std::str::from_utf8(replacement),
+        ) {
+            (Ok(original), Ok(replacement)) => unified_diff(original, replacement),
+            _ => format!(
+                "Binary restore\ncurrent: {} bytes, blake3:{}\nbackup: {} bytes, blake3:{}",
+                original.len(),
+                blake3::hash(original),
+                replacement.len(),
+                blake3::hash(replacement)
+            ),
         };
         Ok(Self {
             profile_id,
             path,
             backup_id,
-            original: identity(current.as_deref().map(str::as_bytes)),
+            original: identity(current.as_deref()),
             backup,
-            diff: unified_diff(current.as_deref().unwrap_or_default(), &replacement),
+            diff,
         })
     }
 }
@@ -157,13 +166,24 @@ fn read_text(
     }
 }
 
+fn read_bytes(
+    profile: &VaultProfile,
+    path: &VaultRelativePath,
+) -> Result<Option<Vec<u8>>, VaultMutationPlanError> {
+    match VaultFs::open_profile(&profile.root)?.read_bytes(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(VaultFsError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            Ok(None)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn read_identity(
     profile: &VaultProfile,
     path: &VaultRelativePath,
 ) -> Result<FileIdentity, VaultMutationPlanError> {
-    Ok(identity(
-        read_text(profile, path)?.as_deref().map(str::as_bytes),
-    ))
+    Ok(identity(read_bytes(profile, path)?.as_deref()))
 }
 
 fn identity(bytes: Option<&[u8]>) -> FileIdentity {
@@ -186,8 +206,6 @@ pub(crate) enum VaultMutationPlanError {
     UnknownProfile(String),
     #[error("restore backup does not match the requested Vault file")]
     BackupTargetMismatch,
-    #[error("restore backup is not UTF-8 text")]
-    BackupIsNotUtf8,
     #[error("Vault mutation plan is stale")]
     Stale,
     #[error("Vault mutation has an invalid or unapproved collision")]

@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 
 use rusqlite::{params, OptionalExtension};
 
@@ -7,8 +6,7 @@ use super::embedding::{as_blob, embed_many};
 use super::index::MemoryIndex;
 use super::markdown::MemoryChunk;
 use super::metadata::{machine_cache_key, MemoryScope};
-use super::paths::MemoryPaths;
-use super::store::{is_memory_document_path, MemoryDocument, MemoryError};
+use super::store::{is_memory_document_path, MemoryError, MemoryStore};
 
 static SYNC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -34,16 +32,25 @@ struct PreparedFile {
     embeddings: Vec<Vec<f32>>,
 }
 
-pub(super) fn synchronize(
-    paths: &MemoryPaths,
-    database: &Path,
-    key: &crate::storage::crypto::SharedKey,
-) -> Result<(), MemoryError> {
+pub(super) fn synchronize(store: &MemoryStore) -> Result<(), MemoryError> {
+    synchronize_inner(store, false)
+}
+
+pub(super) fn rebuild(store: &MemoryStore) -> Result<(), MemoryError> {
+    synchronize_inner(store, true)
+}
+
+fn synchronize_inner(store: &MemoryStore, rebuilding: bool) -> Result<(), MemoryError> {
+    crate::protection::require(crate::protection::Domain::Memories)?;
     let _guard = SYNC_LOCK
         .lock()
         .map_err(|_| MemoryError::Invalid("memory synchronization lock failed".to_string()))?;
-    let sources = scan_sources(paths, key)?;
-    let mut index = MemoryIndex::open(database)?;
+    let sources = scan_sources(store)?;
+    let mut index = if rebuilding {
+        MemoryIndex::fresh(&store.database)?
+    } else {
+        MemoryIndex::open(&store.database)?
+    };
     let existing = existing_files(&index)?;
     let source_names = sources
         .iter()
@@ -71,7 +78,7 @@ pub(super) fn synchronize(
         }
     }
 
-    let transaction = index.conn.transaction()?;
+    let transaction = index.connection_mut()?.transaction()?;
     for name in existing.keys().filter(|name| !source_names.contains(*name)) {
         delete_file(&transaction, name)?;
     }
@@ -121,13 +128,24 @@ pub(super) fn synchronize(
         }
     }
     transaction.commit()?;
+    index.persist()?;
+    if rebuilding {
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut path = store.database.as_os_str().to_os_string();
+            path.push(suffix);
+            match std::fs::remove_file(std::path::PathBuf::from(path)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
     Ok(())
 }
 
-fn scan_sources(
-    paths: &MemoryPaths,
-    key: &crate::storage::crypto::SharedKey,
-) -> Result<Vec<SourceFile>, MemoryError> {
+fn scan_sources(store: &MemoryStore) -> Result<Vec<SourceFile>, MemoryError> {
+    crate::protection::require(crate::protection::Domain::Memories)?;
+    let paths = &store.paths;
     let mut sources = Vec::new();
     for entry in walkdir::WalkDir::new(paths.root()).follow_links(false) {
         let entry = entry.map_err(|error| MemoryError::Walk(error.to_string()))?;
@@ -141,8 +159,7 @@ fn scan_sources(
             continue;
         }
         let physical_name = entry.file_name().to_string_lossy().to_string();
-        let document: MemoryDocument =
-            crate::storage::crypto::read_encrypted_document(entry.path(), key, "memory")?;
+        let document = store.read_document_at(entry.path())?;
         let parsed = super::markdown::parse_memory(&document.markdown, &document.title);
         let metadata = std::fs::metadata(entry.path())?;
         let scope = document
@@ -171,7 +188,7 @@ fn scan_sources(
 }
 
 fn existing_files(index: &MemoryIndex) -> Result<HashMap<String, ExistingFile>, MemoryError> {
-    let mut statement = index.conn.prepare(
+    let mut statement = index.connection()?.prepare(
         "SELECT rel_path, modified_ns, size_bytes, content_fingerprint FROM memory_files",
     )?;
     let rows = statement.query_map([], |row| {

@@ -2,7 +2,34 @@ use std::collections::HashSet;
 
 use super::TuiApp;
 
+#[cfg(all(test, feature = "memory"))]
+#[path = "artifact_protection_tests.rs"]
+mod protection_tests;
+
 impl TuiApp {
+    pub(crate) fn require_artifact_access(
+        &self,
+        handle: &crate::ui::artifact_sidebar::ArtifactHandle,
+    ) -> color_eyre::Result<()> {
+        use crate::ui::artifact_sidebar::ArtifactHandle;
+        crate::protection::require_app()?;
+        match handle {
+            ArtifactHandle::Memory(_) => {
+                crate::protection::require(crate::protection::Domain::Memories)
+            }
+            ArtifactHandle::Saved(_) | ArtifactHandle::ChatFile { .. } => {
+                crate::protection::require(crate::protection::Domain::Vault)
+            }
+            ArtifactHandle::Vault(path) => {
+                if let Some(root) = self.configured_vault_root() {
+                    crate::vault::require_root(&root.join(path))?;
+                }
+                Ok(())
+            }
+            ArtifactHandle::Temporary(_) | ArtifactHandle::Media(_) => Ok(()),
+        }
+    }
+
     pub(crate) fn refresh_vault_artifacts(&mut self) {
         let Some(root) = self.configured_vault_root() else {
             self.ui.vault_available = false;
@@ -58,6 +85,7 @@ impl TuiApp {
                     .collect();
             }
             Err(error) => {
+                self.ui.saved_artifacts.clear();
                 self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::Failed;
                 self.ui.connection_message =
                     Some(format!("Saved files could not be loaded: {error}"));
@@ -69,20 +97,7 @@ impl TuiApp {
         self.ui.memory_artifacts.clear();
         #[cfg(feature = "memory")]
         {
-            let vault_root: std::path::PathBuf = self
-                .vault
-                .as_ref()
-                .map(|v| v.root.clone())
-                .or_else(|| self.configured_vault_root())
-                .unwrap_or_else(|| {
-                    crate::storage::paths::TcuiDataPaths::discover()
-                        .root
-                        .join("vault")
-                });
-            let Ok(store) = crate::memory::MemoryStore::open(
-                &vault_root,
-                &crate::memory::MemoryStore::default_cache_path(),
-            ) else {
+            let Ok(store) = crate::memory::MemoryStore::open_default() else {
                 return;
             };
             let Ok(documents) = store.active_documents() else {
@@ -121,6 +136,10 @@ impl TuiApp {
         &mut self,
         handle: crate::ui::artifact_sidebar::ArtifactHandle,
     ) {
+        if let Err(error) = self.require_artifact_access(&handle) {
+            self.ui.show_toast(error.to_string());
+            return;
+        }
         let Some(artifact) = self.find_artifact(&handle) else {
             return;
         };
@@ -133,6 +152,15 @@ impl TuiApp {
         }
         if matches!(
             artifact.origin,
+            crate::ui::artifact_sidebar::ArtifactOrigin::Memory
+        ) {
+            if let crate::ui::artifact_sidebar::ArtifactHandle::Memory(path) = artifact.handle {
+                self.open_memory_export_dialog(path);
+            }
+            return;
+        }
+        if matches!(
+            artifact.origin,
             crate::ui::artifact_sidebar::ArtifactOrigin::Saved
         ) {
             let base_dir = self.export_base_dir();
@@ -141,40 +169,45 @@ impl TuiApp {
             ));
             return;
         }
-        if artifact.is_markdown() && self.configured_vault_root().is_some() {
-            if self.save_temp_artifact_to_vault(&artifact).is_ok() {
+        if artifact.is_markdown()
+            && matches!(
+                artifact.origin,
+                crate::ui::artifact_sidebar::ArtifactOrigin::Temporary
+            )
+        {
+            if let Err(error) = self.save_temporary_artifact(&artifact) {
+                self.ui.show_toast(error.to_string());
+            } else {
                 self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::CloudConnected;
-                self.ui.connection_message = Some(format!("Saved {} to vault", artifact.name));
+                self.ui.connection_message =
+                    Some(format!("Saved {} to the internal Vault", artifact.name));
             }
             return;
         }
 
-        if matches!(
-            artifact.origin,
-            crate::ui::artifact_sidebar::ArtifactOrigin::Memory
-        ) {
-            if let crate::ui::artifact_sidebar::ArtifactHandle::Memory(path) = artifact.handle {
-                self.open_memory_export_dialog(path);
-            }
-            return;
-        }
-
-        let base_dir = self.export_base_dir();
+        let base_dir = crate::protection::internal_vault_root();
         self.ui.save_file_dialog = Some(crate::ui::modals::save_file::SaveFileDialog::new(
             &artifact, base_dir, "Save",
         ));
     }
 
-    pub(crate) fn save_temp_artifact_to_vault(
+    pub(crate) fn save_temporary_artifact(
         &mut self,
         artifact: &crate::ui::artifact_sidebar::ArtifactEntry,
     ) -> color_eyre::Result<()> {
-        let Some(root) = self.configured_vault_root() else {
-            return Ok(());
-        };
-        let vault = crate::obsidian::Vault::new(root);
-        let content = artifact.content.clone().unwrap_or_default();
-        vault.write_file(std::path::Path::new(&artifact.name), &content)?;
+        self.require_artifact_access(&artifact.handle)?;
+        if !matches!(
+            artifact.origin,
+            crate::ui::artifact_sidebar::ArtifactOrigin::Temporary
+        ) {
+            color_eyre::eyre::bail!("Only temporary artifacts can be saved directly; use explicit export for stored content");
+        }
+        let content = artifact
+            .content
+            .as_deref()
+            .ok_or_else(|| color_eyre::eyre::eyre!("Temporary artifact content is unavailable"))?;
+        self.chat_files
+            .create_saved(&artifact.name, content.as_bytes())?;
         self.remove_temporary_artifact(&artifact.handle);
         self.refresh_artifact_sidebar_catalogs();
         Ok(())
@@ -196,6 +229,10 @@ impl TuiApp {
     }
 
     pub(crate) fn open_artifact(&mut self, handle: crate::ui::artifact_sidebar::ArtifactHandle) {
+        if let Err(error) = self.require_artifact_access(&handle) {
+            self.ui.show_toast(error.to_string());
+            return;
+        }
         let Some(mut artifact) = self.find_artifact(&handle) else {
             return;
         };
@@ -212,7 +249,10 @@ impl TuiApp {
                 crate::ui::artifact_sidebar::ArtifactKind::Markdown
                     | crate::ui::artifact_sidebar::ArtifactKind::Text
             ) {
-                let Ok(content) = std::fs::read_to_string(path) else {
+                let Ok(content) = self.chat_files.read_saved_path(path).and_then(|bytes| {
+                    String::from_utf8(bytes)
+                        .map_err(|error| std::io::Error::other(error.to_string()).into())
+                }) else {
                     return;
                 };
                 artifact.content = Some(content);
@@ -221,13 +261,18 @@ impl TuiApp {
             artifact.content = artifact
                 .path
                 .as_ref()
-                .and_then(|path| std::fs::read_to_string(path).ok());
+                .and_then(|path| crate::vault::read_artifact_path(path).ok())
+                .and_then(|bytes| String::from_utf8(bytes).ok());
         }
         self.ui.artifact_viewer =
             Some(crate::ui::modals::artifact_viewer::ArtifactViewerState::new(artifact));
     }
 
     pub(crate) fn edit_artifact(&mut self, handle: crate::ui::artifact_sidebar::ArtifactHandle) {
+        if let Err(error) = self.require_artifact_access(&handle) {
+            self.ui.show_toast(error.to_string());
+            return;
+        }
         let Some(artifact) = self.find_artifact(&handle) else {
             return;
         };
@@ -236,6 +281,26 @@ impl TuiApp {
                 .show_toast("Editor requires a saved file.".to_string());
             return;
         };
+        let protected = match &handle {
+            crate::ui::artifact_sidebar::ArtifactHandle::Memory(_) => {
+                crate::protection::is_protected(crate::protection::Domain::Memories)
+            }
+            _ if crate::vault::is_internal_root(&path) => {
+                crate::protection::is_protected(crate::protection::Domain::Vault)
+            }
+            _ => Ok(false),
+        };
+        match protected {
+            Ok(false) => {}
+            Ok(true) => {
+                self.ui.show_toast("Protected files cannot open in an external editor. Explicitly export plaintext first.".to_string());
+                return;
+            }
+            Err(error) => {
+                self.ui.show_toast(error.to_string());
+                return;
+            }
+        }
         let area = self
             .ui
             .chat_area
@@ -247,6 +312,10 @@ impl TuiApp {
     }
 
     pub(crate) fn delete_artifact(&mut self, handle: crate::ui::artifact_sidebar::ArtifactHandle) {
+        if let Err(error) = self.require_artifact_access(&handle) {
+            self.ui.show_toast(error.to_string());
+            return;
+        }
         match &handle {
             crate::ui::artifact_sidebar::ArtifactHandle::ChatFile { .. }
             | crate::ui::artifact_sidebar::ArtifactHandle::Saved(_) => {
@@ -254,19 +323,44 @@ impl TuiApp {
                 return;
             }
             crate::ui::artifact_sidebar::ArtifactHandle::Memory(path) => {
-                if let Some(artifact) = self.find_artifact(&handle) {
-                    if let Some(physical_path) = artifact.path {
-                        let _ = std::fs::remove_file(physical_path);
-                    } else {
-                        let _ = std::fs::remove_file(path);
+                #[cfg(feature = "memory")]
+                {
+                    let result = crate::memory::MemoryStore::open_default()
+                        .and_then(|store| store.forget(path));
+                    match result {
+                        Ok(_) => self.ui.show_toast("Memory moved to Trash".to_string()),
+                        Err(error @ crate::memory::MemoryError::RemovedButNotIndexed { .. }) => {
+                            self.ui.show_toast(error.to_string());
+                        }
+                        Err(error) => {
+                            self.ui.show_toast(error.to_string());
+                            return;
+                        }
                     }
                 }
+                #[cfg(not(feature = "memory"))]
+                let _ = path;
                 self.refresh_memory_artifacts();
             }
             crate::ui::artifact_sidebar::ArtifactHandle::Vault(path) => {
                 if let Some(root) = self.configured_vault_root() {
-                    let full_path = root.join(path);
-                    let _ = std::fs::remove_file(full_path);
+                    let profile_id = self.config.try_read().ok().and_then(|config| {
+                        config
+                            .vaults
+                            .values()
+                            .find(|profile| profile.root == root)
+                            .map(|profile| profile.id.clone())
+                    });
+                    let Some(profile_id) = profile_id else {
+                        self.ui.show_toast("Vault is not a registered profile; reopen its profile before deleting files".to_string());
+                        return;
+                    };
+                    if let Err(error) =
+                        crate::obsidian::Vault::new(root).remove_file(&profile_id, path)
+                    {
+                        self.ui.show_toast(error.to_string());
+                        return;
+                    }
                     self.refresh_vault_artifacts();
                 }
             }
@@ -298,6 +392,7 @@ impl TuiApp {
         &self,
         handle: &crate::ui::artifact_sidebar::ArtifactHandle,
     ) -> Option<crate::ui::artifact_sidebar::ArtifactEntry> {
+        self.require_artifact_access(handle).ok()?;
         self.ui
             .tabs
             .get(self.ui.active_tab)

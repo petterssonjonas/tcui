@@ -47,7 +47,7 @@ pub(super) async fn login(
     let tokens = service
         .exchange(&exchange, cancellation, chrono::Utc::now())
         .await?;
-    persist_tokens(config, &tokens, None)
+    persist_tokens(config, &tokens, &adapter.connection, adapter.storage)
 }
 
 async fn bind_callback(

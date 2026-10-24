@@ -9,6 +9,7 @@ use super::index::{IndexError, MemoryIndex};
 use super::metadata::{machine_cache_key, MemoryMetadata, MemoryScope};
 use super::paths::{MemoryPaths, PathError};
 use super::sync::synchronize;
+use crate::protection::{self, Domain};
 use crate::storage::crypto::{
     read_encrypted_document, write_encrypted_document, SharedKey, StorageCryptoError,
 };
@@ -33,6 +34,8 @@ pub(crate) enum MemoryError {
     Json(#[from] serde_json::Error),
     #[error("memory encryption failed: {0}")]
     Crypto(#[from] StorageCryptoError),
+    #[error("memory protection failed: {0}")]
+    Protection(#[from] color_eyre::Report),
     #[error("memory saved to {path}, but indexing failed: {reason}")]
     SavedButNotIndexed {
         title: String,
@@ -67,7 +70,7 @@ pub(crate) struct MemoryStatus {
 pub(crate) struct MemoryStore {
     pub(super) paths: MemoryPaths,
     pub(super) database: PathBuf,
-    pub(super) key: SharedKey,
+    pub(super) key: Option<SharedKey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,40 +87,88 @@ pub(crate) struct MemoryDocument {
 }
 
 pub(crate) const MEMORY_DOCUMENT_KIND: &str = "memory";
-const MEMORY_DOCUMENT_SCHEMA_VERSION: u32 = 1;
 
 impl MemoryStore {
+    pub(crate) fn open_default() -> Result<Self, MemoryError> {
+        protection::require(Domain::Memories)?;
+        let key = if protection::configured()? {
+            None
+        } else {
+            Some(
+                SharedKey::load_or_create_default(
+                    &crate::storage::paths::TcuiDataPaths::discover(),
+                )?
+                .key,
+            )
+        };
+        let store = Self {
+            paths: MemoryPaths::open_default()?,
+            database: Self::default_cache_path(),
+            key,
+        };
+        Ok(store)
+    }
+
+    pub(crate) fn open_default_with_key(key: SharedKey) -> Result<Self, MemoryError> {
+        protection::require(Domain::Memories)?;
+        if protection::configured()? {
+            return Err(MemoryError::Invalid(
+                "custom memory keys are only supported for legacy imports before protection is configured".to_string(),
+            ));
+        }
+        let store = Self {
+            paths: MemoryPaths::open_default()?,
+            database: Self::default_cache_path(),
+            key: Some(key),
+        };
+        Ok(store)
+    }
+
+    #[cfg(test)]
     pub(crate) fn open(vault: &Path, database: &Path) -> Result<Self, MemoryError> {
+        protection::require(Domain::Memories)?;
         let key =
             SharedKey::load_or_create_default(&crate::storage::paths::TcuiDataPaths::discover())?
                 .key;
         Self::open_with_key(vault, database, key)
     }
 
+    #[cfg(test)]
     pub(crate) fn open_with_key(
         vault: &Path,
         database: &Path,
         key: SharedKey,
     ) -> Result<Self, MemoryError> {
+        protection::require(Domain::Memories)?;
+        if protection::configured()? {
+            return Err(MemoryError::Invalid(
+                "custom memory keys are only supported for legacy imports before protection is configured".to_string(),
+            ));
+        }
         let paths = MemoryPaths::new(vault)?;
         let store = Self {
             paths,
             database: database.to_path_buf(),
-            key,
+            key: Some(key),
         };
-        store.archive_legacy_plaintext_memories()?;
-        let _ = MemoryIndex::open(database)?;
         Ok(store)
     }
 
     pub(crate) fn default_cache_path() -> PathBuf {
+        crate::storage::paths::TcuiDataPaths::discover()
+            .root
+            .join("memory.sqlite3")
+    }
+
+    pub(crate) fn legacy_cache_path() -> PathBuf {
         dirs::cache_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("tcui/memory.sqlite3")
     }
 
     pub(crate) fn sync(&self) -> Result<(), MemoryError> {
-        synchronize(&self.paths, &self.database, &self.key)
+        protection::require(Domain::Memories)?;
+        synchronize(self)
     }
 
     pub(crate) fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryHit>, MemoryError> {
@@ -132,6 +183,7 @@ impl MemoryStore {
         scope: Option<MemoryScope>,
         machine_id: Option<&str>,
     ) -> Result<Vec<MemoryHit>, MemoryError> {
+        protection::require(Domain::Memories)?;
         if machine_id.is_some_and(|id| id.trim().is_empty()) {
             return Err(MemoryError::Invalid("machine ID is empty".to_string()));
         }
@@ -160,7 +212,7 @@ impl MemoryStore {
              WHERE v.embedding MATCH ?1 AND k = ?2{restriction}
              ORDER BY v.distance"
         );
-        let mut statement = index.conn.prepare(&sql)?;
+        let mut statement = index.connection()?.prepare(&sql)?;
         let scoped_machine = machine_id.map(machine_cache_key);
         let mut rows = if restriction.is_empty() {
             statement.query(rusqlite::params![
@@ -213,7 +265,7 @@ impl MemoryStore {
     }
 
     pub(crate) fn read(&self, path: &Path) -> Result<String, MemoryError> {
-        self.sync()?;
+        protection::require(Domain::Memories)?;
         let logical = self.paths.logical_path(path)?;
         let document = self
             .find_document_by_logical_path(&logical)?
@@ -222,7 +274,7 @@ impl MemoryStore {
     }
 
     pub(crate) fn list_files(&self) -> Result<Vec<(PathBuf, String)>, MemoryError> {
-        self.sync()?;
+        protection::require(Domain::Memories)?;
         let mut files = self
             .active_documents()?
             .into_iter()
@@ -234,17 +286,24 @@ impl MemoryStore {
 
     pub(crate) fn status(&self) -> Result<MemoryStatus, MemoryError> {
         self.sync()?;
+        self.indexed_status()
+    }
+
+    fn indexed_status(&self) -> Result<MemoryStatus, MemoryError> {
+        protection::require(Domain::Memories)?;
         let index = MemoryIndex::open(&self.database)?;
-        let files = index
-            .conn
-            .query_row("SELECT COUNT(*) FROM memory_files", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
-        let chunks = index
-            .conn
-            .query_row("SELECT COUNT(*) FROM memory_chunks", [], |row| {
-                row.get::<_, i64>(0)
-            })?;
+        let files =
+            index
+                .connection()?
+                .query_row("SELECT COUNT(*) FROM memory_files", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
+        let chunks =
+            index
+                .connection()?
+                .query_row("SELECT COUNT(*) FROM memory_chunks", [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
         Ok(MemoryStatus {
             vault: self.paths.vault().to_path_buf(),
             cache: self.database.clone(),
@@ -256,13 +315,13 @@ impl MemoryStore {
     }
 
     pub(crate) fn reindex(&self) -> Result<MemoryStatus, MemoryError> {
-        if self.database.exists() {
-            std::fs::remove_file(&self.database)?;
-        }
-        self.status()
+        protection::require(Domain::Memories)?;
+        super::sync::rebuild(self)?;
+        self.indexed_status()
     }
 
     pub(crate) fn active_documents(&self) -> Result<Vec<(PathBuf, MemoryDocument)>, MemoryError> {
+        protection::require(Domain::Memories)?;
         let mut documents = Vec::new();
         if !self.paths.root().exists() {
             return Ok(documents);
@@ -285,6 +344,7 @@ impl MemoryStore {
         &self,
         logical_path: &Path,
     ) -> Result<Option<MemoryDocument>, MemoryError> {
+        protection::require(Domain::Memories)?;
         let logical_path = self.paths.logical_path(logical_path)?;
         Ok(self
             .active_documents()?
@@ -296,6 +356,7 @@ impl MemoryStore {
         &self,
         logical_path: &Path,
     ) -> Result<Option<PathBuf>, MemoryError> {
+        protection::require(Domain::Memories)?;
         let logical_path = self.paths.logical_path(logical_path)?;
         Ok(self
             .active_documents()?
@@ -308,6 +369,7 @@ impl MemoryStore {
         physical_name: &str,
     ) -> Result<Option<MemoryDocument>, MemoryError> {
         let path = self.paths.root().join(physical_name);
+        protection::require(Domain::Memories)?;
         if path.parent() != Some(self.paths.root()) || !is_memory_document_path(&path) {
             return Ok(None);
         }
@@ -315,11 +377,18 @@ impl MemoryStore {
     }
 
     pub(crate) fn read_document_at(&self, path: &Path) -> Result<MemoryDocument, MemoryError> {
-        Ok(read_encrypted_document(
-            path,
-            &self.key,
-            MEMORY_DOCUMENT_KIND,
-        )?)
+        protection::require(Domain::Memories)?;
+        if protection::configured()? {
+            Ok(serde_json::from_slice(&protection::read(
+                Domain::Memories,
+                path,
+            )?)?)
+        } else {
+            let key = self.key.as_ref().ok_or_else(|| {
+                MemoryError::Invalid("legacy memory key is unavailable".to_string())
+            })?;
+            Ok(read_encrypted_document(path, key, MEMORY_DOCUMENT_KIND)?)
+        }
     }
 
     pub(crate) fn write_document_at(
@@ -327,80 +396,31 @@ impl MemoryStore {
         path: &Path,
         document: &MemoryDocument,
     ) -> Result<(), MemoryError> {
+        protection::require(Domain::Memories)?;
         if let Some(metadata) = &document.metadata {
             metadata.validate()?;
         }
-        Ok(write_encrypted_document(
-            path,
-            &self.key,
-            MEMORY_DOCUMENT_KIND,
-            document,
-        )?)
+        if protection::configured()? {
+            protection::write(Domain::Memories, path, &serde_json::to_vec(document)?)?;
+        } else {
+            let key = self.key.as_ref().ok_or_else(|| {
+                MemoryError::Invalid("legacy memory key is unavailable".to_string())
+            })?;
+            write_encrypted_document(path, key, MEMORY_DOCUMENT_KIND, document)?;
+        }
+        Ok(())
     }
 
-    pub(crate) fn allocate_document_id(&self) -> u64 {
+    pub(crate) fn allocate_document_id(&self) -> Result<u64, MemoryError> {
+        protection::require(Domain::Memories)?;
         loop {
             let id = rand::random::<u64>();
             if !self.paths.active_document_path(id).exists()
                 && !self.paths.trash_document_path(id).exists()
             {
-                return id;
+                return Ok(id);
             }
         }
-    }
-
-    pub(crate) fn archive_legacy_plaintext_memories(&self) -> Result<(), MemoryError> {
-        for entry in walkdir::WalkDir::new(self.paths.legacy_root()).follow_links(false) {
-            let entry = entry.map_err(|error| MemoryError::Walk(error.to_string()))?;
-            if entry.file_type().is_symlink()
-                || !entry.file_type().is_file()
-                || entry.path().extension().and_then(|value| value.to_str()) != Some("md")
-            {
-                continue;
-            }
-            let relative = entry
-                .path()
-                .strip_prefix(self.paths.legacy_root())
-                .map_err(|_| MemoryError::Invalid("memory path escaped its root".to_string()))?;
-            let target = self.paths.legacy_target(relative)?;
-            let markdown = std::fs::read_to_string(&target.absolute)?;
-            let fallback = target
-                .relative
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or("Memory");
-            let parsed = super::markdown::parse_memory(&markdown, fallback);
-            let timestamp = now_ms();
-            let document = MemoryDocument {
-                schema_version: MEMORY_DOCUMENT_SCHEMA_VERSION,
-                id: self.allocate_document_id(),
-                logical_path: target.relative.clone(),
-                title: parsed.title,
-                created_at_ms: timestamp,
-                updated_at_ms: timestamp,
-                markdown: normalize_markdown(&markdown),
-                metadata: None,
-            };
-            let destination = self.paths.trash_document_path(document.id);
-            if let Err(error) = self.write_document_at(&destination, &document) {
-                eprintln!("warning: failed to archive legacy memory");
-                let _ = error;
-                continue;
-            }
-            match self.read_document_at(&destination) {
-                Ok(verified)
-                    if verified.logical_path == document.logical_path
-                        && verified.markdown == document.markdown =>
-                {
-                    let _ = std::fs::remove_file(&target.absolute);
-                }
-                Ok(_) | Err(_) => {
-                    let _ = std::fs::remove_file(&destination);
-                    eprintln!("warning: failed to verify archived legacy memory");
-                }
-            }
-        }
-        Ok(())
     }
 }
 
@@ -452,9 +472,8 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use super::{MemoryDocument, MemoryStore};
+    use super::MemoryStore;
     use crate::memory::WriteOutcome;
-    use crate::storage::crypto::{read_encrypted_document, SharedKey};
     use crate::storage::paths::TcuiDataPaths;
 
     fn env_lock() -> &'static std::sync::Mutex<()> {
@@ -593,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_vault_memories_are_archived_to_encrypted_trash() {
+    fn legacy_vault_memories_are_preserved_until_explicit_import() {
         let _guard = env_lock().lock().expect("env lock poisoned");
         let (vault, cache, data_home) = fixture();
         std::env::set_var("XDG_DATA_HOME", &data_home);
@@ -606,28 +625,25 @@ mod tests {
 
         let store = MemoryStore::open(&vault, &cache).expect("memory store");
         assert!(store.list_files().expect("active list").is_empty());
+        let source = vault.join("memories/preferences/editor.md");
         assert!(
-            !vault.join("memories/preferences/editor.md").exists(),
-            "legacy plaintext should be removed after archival"
+            source.exists(),
+            "opening memories must not mutate external data"
         );
-
-        let trash_root = data_home.join("tcui").join("memories").join(".trash");
-        let archived = std::fs::read_dir(&trash_root)
-            .expect("trash dir")
-            .map(|entry| entry.expect("trash entry").path())
-            .find(|path| path.extension().and_then(|value| value.to_str()) == Some("tcui-memory"))
-            .expect("archived encrypted memory");
-        let key = SharedKey::load_or_create_default(&TcuiDataPaths::discover())
-            .expect("shared key")
-            .key;
-        let document: MemoryDocument =
-            read_encrypted_document(&archived, &key, "memory").expect("read archived memory");
         assert_eq!(
-            document.logical_path,
-            PathBuf::from("preferences/editor.md")
+            fs::read_dir(TcuiDataPaths::discover().memories_trash_dir)
+                .expect("trash dir")
+                .count(),
+            0
         );
-        assert_eq!(document.title, "Preferred editor");
-        assert!(document.markdown.contains("Use Neovim."));
+        store
+            .add_from_plaintext(&source)
+            .expect("explicit legacy import");
+        assert!(source.exists(), "import must preserve the external source");
+        assert!(store
+            .read(Path::new("editor.md"))
+            .expect("imported memory")
+            .contains("Use Neovim."));
 
         fs::remove_dir_all(vault).expect("fixture cleanup");
         std::env::remove_var("XDG_DATA_HOME");
@@ -794,7 +810,7 @@ mod tests {
         let physical = store.paths.active_document_path(17);
         crate::storage::crypto::write_encrypted_document(
             &physical,
-            &store.key,
+            store.key.as_ref().expect("legacy key"),
             "memory",
             &serde_json::json!({
                 "schema_version": 1,
@@ -905,14 +921,16 @@ mod tests {
         let distant = embedding.iter().map(|value| -*value).collect::<Vec<_>>();
         let index = MemoryIndex::open(&cache).expect("memory index");
         index
-            .conn
+            .connection()
+            .expect("unlocked index")
             .execute(
                 "UPDATE vec_memory_chunks SET embedding = ?1",
                 [as_blob(&embedding)],
             )
             .expect("make other machines rank first");
         index
-            .conn
+            .connection()
+            .expect("unlocked index")
             .execute(
                 "UPDATE vec_memory_chunks SET embedding = ?1
              WHERE chunk_id IN (
