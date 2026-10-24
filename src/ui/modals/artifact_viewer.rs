@@ -221,6 +221,7 @@ mod tests {
 
     #[test]
     fn markdown_vault_baseline_viewer_content_stays_inside_inner_gutter() {
+        let _guard = crate::test_support::env_lock().lock().expect("env lock");
         let artifact = crate::ui::artifact_sidebar::ArtifactEntry::temp_markdown(
             1,
             "short.md".to_string(),
@@ -268,6 +269,7 @@ mod tests {
 
     #[test]
     fn markdown_vault_baseline_viewer_handles_tiny_rectangles() {
+        let _guard = crate::test_support::env_lock().lock().expect("env lock");
         let artifact = crate::ui::artifact_sidebar::ArtifactEntry::temp_markdown(
             1,
             "short.md".to_string(),
@@ -301,6 +303,7 @@ mod tests {
 
     #[test]
     fn preview_scroll_is_clamped_to_rendered_content() {
+        let _guard = crate::test_support::env_lock().lock().expect("env lock");
         // Given
         let artifact = crate::ui::artifact_sidebar::ArtifactEntry::temp_markdown(
             1,

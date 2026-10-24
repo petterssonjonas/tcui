@@ -88,6 +88,14 @@ pub(crate) fn with_test_app_config(
     if config.vault_path.as_deref().map(std::path::Path::new) == previous_internal.as_deref() {
         config.vault_path = Some(internal.root.display().to_string());
     }
+    if config
+        .artifact_save_dir
+        .as_deref()
+        .map(std::path::Path::new)
+        == previous_internal.as_deref()
+    {
+        config.artifact_save_dir = Some(internal.root.display().to_string());
+    }
     config.vaults.insert(internal.id.clone(), internal);
 
     let storage = Storage::new().expect("create storage");

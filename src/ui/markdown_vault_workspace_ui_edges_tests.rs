@@ -61,6 +61,9 @@ impl Drop for EdgeFixture {
 
 #[test]
 fn markdown_vault_workspace_ui_enter_collapses_expands_and_opens_tree_nodes() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = EdgeFixture::new("tree-enter");
     let (_tabs, mut workspaces, tab_id) = fixture.workspace();
     let state = workspaces.get_mut_for_test(tab_id).expect("workspace");
@@ -88,6 +91,9 @@ fn markdown_vault_workspace_ui_enter_collapses_expands_and_opens_tree_nodes() {
 
 #[test]
 fn markdown_vault_workspace_ui_read_failure_is_localized_to_notice() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = EdgeFixture::new("read-failure");
     let (_tabs, mut workspaces, tab_id) = fixture.workspace();
     let state = workspaces.get_mut_for_test(tab_id).expect("workspace");
@@ -102,6 +108,9 @@ fn markdown_vault_workspace_ui_read_failure_is_localized_to_notice() {
 
 #[test]
 fn markdown_vault_workspace_ui_footer_escape_and_add_vault_are_routed() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = EdgeFixture::new("footer");
     let (_tabs, mut workspaces, tab_id) = fixture.workspace();
     let state = workspaces.get_mut_for_test(tab_id).expect("workspace");
@@ -121,6 +130,9 @@ fn markdown_vault_workspace_ui_footer_escape_and_add_vault_are_routed() {
 #[test]
 fn markdown_vault_workspace_ui_move_input_emits_selected_source_and_typed_destination() {
     // Given
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = EdgeFixture::new("move-input");
     let (_tabs, mut workspaces, tab_id) = fixture.workspace();
     let state = workspaces.get_mut_for_test(tab_id).expect("workspace");
@@ -147,6 +159,9 @@ fn markdown_vault_workspace_ui_move_input_emits_selected_source_and_typed_destin
 #[test]
 fn markdown_vault_workspace_ui_rename_input_keeps_destination_in_source_directory() {
     // Given
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = EdgeFixture::new("rename-input");
     let (_tabs, mut workspaces, tab_id) = fixture.workspace();
     let state = workspaces.get_mut_for_test(tab_id).expect("workspace");
@@ -172,6 +187,9 @@ fn markdown_vault_workspace_ui_rename_input_keeps_destination_in_source_director
 #[test]
 fn markdown_vault_workspace_ui_move_input_escape_cancels_without_action() {
     // Given
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = EdgeFixture::new("move-cancel");
     let (_tabs, mut workspaces, tab_id) = fixture.workspace();
     let state = workspaces.get_mut_for_test(tab_id).expect("workspace");
@@ -189,6 +207,9 @@ fn markdown_vault_workspace_ui_move_input_escape_cancels_without_action() {
 #[test]
 fn markdown_vault_workspace_ui_move_input_blocks_underlying_mouse_and_scroll() {
     // Given
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = EdgeFixture::new("move-mouse-capture");
     let (_tabs, mut workspaces, tab_id) = fixture.workspace();
     let state = workspaces.get_mut_for_test(tab_id).expect("workspace");
@@ -209,6 +230,9 @@ fn markdown_vault_workspace_ui_move_input_blocks_underlying_mouse_and_scroll() {
 
 #[test]
 fn markdown_vault_workspace_ui_tiny_guard_clears_wide_hit_areas() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = EdgeFixture::new("stale-hit-areas");
     let mut ui = UI::new();
     let tab_id = ui.app_tabs.add_launcher();

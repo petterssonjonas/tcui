@@ -39,6 +39,7 @@ fn render(viewer: &mut ArtifactViewerState) -> String {
 
 #[test]
 fn insert_to_chat_viewer_button_is_bottom_left_for_eligible_markdown() {
+    let _guard = crate::test_support::env_lock().lock().expect("env lock");
     // Given
     let artifact =
         ArtifactEntry::temp_markdown(1, "eligible.md".to_string(), "first\nsecond".to_string());
@@ -58,6 +59,7 @@ fn insert_to_chat_viewer_button_is_bottom_left_for_eligible_markdown() {
 
 #[test]
 fn insert_to_chat_viewer_button_is_hidden_for_ineligible_documents() {
+    let _guard = crate::test_support::env_lock().lock().expect("env lock");
     // Given
     let oversized = "x".repeat(crate::app::submission::MAX_DOCUMENT_BYTES + 1);
     let artifacts = [
@@ -84,6 +86,7 @@ fn insert_to_chat_viewer_button_is_hidden_for_ineligible_documents() {
 
 #[test]
 fn insert_to_chat_viewer_button_is_hidden_for_view_only_help() {
+    let _guard = crate::test_support::env_lock().lock().expect("env lock");
     // Given
     let artifact = ArtifactEntry::temp_markdown(5, "Help".to_string(), "help".to_string());
     let mut viewer = ArtifactViewerState::new(artifact);

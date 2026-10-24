@@ -64,6 +64,9 @@ impl Drop for WatcherFixture {
 
 #[test]
 fn vault_watcher_visible_viewer_modify_reloads_clamps_and_notices_within_five_ticks() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = WatcherFixture::new("viewer-modify");
     let (_tabs, mut workspaces, tab_id) = fixture.activate();
     let state = workspaces.get_mut_for_test(tab_id).expect("workspace");
@@ -100,6 +103,9 @@ fn vault_watcher_visible_viewer_modify_reloads_clamps_and_notices_within_five_ti
 
 #[test]
 fn vault_watcher_editor_modify_marks_disk_change_without_restarting_editor() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = WatcherFixture::new("editor-modify");
     let (_tabs, mut workspaces, tab_id) = fixture.activate();
     let (editor, probe) = live_editor();
@@ -119,6 +125,9 @@ fn vault_watcher_editor_modify_marks_disk_change_without_restarting_editor() {
 
 #[test]
 fn vault_watcher_selected_delete_clears_viewer_and_keeps_nearest_selection() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = WatcherFixture::new("delete-selected");
     let (_tabs, mut workspaces, tab_id) = fixture.activate();
     let state = workspaces.get_mut_for_test(tab_id).expect("workspace");
@@ -137,6 +146,9 @@ fn vault_watcher_selected_delete_clears_viewer_and_keeps_nearest_selection() {
 
 #[test]
 fn vault_watcher_late_event_with_old_tab_id_is_ignored() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = WatcherFixture::new("stale-tab");
     let mut tabs = AppTabs::default();
     let old_tab = tabs.add_launcher();
@@ -162,6 +174,9 @@ fn vault_watcher_late_event_with_old_tab_id_is_ignored() {
 
 #[test]
 fn vault_watcher_overflow_rescans_then_clears_flag_after_success() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = WatcherFixture::new("overflow-rescan");
     let (_tabs, mut workspaces, tab_id) = fixture.activate();
     workspaces
@@ -180,6 +195,9 @@ fn vault_watcher_overflow_rescans_then_clears_flag_after_success() {
 
 #[test]
 fn vault_watcher_close_and_rebind_drop_each_watcher_exactly_once() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = WatcherFixture::new("drop-counts");
     let (mut tabs, mut workspaces, tab_id) = fixture.activate();
     let close_drops = Arc::new(AtomicUsize::new(0));

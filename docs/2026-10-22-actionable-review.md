@@ -444,14 +444,15 @@ security transition closes the process. Missing-source retry reused the password
 without recreating the missing mount or deleting the external original.
 
 **Local verification:** pinned Rust 1.99.1 in `tcui`, isolated sibling HOME/XDG
-directories, offline build inputs, and one test thread:
+directories, offline build inputs, and eight test threads:
 
 | Configuration | Unit tests passed | Integration tests passed | Ignored |
 |---|---:|---:|---:|
 | All features | 1,302 | 18 | 3 |
 | No default features | 1,245 | 18 | 1 |
 
-Both `cargo test --locked --offline --all-targets` feature configurations passed.
+Both `cargo test --locked --offline --all-targets` feature configurations passed
+with `-- --nocapture --test-threads=8`.
 The XDG integration harness reran nine restart/recovery/confinement scenarios.
 Formatting, strict all-target Clippy in both configurations, and the all-feature
 development build passed. Live OAuth account QA remains explicitly ignored.
@@ -464,6 +465,15 @@ The inherited password descriptor is close-on-exec before helper launch, and
 real browser-helper tests verify that neither seekable-file nor pipe password
 objects reach child descriptors. Unsupported password transports fail before
 data access or helper execution. Final hosted CI is reported with the feature PR.
+
+Hosted parallel execution exposed older fixtures reading process-wide
+environment/protection state without the shared test guard. Affected Vault,
+workspace, viewer/image, saved-file, ephemeral-chat, and recall tests now retain
+that guard for their full state-reading lifetime. CI concurrency and production
+lock enforcement remain enabled. Native configuration defaults now derive the
+built-in profile, Saved path, and legacy artifact alias from one root snapshot.
+The wide-overlay test retains rendered header hit-area checks rather than
+treating whole-screen toast/status wording as proof of sidebar visibility.
 
 **Limits:** filenames and configuration/profile metadata are not encrypted.
 Content copied into unprotected chats, external files, or provider requests

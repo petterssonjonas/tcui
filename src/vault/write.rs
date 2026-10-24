@@ -911,6 +911,9 @@ mod tests {
 
     #[test]
     fn vault_confined_write_contention_leaves_file_and_backup_store_untouched() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("contention-no-partial");
         fs::write(fixture.root.join("note.md"), b"original").expect("write original");
@@ -937,6 +940,9 @@ mod tests {
 
     #[test]
     fn vault_confined_write_failure_points_preserve_original() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         for point in [
             TestFailurePoint::Write,
             TestFailurePoint::Sync,
@@ -976,6 +982,9 @@ mod tests {
     fn vault_confined_write_symlink_escape_never_reaches_outside_sentinel() {
         use std::os::unix::fs::symlink;
 
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("symlink-escape");
         let outside = fixture.base.join("outside");
@@ -1005,6 +1014,9 @@ mod tests {
     fn vault_confined_write_final_symlink_never_reaches_outside_sentinel() {
         use std::os::unix::fs::symlink;
 
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("final-symlink");
         let outside = fixture.base.join("outside.md");
@@ -1029,6 +1041,9 @@ mod tests {
 
     #[test]
     fn vault_confined_write_restore_uses_versioned_backup_and_preserves_replaced_bytes() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("restore");
         fs::write(fixture.root.join("note.md"), b"original").expect("write original");
@@ -1058,6 +1073,9 @@ mod tests {
 
     #[test]
     fn vault_confined_write_restore_missing_original_removes_created_file() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("restore-missing");
         let service = fixture.service();
@@ -1083,6 +1101,9 @@ mod tests {
 
     #[test]
     fn vault_confined_write_restore_missing_rolls_back_on_parent_sync_failure() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("restore-missing-sync");
         let service = fixture.service();
@@ -1115,6 +1136,9 @@ mod tests {
 
     #[test]
     fn vault_confined_write_diff_is_profile_and_relative_path_scoped() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("diff");
         fs::write(fixture.root.join("note.md"), b"old line\n").expect("write original");
@@ -1132,6 +1156,9 @@ mod tests {
 
     #[test]
     fn vault_confined_write_editor_target_is_validated_and_consumed_once() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("editor-target");
         fs::write(fixture.root.join("note.md"), b"inside").expect("write editor target");

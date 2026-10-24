@@ -503,6 +503,9 @@ mod tests {
 
     #[test]
     fn vault_confined_write_unknown_backup_version_is_rejected_and_retained() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let root = test_root("unknown-version");
         let store = BackupStore::new(root.clone());
@@ -529,6 +532,9 @@ mod tests {
 
     #[test]
     fn vault_confined_write_retention_removes_only_old_terminal_backups() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let root = test_root("retention");
         let store = BackupStore::new(root.clone());

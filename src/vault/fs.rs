@@ -656,6 +656,9 @@ mod tests {
 
     #[test]
     fn vault_confined_read_reads_utf8_text() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         let vault = TestDirectory::new("utf8");
         vault.create_file("notes/unicode.md", "Héllo 世界".as_bytes());
 
@@ -669,6 +672,9 @@ mod tests {
 
     #[test]
     fn vault_confined_read_returns_typed_error_for_non_utf8() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         let vault = TestDirectory::new("binary");
         vault.create_file("binary.dat", &[0xff, 0xfe, 0xfd]);
 
@@ -701,6 +707,9 @@ mod tests {
     fn vault_confined_read_never_opens_final_symlink() {
         use std::os::unix::fs::symlink;
 
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         let vault = TestDirectory::new("final-symlink");
         let outside = TestDirectory::new("outside-file");
         outside.create_file("sentinel.md", b"outside secret");
@@ -723,6 +732,9 @@ mod tests {
     fn vault_confined_read_never_descends_component_symlink() {
         use std::os::unix::fs::symlink;
 
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         let vault = TestDirectory::new("component-symlink");
         let outside = TestDirectory::new("outside-directory");
         outside.create_file("sentinel.md", b"outside secret");
@@ -741,6 +753,9 @@ mod tests {
     fn vault_confined_read_listing_reports_symlink_without_descending() {
         use std::os::unix::fs::symlink;
 
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         let vault = TestDirectory::new("list-symlink");
         let outside = TestDirectory::new("list-outside");
         outside.create_file("sentinel.md", b"outside secret");
@@ -758,6 +773,9 @@ mod tests {
 
     #[test]
     fn vault_confined_read_listing_is_deterministic_directory_first_and_hidden_filtered() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         let vault = TestDirectory::new("listing-order");
         vault.create_file("zeta.md", b"z");
         vault.create_file("alpha/note.md", b"a");
@@ -783,6 +801,9 @@ mod tests {
 
     #[test]
     fn vault_confined_read_listing_returns_partial_metadata_at_entry_limit() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         let vault = TestDirectory::new("entry-limit");
         vault.create_file("a.md", b"a");
         vault.create_file("b.md", b"b");
@@ -807,6 +828,9 @@ mod tests {
 
     #[test]
     fn vault_confined_read_listing_returns_partial_metadata_at_depth_limit() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         let vault = TestDirectory::new("depth-limit");
         vault.create_file("one/two/deep.md", b"deep");
 
@@ -830,6 +854,9 @@ mod tests {
 
     #[test]
     fn vault_confined_read_search_returns_partial_metadata_at_file_limit() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         let vault = TestDirectory::new("search-file-limit");
         vault.create_file("a.md", b"needle");
         vault.create_file("b.md", b"needle");
@@ -851,6 +878,9 @@ mod tests {
 
     #[test]
     fn vault_confined_read_search_respects_total_byte_limit() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         let vault = TestDirectory::new("search-total-byte-limit");
         vault.create_file("a.md", b"12345 needle");
         vault.create_file("b.md", b"needle");
@@ -872,6 +902,9 @@ mod tests {
 
     #[test]
     fn vault_confined_read_search_skips_oversized_files_with_partial_metadata() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         let vault = TestDirectory::new("search-file-byte-limit");
         vault.create_file("large.md", b"needle beyond bound");
 
@@ -892,6 +925,9 @@ mod tests {
 
     #[test]
     fn vault_confined_read_search_respects_match_limit() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         let vault = TestDirectory::new("search-match-limit");
         vault.create_file("many.md", b"needle needle needle");
 
@@ -912,6 +948,9 @@ mod tests {
 
     #[test]
     fn vault_confined_read_search_is_case_insensitive_and_hidden_filtered() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         let vault = TestDirectory::new("search-hidden");
         vault.create_file("visible.md", b"Needle");
         vault.create_file(".hidden.md", b"needle");

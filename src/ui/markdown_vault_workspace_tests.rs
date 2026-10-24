@@ -60,6 +60,9 @@ impl Drop for CatalogFixture {
 
 #[test]
 fn independent_tabs_own_separate_profiles_and_filesystems() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = CatalogFixture::new("independent");
     let mut tabs = AppTabs::default();
     let first_tab = tabs.add_launcher();
@@ -96,6 +99,9 @@ fn independent_tabs_own_separate_profiles_and_filesystems() {
 
 #[test]
 fn duplicate_profile_binding_to_same_tab_is_rejected() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = CatalogFixture::new("duplicate");
     let mut tabs = AppTabs::default();
     let tab_id = tabs.add_launcher();
@@ -115,6 +121,9 @@ fn duplicate_profile_binding_to_same_tab_is_rejected() {
 
 #[test]
 fn failed_rebind_keeps_old_descriptor_state_and_filesystem() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = CatalogFixture::new("failed-rebind");
     let mut tabs = AppTabs::default();
     let tab_id = tabs.add_launcher();
@@ -149,6 +158,9 @@ fn failed_rebind_keeps_old_descriptor_state_and_filesystem() {
 
 #[test]
 fn live_editor_cancel_preserves_old_workspace_and_pty() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = CatalogFixture::new("cancel");
     let mut tabs = AppTabs::default();
     let tab_id = tabs.add_launcher();
@@ -182,6 +194,9 @@ fn live_editor_cancel_preserves_old_workspace_and_pty() {
 
 #[test]
 fn live_editor_confirm_constructs_then_swaps_and_drops_once() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = CatalogFixture::new("confirm");
     let mut tabs = AppTabs::default();
     let tab_id = tabs.add_launcher();
@@ -216,6 +231,9 @@ fn live_editor_confirm_constructs_then_swaps_and_drops_once() {
 
 #[test]
 fn stale_app_tab_actions_are_typed_no_ops() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = CatalogFixture::new("stale");
     let mut tabs = AppTabs::default();
     let tab_id = tabs.add_launcher();
@@ -244,6 +262,9 @@ fn stale_app_tab_actions_are_typed_no_ops() {
 
 #[test]
 fn close_drops_workspace_and_live_pty_exactly_once() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("env lock poisoned");
     let fixture = CatalogFixture::new("drop-once");
     let mut tabs = AppTabs::default();
     let tab_id = tabs.add_launcher();

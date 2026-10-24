@@ -85,6 +85,7 @@ fn disk_files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 
 #[test]
 fn ephemeral_forks_copy_context_and_lineage_without_reusing_conversation_ids() {
+    let _guard = crate::test_support::env_lock().lock().expect("env lock");
     let fixture = Fixture::new();
     let source = fixture.saved_conversation();
     let mut first = message(source, "first context");
@@ -137,6 +138,7 @@ fn ephemeral_forks_copy_context_and_lineage_without_reusing_conversation_ids() {
 
 #[test]
 fn ephemeral_mutations_are_shared_by_existing_clones_and_leave_saved_chats_unchanged() {
+    let _guard = crate::test_support::env_lock().lock().expect("env lock");
     let fixture = Fixture::new();
     let source = fixture.saved_conversation();
     let reader = fixture.storage.chat_reader();
@@ -195,6 +197,7 @@ fn ephemeral_mutations_are_shared_by_existing_clones_and_leave_saved_chats_uncha
 
 #[test]
 fn ephemeral_chats_never_reach_disk_trash_persistent_listings_export_or_automatic_recall() {
+    let _guard = crate::test_support::env_lock().lock().expect("env lock");
     let fixture = Fixture::new();
     let source = fixture.saved_conversation();
     let saved_files = disk_files(&fixture.paths.root);
@@ -258,6 +261,7 @@ fn ephemeral_chats_never_reach_disk_trash_persistent_listings_export_or_automati
 
 #[test]
 fn deleting_ephemeral_chat_invalidates_clones_and_late_mutations_without_disk_fallback() {
+    let _guard = crate::test_support::env_lock().lock().expect("env lock");
     let fixture = Fixture::new();
     let source = fixture.saved_conversation();
     let fork = fixture.ephemeral_conversation(source);
@@ -288,6 +292,7 @@ fn deleting_ephemeral_chat_invalidates_clones_and_late_mutations_without_disk_fa
 
 #[test]
 fn reopening_storage_cannot_read_ephemeral_chats_or_reuse_their_ids() {
+    let _guard = crate::test_support::env_lock().lock().expect("env lock");
     let fixture = Fixture::new();
     let source = fixture.saved_conversation();
     let fork = fixture.ephemeral_conversation(source);
@@ -336,6 +341,7 @@ fn reopening_storage_cannot_read_ephemeral_chats_or_reuse_their_ids() {
 
 #[test]
 fn ephemeral_storage_does_not_hide_saved_chat_decryption_errors() {
+    let _guard = crate::test_support::env_lock().lock().expect("env lock");
     let fixture = Fixture::new();
     let source = fixture.saved_conversation();
     let fork = fixture.ephemeral_conversation(source);

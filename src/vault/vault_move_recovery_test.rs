@@ -151,6 +151,9 @@ fn age_journal(path: &Path, days: u64) {
 
 #[test]
 fn vault_move_recovery_each_failed_step_is_durable_and_resumable() {
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
     for (recovery_failure, move_failure, overwrite) in [
         (
             RecoveryFailurePoint::RestoreSource,
@@ -222,6 +225,9 @@ fn vault_move_recovery_each_failed_step_is_durable_and_resumable() {
 
 #[test]
 fn vault_move_recovery_restart_and_second_rerun_are_idempotent() {
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
     // Given
     let fixture = Fixture::new("restart-idempotent");
     let operation_id = fixture.interrupt(MoveFailurePoint::SourceDirectorySync, false);
@@ -252,6 +258,9 @@ fn vault_move_recovery_restart_and_second_rerun_are_idempotent() {
 
 #[test]
 fn vault_move_recovery_failed_immediate_rollback_blocks_until_startup_resume() {
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
     // Given
     let fixture = Fixture::new("immediate-rollback-failure");
     fixture.write_source("note.md", b"source bytes");
@@ -285,6 +294,9 @@ fn vault_move_recovery_failed_immediate_rollback_blocks_until_startup_resume() {
 
 #[test]
 fn vault_move_recovery_retention_deletes_only_old_known_terminal_sets() {
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
     // Given an old Complete set
     let fixture = Fixture::new("retention");
     fixture.write_source("complete.md", b"complete source");
@@ -346,6 +358,9 @@ fn vault_move_recovery_retention_deletes_only_old_known_terminal_sets() {
 
 #[test]
 fn vault_move_recovery_retention_config_defaults_to_seven_days() {
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
     // Given / When
     let config = crate::config::AppConfig::default();
 
@@ -355,6 +370,9 @@ fn vault_move_recovery_retention_config_defaults_to_seven_days() {
 
 #[test]
 fn vault_move_recovery_is_blocked_while_an_operation_holds_the_global_lock() {
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
     // Given
     let fixture = Fixture::new("lock-contention");
     let operation_id = fixture.interrupt(MoveFailurePoint::StageSync, false);
@@ -374,6 +392,9 @@ fn vault_move_recovery_is_blocked_while_an_operation_holds_the_global_lock() {
 
 #[test]
 fn vault_move_recovery_report_redacts_roots_and_contents() {
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
     // Given
     let fixture = Fixture::new("redacted-report");
     let operation_id = fixture.interrupt(MoveFailurePoint::SourceDirectorySync, false);

@@ -11,16 +11,21 @@ mod chat_saved_file_store_reconciliation;
 
 struct TestRoot {
     path: PathBuf,
+    _guard: std::sync::MutexGuard<'static, ()>,
 }
 
 impl TestRoot {
     fn new(label: &str) -> Self {
+        let guard = crate::test_support::env_lock().lock().expect("env lock");
         let path = std::env::temp_dir().join(format!(
             "tcui-chat-saved-file-store-{label}-{}",
             rand::random::<u64>()
         ));
         std::fs::create_dir_all(&path).expect("create test root");
-        Self { path }
+        Self {
+            path,
+            _guard: guard,
+        }
     }
 
     fn saved_root(&self) -> PathBuf {

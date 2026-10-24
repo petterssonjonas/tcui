@@ -1,5 +1,4 @@
 use super::AppConfig;
-use crate::config::app_config::default_artifact_save_dir;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -62,8 +61,8 @@ fn load_fills_missing_xdg_fields_without_clobbering_existing_values() {
 
     assert_eq!(config.theme, "solarized-dark");
     assert_eq!(
-        config.artifact_save_dir.as_deref(),
-        Some(default_artifact_save_dir().as_str())
+        config.saved_files_dir,
+        Some(data_home.join("tcui/vault").display().to_string())
     );
     let xdg_content = std::fs::read_to_string(&xdg_path).expect("read xdg config");
     assert!(xdg_content.contains("theme = \"solarized-dark\""));

@@ -870,6 +870,9 @@ mod vault_move_plan {
 
     #[test]
     fn planning_is_read_only_and_captures_blake3_preconditions() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("read-only");
         fixture.write_source("note.md", b"source sentinel");
@@ -904,6 +907,9 @@ mod vault_move_plan {
 
     #[test]
     fn file_count_limit_accepts_one_hundred_and_rejects_one_hundred_one() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("file-count");
         let mut pairs = Vec::new();
@@ -933,6 +939,9 @@ mod vault_move_plan {
 
     #[test]
     fn total_size_limit_accepts_256_mib_and_rejects_one_extra_byte() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("total-size");
         let exact = fixture.source_root.join("exact.md");
@@ -974,6 +983,9 @@ mod vault_move_plan {
 
     #[test]
     fn source_directory_is_rejected() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("source-directory");
         fs::create_dir(fixture.source_root.join("folder")).expect("create source directory");
@@ -1000,6 +1012,9 @@ mod vault_move_plan {
     fn source_symlink_is_rejected_without_following_it() {
         use std::os::unix::fs::symlink;
 
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("source-symlink");
         let outside = fixture.base.join("outside.md");
@@ -1032,6 +1047,9 @@ mod vault_move_plan {
     fn unsupported_source_file_is_rejected() {
         use std::os::unix::net::UnixListener;
 
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("source-unsupported");
         let socket_path = fixture.source_root.join("socket.md");
@@ -1056,6 +1074,9 @@ mod vault_move_plan {
 
     #[test]
     fn collisions_classify_create_explicit_overwrite_and_unapproved_collision() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("collisions");
         fixture.write_source("create.md", b"create");
@@ -1089,6 +1110,9 @@ mod vault_move_plan {
 
     #[test]
     fn invalid_destination_type_is_rejected_with_collision_classification() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("destination-directory");
         fixture.write_source("note.md", b"note");
@@ -1113,6 +1137,9 @@ mod vault_move_plan {
 
     #[test]
     fn same_size_content_change_invalidates_whole_plan_by_digest() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("digest-change");
         fixture.write_source("note.md", b"alpha");
@@ -1133,6 +1160,9 @@ mod vault_move_plan {
 
     #[test]
     fn open_editor_source_or_destination_is_rejected_by_callback() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("open-editor");
         fixture.write_source("note.md", b"note");
@@ -1150,6 +1180,9 @@ mod vault_move_plan {
 
     #[test]
     fn duplicate_source_is_rejected() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("duplicate-source");
         fixture.write_source("note.md", b"note");
@@ -1170,6 +1203,9 @@ mod vault_move_plan {
 
     #[test]
     fn duplicate_destination_is_rejected() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("duplicate-destination");
         fixture.write_source("first.md", b"first");
@@ -1194,6 +1230,9 @@ mod vault_move_plan {
 
     #[test]
     fn same_profile_pair_with_distinct_paths_is_allowed() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("same-profile");
         fixture.write_source("note.md", b"note");
@@ -1213,6 +1252,9 @@ mod vault_move_plan {
 
     #[test]
     fn same_profile_plan_rejects_any_source_destination_overlap() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("same-profile-overlap");
         fixture.write_source("first.md", b"first");
@@ -1240,6 +1282,9 @@ mod vault_move_plan {
 
     #[test]
     fn move_plan_ids_are_unique() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("plan-id");
         fixture.write_source("first.md", b"first");
