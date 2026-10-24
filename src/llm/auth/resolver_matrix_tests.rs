@@ -207,3 +207,92 @@ async fn resolver_tags_native_oauth_and_reports_locked_store_actionably() {
     assert_eq!(error, CredentialError::CredentialStore);
     assert!(error.to_string().contains("/vault"));
 }
+
+#[tokio::test]
+async fn same_provider_plaintext_connections_resolve_while_encrypted_connections_are_locked() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
+    let environment = NativeTestEnvironment::new("mixed-provider-resolution");
+    let config = environment.config();
+    KeyStore::set(&config, "OpenAI", "encrypted-api").unwrap();
+    KeyStore::set_with_storage(
+        &config,
+        "OpenAI::plaintext",
+        "plaintext-api",
+        crate::config::key_store::CredentialStorage::Plaintext,
+    )
+    .unwrap();
+    for provider in ["Codex", "Codex::plaintext"] {
+        KeyStore::upsert_oauth(
+            &config,
+            &OAuthCredential {
+                provider: provider.into(),
+                access_token: provider.into(),
+                refresh_token: Some("refresh".into()),
+                expires_at: Utc::now() + Duration::hours(1),
+                account_id: Some("account".into()),
+                ownership: OAuthCredentialOwnership::Tcui,
+                source: OAuthCredentialSource::NativeOAuth,
+            },
+        )
+        .unwrap();
+    }
+    for provider in ["OpenRouter OAuth", "OpenRouter OAuth::plaintext"] {
+        KeyStore::upsert_credential(
+            &config,
+            &Credential::ApiKey(
+                ApiKeyCredential::new(
+                    provider,
+                    provider,
+                    ApiKeyCredentialOwnership::Tcui,
+                    ApiKeyCredentialSource::OpenRouterPkce,
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+    }
+    KeyStore::lock_vault(&config).unwrap();
+    for (provider, endpoint, token) in [
+        (
+            "OpenAI::plaintext",
+            "https://api.openai.com/v1",
+            "plaintext-api",
+        ),
+        (
+            "Codex::plaintext",
+            "https://chatgpt.com/backend-api/codex",
+            "Codex::plaintext",
+        ),
+        (
+            "OpenRouter OAuth::plaintext",
+            "https://openrouter.ai/api/v1",
+            "OpenRouter OAuth::plaintext",
+        ),
+    ] {
+        let credential = resolve_provider_credential_with_config(
+            CredentialRequest::new(provider, "IGNORED", endpoint),
+            &config,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(credential.bearer_token().expose_secret(), token);
+    }
+    for (provider, endpoint) in [
+        ("OpenAI", "https://api.openai.com/v1"),
+        ("Codex", "https://chatgpt.com/backend-api/codex"),
+        ("OpenRouter OAuth", "https://openrouter.ai/api/v1"),
+    ] {
+        assert!(KeyStore::has_credential(&config, provider).unwrap());
+        assert!(matches!(
+            resolve_provider_credential_with_config(
+                CredentialRequest::new(provider, "IGNORED", endpoint),
+                &config,
+            )
+            .await,
+            Err(CredentialError::CredentialStore)
+        ));
+    }
+}

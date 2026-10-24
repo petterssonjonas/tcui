@@ -22,6 +22,10 @@ impl VaultProfileId {
         rand::rng().fill_bytes(&mut bytes);
         Self(bytes)
     }
+
+    pub fn internal() -> Self {
+        Self([0; VAULT_PROFILE_ID_BYTES])
+    }
 }
 
 impl fmt::Display for VaultProfileId {
@@ -132,6 +136,16 @@ pub struct VaultProfile {
 }
 
 impl VaultProfile {
+    pub fn internal() -> Self {
+        Self {
+            id: VaultProfileId::internal(),
+            display_name: "TCUI Internal".to_string(),
+            name_key: normalize_name("TCUI Internal"),
+            root: crate::protection::internal_vault_root(),
+            available: true,
+        }
+    }
+
     pub fn new(display_name: &str, root: impl AsRef<Path>) -> Result<Self, VaultProfileError> {
         let (display_name, name_key) = validated_name(display_name)?;
         let root = existing_directory(root.as_ref())?;
@@ -150,6 +164,17 @@ impl VaultProfile {
         root: impl AsRef<Path>,
     ) -> Result<Self, VaultProfileError> {
         let (display_name, name_key) = validated_name(display_name)?;
+        if id == VaultProfileId::internal() {
+            let internal = Self::internal();
+            if root.as_ref() != internal.root {
+                return Err(VaultProfileError::BuiltinProfile);
+            }
+            return Ok(Self {
+                display_name,
+                name_key,
+                ..internal
+            });
+        }
         let root = root.as_ref();
         let (root, available) = match std::fs::metadata(root) {
             Ok(metadata) if metadata.is_dir() => (existing_directory(root)?, true),
@@ -229,6 +254,14 @@ impl VaultCatalog {
         &mut self,
         id: &VaultProfileId,
     ) -> Result<Option<VaultProfile>, VaultProfileError> {
+        if id == &VaultProfileId::internal()
+            || self
+                .profiles
+                .get(id)
+                .is_some_and(|profile| profile.root == crate::protection::internal_vault_root())
+        {
+            return Err(VaultProfileError::BuiltinProfile);
+        }
         if !self.profiles.contains_key(id) {
             return Ok(None);
         }
@@ -317,6 +350,11 @@ impl VaultCatalog {
         let mut names = HashSet::with_capacity(self.profiles.len());
         let mut roots = HashSet::with_capacity(self.profiles.len());
         for (catalog_id, profile) in &self.profiles {
+            if profile.id == VaultProfileId::internal()
+                && profile.root != crate::protection::internal_vault_root()
+            {
+                return Err(VaultProfileError::BuiltinProfile);
+            }
             if catalog_id != &profile.id || !ids.insert(&profile.id) {
                 return Err(VaultProfileError::DuplicateId {
                     id: profile.id.clone(),
@@ -375,6 +413,8 @@ pub enum VaultProfileError {
     NotADirectory { path: PathBuf },
     #[error("empty vault catalog cannot have default profile: {id}")]
     NoProfilesWithDefault { id: VaultProfileId },
+    #[error("the built-in TCUI Internal Vault cannot be removed or relocated")]
+    BuiltinProfile,
     #[error("vault profile ID must be 32 lowercase hexadecimal characters: {value}")]
     InvalidId { value: String },
 }

@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::fs;
 
 use serde::Deserialize;
 
@@ -20,13 +19,21 @@ impl<'a> LinkManifest<'a> {
     }
 
     pub(super) fn load(&self) -> Result<ChatFileLinkManifestV1, ChatFileError> {
-        let bytes = match fs::read(&self.paths.chat_file_links_manifest) {
+        crate::protection::require(crate::protection::Domain::Vault)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let bytes = match crate::protection::read_regular(&self.paths.chat_file_links_manifest) {
             Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
                 return Ok(ChatFileLinkManifestV1::empty());
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(std::io::Error::other(error.to_string()).into()),
         };
+        let bytes = crate::protection::decode(crate::protection::Domain::Vault, &bytes)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
         let header = serde_json::from_slice::<VersionHeader>(&bytes)
             .map_err(|_| ChatFileError::CorruptManifest)?;
         if header.version > u64::from(MANIFEST_VERSION) {
@@ -48,6 +55,8 @@ impl<'a> LinkManifest<'a> {
 
     pub(super) fn write(&self, manifest: &ChatFileLinkManifestV1) -> Result<(), ChatFileError> {
         let bytes = serde_json::to_vec_pretty(manifest)?;
+        let bytes = crate::protection::encode(crate::protection::Domain::Vault, &bytes)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
         self.writer.write_replace(
             &self.paths.chat_file_links_manifest,
             &bytes,

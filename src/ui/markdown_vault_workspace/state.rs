@@ -103,7 +103,16 @@ impl MarkdownVaultWorkspaceState {
         }
         let vault_fs = VaultFs::open_profile(&profile.root)?;
         let watcher = VaultWatcher::new(&profile.root, tab_id)?;
-        let listing = vault_fs.list(None, VaultWalkLimits::default())?;
+        let lock_notice = crate::vault::require_root(&profile.root).err()
+            .map(|error| format!("Vault locked or unavailable: {error}. Use /unlock to unlock protected contents."));
+        let listing = if lock_notice.is_none() {
+            vault_fs.list(None, VaultWalkLimits::default())?
+        } else {
+            crate::vault::VaultListing {
+                entries: Vec::new(),
+                limits: Vec::new(),
+            }
+        };
         let tree_entries = listing
             .entries
             .into_iter()
@@ -137,7 +146,11 @@ impl MarkdownVaultWorkspaceState {
             tree: MarkdownVaultTreeModel::new(tree_entries),
             viewer: DocumentViewerState::new(DocumentSource::new(
                 DocumentKind::Text,
-                Some("Select a file to preview".to_string()),
+                Some(
+                    lock_notice
+                        .clone()
+                        .unwrap_or_else(|| "Select a file to preview".to_string()),
+                ),
                 None,
             )),
             viewer_path: None,
@@ -156,7 +169,7 @@ impl MarkdownVaultWorkspaceState {
             },
             hit_areas: MarkdownVaultHitAreas::default(),
             status: MarkdownVaultWorkspaceStatus::Ready,
-            metadata: None,
+            metadata: lock_notice,
             move_input: None,
             pending_rebind_profile_id: None,
             #[cfg(test)]

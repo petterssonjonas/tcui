@@ -115,6 +115,14 @@ impl<'a> MoveRecoveryService<'a> {
     }
 
     pub(crate) fn recover_startup(&self) -> Result<MoveRecoveryReport, VaultWriteError> {
+        self.recover(true)
+    }
+
+    pub(crate) fn recover_pending(&self) -> Result<MoveRecoveryReport, VaultWriteError> {
+        self.recover(false)
+    }
+
+    fn recover(&self, prune_terminal: bool) -> Result<MoveRecoveryReport, VaultWriteError> {
         let guard = self.mutation_lock.try_acquire()?;
         let roots = self
             .journals
@@ -123,6 +131,12 @@ impl<'a> MoveRecoveryService<'a> {
         let mut report = MoveRecoveryReport::default();
         for root in roots {
             match self.journals.load_operation_root(&root) {
+                Ok(journal)
+                    if !prune_terminal
+                        && matches!(
+                            journal.state,
+                            MoveJournalState::Complete | MoveJournalState::RolledBack
+                        ) => {}
                 Ok(mut journal) => self.process_known(&guard, &root, &mut journal, &mut report),
                 Err(_) => report.records.push(RecoveryRecord {
                     operation_id: operation_directory_name(&root),

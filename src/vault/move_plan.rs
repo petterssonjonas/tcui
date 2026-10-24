@@ -4,11 +4,11 @@
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read};
-use std::path::Component;
+use std::path::{Component, PathBuf};
 use std::time::SystemTime;
 
 use blake3::Hash;
-use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_fs_ext::{DirExt, FollowSymlinks, MetadataExt as _, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, File, Metadata, OpenOptions};
 
 use crate::config::vault_profiles::{VaultCatalog, VaultProfile, VaultProfileId};
@@ -109,6 +109,7 @@ pub struct MovePlan {
     preconditions: Vec<FilePrecondition>,
     collisions: Vec<MoveCollision>,
     total_size: u64,
+    copy_only: bool,
 }
 
 impl MovePlan {
@@ -116,6 +117,23 @@ impl MovePlan {
         pairs: Vec<MovePair>,
         catalog: &VaultCatalog,
         is_open_in_editor: impl Fn(&VaultFileRef) -> bool,
+    ) -> Result<Self, MovePlanError> {
+        Self::build_transfer(pairs, catalog, is_open_in_editor, false)
+    }
+
+    pub fn build_copy(
+        pairs: Vec<MovePair>,
+        catalog: &VaultCatalog,
+        is_open_in_editor: impl Fn(&VaultFileRef) -> bool,
+    ) -> Result<Self, MovePlanError> {
+        Self::build_transfer(pairs, catalog, is_open_in_editor, true)
+    }
+
+    fn build_transfer(
+        pairs: Vec<MovePair>,
+        catalog: &VaultCatalog,
+        is_open_in_editor: impl Fn(&VaultFileRef) -> bool,
+        copy_only: bool,
     ) -> Result<Self, MovePlanError> {
         validate_request(&pairs, &is_open_in_editor)?;
         let mut readers = ProfileReaders::new(catalog);
@@ -154,12 +172,14 @@ impl MovePlan {
             collisions.push(collision);
         }
 
+        validate_physical_targets(&pairs, &mut readers, copy_only)?;
         Ok(Self {
             id: MovePlanId::new(),
             pairs,
             preconditions,
             collisions,
             total_size,
+            copy_only,
         })
     }
 
@@ -185,6 +205,10 @@ impl MovePlan {
 
     pub fn file_count(&self) -> usize {
         self.pairs.len()
+    }
+
+    pub fn copy_only(&self) -> bool {
+        self.copy_only
     }
 
     pub fn revalidate(&self, catalog: &VaultCatalog) -> Result<(), MovePlanError> {
@@ -215,6 +239,7 @@ impl MovePlan {
                 });
             }
         }
+        validate_physical_targets(&self.pairs, &mut readers, self.copy_only)?;
         Ok(())
     }
 }
@@ -307,6 +332,71 @@ fn validate_request(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PhysicalTarget {
+    Entry {
+        device: u64,
+        inode: u64,
+        suffix: PathBuf,
+    },
+    File {
+        device: u64,
+        inode: u64,
+    },
+}
+
+fn validate_physical_targets(
+    pairs: &[MovePair],
+    readers: &mut ProfileReaders<'_>,
+    copy_only: bool,
+) -> Result<(), MovePlanError> {
+    let mut sources = HashSet::with_capacity(pairs.len().saturating_mul(2));
+    let mut destinations = HashSet::with_capacity(pairs.len().saturating_mul(2));
+    for pair in pairs {
+        let reader = readers.get(pair.source.profile_id())?;
+        if !copy_only {
+            let source = reader.path.join(pair.source.path().as_path());
+            crate::storage::chat_files::ChatSavedFileStore::discover()
+                .require_unlinked_move(&source)
+                .map_err(|error| {
+                    io_error(
+                        "move linked Saved file; explicitly copy/export instead",
+                        pair.source(),
+                        io::Error::other(error.to_string()),
+                    )
+                })?;
+        }
+        for identity in reader.physical_target(pair.source())?.into_iter().flatten() {
+            if !sources.insert(identity) {
+                return Err(MovePlanError::DuplicateSource {
+                    file: pair.source.clone(),
+                });
+            }
+        }
+        for identity in readers
+            .get(pair.destination.profile_id())?
+            .physical_target(pair.destination())?
+            .into_iter()
+            .flatten()
+        {
+            if !destinations.insert(identity) {
+                return Err(MovePlanError::DuplicateDestination {
+                    destination: pair.destination.clone(),
+                });
+            }
+        }
+    }
+    if sources
+        .iter()
+        .any(|identity| destinations.contains(identity))
+    {
+        return Err(MovePlanError::OverlappingSourceDestination {
+            file: pairs[0].source.clone(),
+        });
+    }
+    Ok(())
+}
+
 struct ProfileReaders<'a> {
     catalog: &'a VaultCatalog,
     readers: HashMap<VaultProfileId, ProfileReader>,
@@ -338,16 +428,90 @@ impl<'a> ProfileReaders<'a> {
 
 struct ProfileReader {
     root: Dir,
+    path: PathBuf,
 }
 
 impl ProfileReader {
     fn open(profile: &VaultProfile) -> Result<Self, MovePlanError> {
-        Dir::open_ambient_dir(&profile.root, cap_std::ambient_authority())
-            .map(|root| Self { root })
+        super::require_root(&profile.root).map_err(|source| MovePlanError::OpenProfile {
+            profile_id: profile.id.clone(),
+            source,
+        })?;
+        crate::protection::open_directory(&profile.root, false)
+            .map_err(|error| io::Error::other(error.to_string()))
+            .map(|root| Self {
+                root,
+                path: profile.root.clone(),
+            })
             .map_err(|source| MovePlanError::OpenProfile {
                 profile_id: profile.id.clone(),
                 source,
             })
+    }
+
+    fn physical_target(
+        &self,
+        file: &VaultFileRef,
+    ) -> Result<[Option<PhysicalTarget>; 2], MovePlanError> {
+        super::require_root(&self.path.join(file.path().as_path()))
+            .map_err(|error| io_error("unlock before resolving", file, error))?;
+        let mut directory = self
+            .root
+            .try_clone()
+            .map_err(|error| io_error("clone root", file, error))?;
+        let mut components = file.path().as_path().components().peekable();
+        while let Some(component) = components.next() {
+            let name = normal_component(component, file)?;
+            if components.peek().is_some() {
+                match directory.open_dir_nofollow(name) {
+                    Ok(child) => {
+                        directory = child;
+                        continue;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        let mut suffix = PathBuf::from(name);
+                        for component in components {
+                            suffix.push(normal_component(component, file)?);
+                        }
+                        let metadata = directory
+                            .metadata(".")
+                            .map_err(|error| io_error("identify parent", file, error))?;
+                        return Ok([
+                            Some(PhysicalTarget::Entry {
+                                device: metadata.dev(),
+                                inode: metadata.ino(),
+                                suffix,
+                            }),
+                            None,
+                        ]);
+                    }
+                    Err(error) => return Err(io_error("resolve physical parent", file, error)),
+                }
+            }
+            let parent = directory
+                .metadata(".")
+                .map_err(|error| io_error("identify parent", file, error))?;
+            let entry = PhysicalTarget::Entry {
+                device: parent.dev(),
+                inode: parent.ino(),
+                suffix: PathBuf::from(name),
+            };
+            let inode = match directory.symlink_metadata(name) {
+                Ok(metadata) if metadata.is_file() => Some(PhysicalTarget::File {
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                }),
+                Ok(_) => None,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => return Err(io_error("identify target", file, error)),
+            };
+            return Ok([Some(entry), inode]);
+        }
+        Err(io_error(
+            "identify target",
+            file,
+            io::Error::other("empty target"),
+        ))
     }
 
     fn precondition(
@@ -403,7 +567,12 @@ impl ProfileReader {
             .modified()
             .map_err(|source_error| io_error("read modification time for", source, source_error))?
             .into_std();
-        if before.len() > remaining_bytes {
+        let overhead = if super::is_internal_root(&self.path.join(source.path().as_path())) {
+            4096
+        } else {
+            0
+        };
+        if before.len() > remaining_bytes.saturating_add(overhead) {
             return Err(MovePlanError::TotalSizeExceeded {
                 actual: MAX_MOVE_BYTES
                     .saturating_sub(remaining_bytes)
@@ -411,7 +580,29 @@ impl ProfileReader {
                 limit: MAX_MOVE_BYTES,
             });
         }
-        let (digest, bytes_read) = hash_file(&mut file, source, remaining_bytes)?;
+        let (digest, bytes_read, logical_size) =
+            if super::is_internal_root(&self.path.join(source.path().as_path())) {
+                let mut bytes = Vec::new();
+                file.by_ref()
+                    .take(remaining_bytes.saturating_add(overhead).saturating_add(1))
+                    .read_to_end(&mut bytes)
+                    .map_err(|error| io_error("read", source, error))?;
+                let bytes_read = bytes.len() as u64;
+                let decoded = super::decode_root(&self.path.join(source.path().as_path()), bytes)
+                    .map_err(|error| io_error("decrypt", source, error))?;
+                if decoded.len() as u64 > remaining_bytes {
+                    return Err(MovePlanError::TotalSizeExceeded {
+                        actual: MAX_MOVE_BYTES
+                            .saturating_sub(remaining_bytes)
+                            .saturating_add(decoded.len() as u64),
+                        limit: MAX_MOVE_BYTES,
+                    });
+                }
+                (blake3::hash(&decoded), bytes_read, decoded.len() as u64)
+            } else {
+                let (digest, bytes_read) = hash_file(&mut file, source, remaining_bytes)?;
+                (digest, bytes_read, bytes_read)
+            };
         let after = file
             .metadata()
             .map_err(|source_error| io_error("recheck metadata for", source, source_error))?;
@@ -427,7 +618,7 @@ impl ProfileReader {
             });
         }
         Ok(FilePrecondition {
-            size: before.len(),
+            size: logical_size,
             modified,
             blake3: digest,
         })
@@ -459,6 +650,8 @@ impl ProfileReader {
     }
 
     fn open_parent(&self, file: &VaultFileRef) -> Result<ParentState, MovePlanError> {
+        super::require_root(&self.path.join(file.path().as_path()))
+            .map_err(|error| io_error("unlock before accessing", file, error))?;
         let mut directory = self
             .root
             .try_clone()
@@ -677,6 +870,9 @@ mod vault_move_plan {
 
     #[test]
     fn planning_is_read_only_and_captures_blake3_preconditions() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("read-only");
         fixture.write_source("note.md", b"source sentinel");
@@ -711,6 +907,9 @@ mod vault_move_plan {
 
     #[test]
     fn file_count_limit_accepts_one_hundred_and_rejects_one_hundred_one() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("file-count");
         let mut pairs = Vec::new();
@@ -740,6 +939,9 @@ mod vault_move_plan {
 
     #[test]
     fn total_size_limit_accepts_256_mib_and_rejects_one_extra_byte() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("total-size");
         let exact = fixture.source_root.join("exact.md");
@@ -781,6 +983,9 @@ mod vault_move_plan {
 
     #[test]
     fn source_directory_is_rejected() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("source-directory");
         fs::create_dir(fixture.source_root.join("folder")).expect("create source directory");
@@ -807,6 +1012,9 @@ mod vault_move_plan {
     fn source_symlink_is_rejected_without_following_it() {
         use std::os::unix::fs::symlink;
 
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("source-symlink");
         let outside = fixture.base.join("outside.md");
@@ -839,6 +1047,9 @@ mod vault_move_plan {
     fn unsupported_source_file_is_rejected() {
         use std::os::unix::net::UnixListener;
 
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("source-unsupported");
         let socket_path = fixture.source_root.join("socket.md");
@@ -863,6 +1074,9 @@ mod vault_move_plan {
 
     #[test]
     fn collisions_classify_create_explicit_overwrite_and_unapproved_collision() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("collisions");
         fixture.write_source("create.md", b"create");
@@ -896,6 +1110,9 @@ mod vault_move_plan {
 
     #[test]
     fn invalid_destination_type_is_rejected_with_collision_classification() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("destination-directory");
         fixture.write_source("note.md", b"note");
@@ -920,6 +1137,9 @@ mod vault_move_plan {
 
     #[test]
     fn same_size_content_change_invalidates_whole_plan_by_digest() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("digest-change");
         fixture.write_source("note.md", b"alpha");
@@ -940,6 +1160,9 @@ mod vault_move_plan {
 
     #[test]
     fn open_editor_source_or_destination_is_rejected_by_callback() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("open-editor");
         fixture.write_source("note.md", b"note");
@@ -957,6 +1180,9 @@ mod vault_move_plan {
 
     #[test]
     fn duplicate_source_is_rejected() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("duplicate-source");
         fixture.write_source("note.md", b"note");
@@ -977,6 +1203,9 @@ mod vault_move_plan {
 
     #[test]
     fn duplicate_destination_is_rejected() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("duplicate-destination");
         fixture.write_source("first.md", b"first");
@@ -1001,6 +1230,9 @@ mod vault_move_plan {
 
     #[test]
     fn same_profile_pair_with_distinct_paths_is_allowed() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("same-profile");
         fixture.write_source("note.md", b"note");
@@ -1020,6 +1252,9 @@ mod vault_move_plan {
 
     #[test]
     fn same_profile_plan_rejects_any_source_destination_overlap() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("same-profile-overlap");
         fixture.write_source("first.md", b"first");
@@ -1047,6 +1282,9 @@ mod vault_move_plan {
 
     #[test]
     fn move_plan_ids_are_unique() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let fixture = Fixture::new("plan-id");
         fixture.write_source("first.md", b"first");

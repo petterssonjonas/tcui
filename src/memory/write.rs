@@ -30,6 +30,7 @@ impl MemoryStore {
         overwrite: bool,
         metadata: Option<MemoryMetadata>,
     ) -> Result<WriteOutcome, MemoryError> {
+        crate::protection::require(crate::protection::Domain::Memories)?;
         validate_markdown(markdown)?;
         if let Some(metadata) = &metadata {
             metadata.validate()?;
@@ -67,7 +68,7 @@ impl MemoryStore {
         let now = now_ms();
         let document = MemoryDocument {
             schema_version: 1,
-            id: self.allocate_document_id(),
+            id: self.allocate_document_id()?,
             logical_path: logical_path.clone(),
             title: title.clone(),
             created_at_ms: now,
@@ -96,6 +97,7 @@ impl MemoryStore {
         markdown: &str,
         metadata: MemoryMetadata,
     ) -> Result<WriteOutcome, MemoryError> {
+        crate::protection::require(crate::protection::Domain::Memories)?;
         validate_markdown(markdown)?;
         metadata.validate()?;
         if likely_secret(markdown) {
@@ -118,6 +120,7 @@ impl MemoryStore {
     }
 
     pub(crate) fn forget(&self, path: &Path) -> Result<PathBuf, MemoryError> {
+        crate::protection::require(crate::protection::Domain::Memories)?;
         let logical = self.paths.logical_path(path)?;
         let document = self
             .find_document_by_logical_path(&logical)?
@@ -135,6 +138,7 @@ impl MemoryStore {
 
     #[allow(dead_code)]
     pub(crate) fn add_from_plaintext(&self, path: &Path) -> Result<WriteOutcome, MemoryError> {
+        crate::protection::require(crate::protection::Domain::Memories)?;
         let source = std::fs::canonicalize(path)?;
         let extension = source.extension().and_then(|value| value.to_str());
         if !matches!(extension, Some("md" | "txt")) {
@@ -158,6 +162,7 @@ impl MemoryStore {
         fact: &str,
         metadata: &MemoryMetadata,
     ) -> Result<Option<String>, MemoryError> {
+        crate::protection::require(crate::protection::Domain::Memories)?;
         let normalized_fact = normalize_markdown(fact);
         let normalized_fact = memory_body(&normalized_fact);
         let legacy_metadata = MemoryMetadata::default();

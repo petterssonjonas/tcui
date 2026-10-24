@@ -113,6 +113,9 @@ fn write_file(root: &Path, path: &str, bytes: &[u8]) {
 
 #[test]
 fn move_execution_dual_handle_contention_returns_busy_without_journal() {
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
     // Given
     let fixture = Fixture::new("dual-handle-contention");
     fixture.write_source("note.md", b"source");
@@ -166,6 +169,9 @@ fn move_execution_lock_child_probe() {
 
 #[test]
 fn move_execution_failures_rollback_before_returning() {
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
     for point in [
         TestFailurePoint::JournalTransition,
         TestFailurePoint::Backup,
@@ -208,6 +214,9 @@ fn move_execution_failures_rollback_before_returning() {
 
 #[test]
 fn move_execution_source_sync_failure_restores_pre_operation_state() {
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
     // Given
     let fixture = Fixture::new("source-sync");
     fixture.write_source("note.md", b"source bytes");
@@ -236,6 +245,9 @@ fn move_execution_source_sync_failure_restores_pre_operation_state() {
 
 #[test]
 fn move_execution_same_profile_move_and_rollback_preserve_transaction_guarantees() {
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
     for failure in [None, Some(TestFailurePoint::SourceDirectorySync)] {
         // Given
         let fixture = Fixture::new(match failure {
@@ -280,6 +292,9 @@ fn move_execution_same_profile_move_and_rollback_preserve_transaction_guarantees
 
 #[test]
 fn move_execution_journal_create_failure_never_mutates_vault() {
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
     // Given
     let fixture = Fixture::new("journal-create");
     fixture.write_source("note.md", b"source bytes");
@@ -300,6 +315,9 @@ fn move_execution_journal_create_failure_never_mutates_vault() {
 
 #[test]
 fn move_execution_precommit_revalidation_failure_never_starts_journal() {
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
     // Given
     let fixture = Fixture::new("precommit-revalidation");
     fixture.write_source("note.md", b"source bytes");
@@ -326,6 +344,9 @@ fn move_execution_precommit_revalidation_failure_never_starts_journal() {
 
 #[test]
 fn move_execution_state_transitions_are_durable_after_each_write() {
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
     // Given
     let fixture = Fixture::new("durable-transitions");
     fixture.write_source("note.md", b"source bytes");
@@ -359,6 +380,9 @@ fn move_execution_state_transitions_are_durable_after_each_write() {
 
 #[test]
 fn move_execution_happy_path_orders_durability_before_source_removal() {
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
     // Given
     let fixture = Fixture::new("happy-path");
     fixture.write_source("first.md", b"first bytes");
@@ -403,6 +427,9 @@ fn move_execution_happy_path_orders_durability_before_source_removal() {
 
 #[test]
 fn move_execution_unknown_journal_version_blocks_and_retains_all_data() {
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
     // Given
     let fixture = Fixture::new("unknown-version");
     fixture.write_source("note.md", b"source bytes");
@@ -433,6 +460,9 @@ fn move_execution_unknown_journal_version_blocks_and_retains_all_data() {
 
 #[test]
 fn move_execution_unknown_journal_version_blocks_standalone_write() {
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
     // Given
     let fixture = Fixture::new("unknown-version-write");
     fixture.write_source("note.md", b"source bytes");
@@ -471,6 +501,9 @@ fn move_execution_unknown_journal_version_blocks_standalone_write() {
 fn move_execution_journal_storage_uses_private_unix_modes() {
     use std::os::unix::fs::PermissionsExt as _;
 
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
     // Given
     let fixture = Fixture::new("permissions");
     fixture.write_source("note.md", b"source bytes");

@@ -36,6 +36,21 @@ impl KeyStore {
         _config: &AppConfig,
         credential: &Credential,
     ) -> std::result::Result<(), KeyStoreError> {
+        Self::write_credential(credential, None)
+    }
+
+    pub(crate) fn upsert_credential_with_storage(
+        _config: &AppConfig,
+        credential: &Credential,
+        storage: super::CredentialStorage,
+    ) -> std::result::Result<(), KeyStoreError> {
+        Self::write_credential(credential, Some(storage))
+    }
+
+    fn write_credential(
+        credential: &Credential,
+        storage: Option<super::CredentialStorage>,
+    ) -> std::result::Result<(), KeyStoreError> {
         match credential {
             Credential::ApiKey(credential) => {
                 let keys = vault::session()?;
@@ -50,7 +65,7 @@ impl KeyStore {
                         credential.provider(),
                         credential.provider(),
                         &payload,
-                        store.preference()?,
+                        store.selected_storage(credential.provider(), storage)?,
                         &keys,
                     )
                 })

@@ -12,16 +12,10 @@ mod lifecycle;
 mod rendering;
 
 fn with_sidebar_app(label: &str, test: impl FnOnce(&mut crate::app::TuiApp, &Path)) {
-    let saved_dir = std::env::temp_dir().join(format!(
-        "tcui-chat-file-sidebar-{label}-{}",
-        rand::random::<u64>()
-    ));
-    let config = AppConfig {
-        saved_files_dir: Some(saved_dir.display().to_string()),
-        ..AppConfig::default()
-    };
-    with_test_app_config(label, config, |app| test(app, &saved_dir));
-    let _ = std::fs::remove_dir_all(saved_dir);
+    with_test_app_config(label, AppConfig::default(), |app| {
+        let saved_dir = crate::protection::internal_vault_root();
+        test(app, &saved_dir);
+    });
 }
 
 fn create_link(

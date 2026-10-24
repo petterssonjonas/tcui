@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use super::recall::format_recall_context;
 use super::store::{MemoryError, MemoryStore};
 use super::MemoryActivity;
@@ -61,12 +59,5 @@ pub(super) fn configured_store(
     if !config.memory.enabled {
         return Err(MemoryError::Invalid("memory is disabled".to_string()));
     }
-    let raw_vault = config
-        .vault_path
-        .as_deref()
-        .map(Path::new)
-        .ok_or_else(|| MemoryError::Invalid("Markdown Vault is not configured".to_string()))?;
-    let vault =
-        crate::app::generated_file::expand_user_path(raw_vault, dirs::home_dir().as_deref());
-    MemoryStore::open(&vault, &MemoryStore::default_cache_path())
+    MemoryStore::open_default()
 }

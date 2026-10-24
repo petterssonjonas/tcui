@@ -15,8 +15,6 @@ pub(crate) struct TcuiDataPaths {
     pub(crate) chat_file_links_manifest: PathBuf,
     pub(crate) chat_file_links_lock: PathBuf,
     pub(crate) migrations_dir: PathBuf,
-    pub(crate) chat_saved_files_v2_marker: PathBuf,
-    pub(crate) chat_saved_files_v2_lock: PathBuf,
 }
 
 impl TcuiDataPaths {
@@ -40,8 +38,6 @@ impl TcuiDataPaths {
             chat_file_links_manifest: root.join("chat-file-links").join("manifest.json"),
             chat_file_links_lock: root.join("chat-file-links").join(".lock"),
             migrations_dir: root.join("migrations"),
-            chat_saved_files_v2_marker: root.join("migrations").join("chat-saved-files-v2.done"),
-            chat_saved_files_v2_lock: root.join("migrations").join("chat-saved-files-v2.lock"),
             root,
         }
     }

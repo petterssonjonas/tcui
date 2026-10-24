@@ -18,17 +18,27 @@ vault-relative paths; they never expose or accept profile roots.
 
 ## Set up profiles
 
-1. Open **Settings → Markdown Vault → Manage vault profiles**.
-2. Choose **Add vault**, select an existing folder, and accept or edit the
-   display name derived from the folder name.
-3. Add more folders as needed and use **Set default** on the profile that an
-   unqualified `@vault` request should use.
+**TCUI Internal** is the default for a fresh configuration; existing defaults
+and later explicit choices are preserved. Its root cannot be removed or relocated:
+`$XDG_DATA_HOME/tcui/vault`, normally `~/.local/share/tcui/vault`. Its display name
+can change; use the configured display name in native requests.
+It owns canonical Saved files and downloaded/chat artifacts. `/security` can
+protect its content and internal backups, link manifests, journals, and stages
+with the shared password. External profiles remain ordinary plaintext folders.
 
-The first profile becomes the default automatically. Rename, folder-change,
-default, and remove actions update profile configuration only; removing a
-profile never deletes its folder or notes. An unavailable persisted folder
-remains configured and becomes usable again when its path is available.
-Profile names and canonical roots must be unique.
+1. Open **Settings → Markdown Vault → Manage vault profiles**.
+2. Choose **Add vault**, select an existing external folder, and accept or edit
+   the display name derived from the folder name.
+3. Address external profiles explicitly by display name.
+
+Renaming, changing the folder, or removing an external profile changes
+configuration only; removal never deletes its folder or notes. Unavailable
+folders remain configured. Names and canonical roots must be unique.
+
+Before creating a plaintext copy of protected content for a terminal editor or
+external export, obtain explicit export consent. Do not treat an ordinary read
+request as export authorization. External originals and user-kept archives remain
+untouched by protection changes; copied content follows destination protection.
 
 Profile configuration persists across restarts. Open Markdown Vault app tabs do
 not: tabs, tab IDs, Tree selection, Viewer scroll, and Editor processes are
@@ -118,42 +128,70 @@ Native read-only tools are `list_notes`, `read_note`, and `search_notes`. Report
 partial results and the reached limit whenever a bounded operation cannot
 return everything.
 
-## Writes, restores, and moves
+## Writes, restores, moves, and copies
 
 A mutation request must explicitly contain `@vault` and exactly one of the
-words `write`, `restore`, or `move`. Include `overwrite` only when replacing an
-existing destination is intended. The model cannot elevate a read request into
-a mutation or infer overwrite permission.
+words `write`, `restore`, `move`, or `copy`. Include `overwrite` only when replacing
+an existing destination is intended. The model cannot elevate a read request
+into a mutation or infer overwrite permission.
 
 ```text
 @vault "Work Notes" write projects/status.md with the updated status
 @vault "Work Notes" restore projects/status.md from backup write-<id>
 @vault "Work Notes" move notes/old.md to Archive as notes/old.md
+@vault "TCUI Internal" copy report.bin to Archive as exports/report.bin
 ```
 
-Before any disk or Chat mutation, TCUI shows a scrollable source-to-destination
-or before/after preview. Cancel sends nothing, persists nothing, and leaves disk
-unchanged. Confirm revalidates paths, file identities, bytes, collisions, and
-open Editor conflicts before executing. Moves support regular files within one
-profile or between profiles. Direct source/destination overlap, directories,
-symlinks, unsupported file types, and unapproved collisions are rejected.
+For a copy, invoke the native `copy_notes` tool with configured profile **display
+names**, not IDs or absolute roots:
+
+```json
+{
+  "copies": [
+    {
+      "source_profile": "TCUI Internal",
+      "source_path": "report.bin",
+      "destination_profile": "Archive",
+      "destination_path": "exports/report.bin"
+    }
+  ]
+}
+```
+
+Use the actual relative source path returned by the host, not an assumed Saved
+subdirectory. `move_notes` uses the same pair fields in a `moves` array.
+
+Before any disk or Chat mutation, TCUI shows an exact scrollable preview.
+Cancelling commits no Chat or disk mutations. Planning may already have sent
+the request and context to the provider; cancellation cannot recall that data.
+Confirmation revalidates paths, identities, bytes, collisions, and open Editor
+conflicts. Moves and copies handle regular files within or between profiles,
+preserving exact bytes, including binary content. Copies preserve sources and
+chat links. Physical aliases, source/destination overlap, directories, symlinks,
+linked destructive moves, and unapproved collisions fail closed.
 
 A confirmed move stages and syncs every destination before removing sources.
 Failure triggers reverse-order rollback: restore sources, restore overwritten
 destinations, remove newly created destinations, and clean operation-specific
 stage files. A successful rollback reports failure without partial success.
 
-If rollback cannot complete, TCUI retains the operation ID, exact relative
-paths, backups, staged files, and a recovery journal, marks recovery required,
-and blocks further Vault mutations. Startup recovery resumes idempotently under
-the global mutation lock. Recovery journals are versioned (currently version
-1); unknown or future versions are retained and fail closed rather than being
-guessed, rewritten, or automatically deleted. The recovery status supplies the
-explicit `@vault restore <operation-id>` command when manual retry is required.
+Move and copy operations use staged destinations, backups, and recovery journals;
+copy rollback restores destinations without deleting sources. If rollback cannot
+complete, TCUI retains the operation ID, relative paths, backups, stages, and
+journal, marks recovery required, and blocks further journal-backed mutations.
+Unknown, corrupt, or future journal formats are retained and fail closed.
+Recovery status supplies `@vault restore <operation-id>` when manual retry is needed.
 
-Standalone write backups and terminal move journals use a default seven-day
-retention period. Only old terminal records are pruned; failed, active,
-recovery-required, malformed, and unknown-version records are retained.
+Startup recovery runs under the global mutation lock. Protected shared journals
+are deferred while Vault is locked and retried after `/unlock`; their guard also
+blocks journal-backed mutations involving only external profiles while locked.
+This is not a blanket ban on explicit external exports or editors. Protection
+migration recovers pending operations under the old policy before re-encoding.
+Uncertain or missing sources retain recovery material rather than guessing.
+
+Standalone write backups and completed/rolled-back move/copy journals default
+to seven-day retention. Failed, active, recovery-required, malformed, and
+unknown-version records are retained.
 
 Vault mutation and profile-config locks are nonblocking. Contention returns a
 busy result immediately without waiting or starting partial work; retry after
@@ -162,8 +200,10 @@ mutation lock is busy.
 
 ## Chat files and Saved files
 
-Generated files are stored once in the configured **Saved files** folder. The
-**Chat files** section contains conversation-scoped links to those canonical
+Generated files are stored once in the built-in profile's canonical **Saved files**
+root, not an arbitrary external profile. A missing legacy Saved mount blocks
+mutation and protection migration without recreating the mount; remount it and
+retry with the same initialized password. The **Chat files** section contains links to those canonical
 files, while **Saved files** lists them globally. Links survive normal exit and
 restart. **Saved files**, **Memories**, and **Markdown Vault** remain optional,
 independently configurable sidebar sections. Each flat section displays up to
@@ -176,10 +216,15 @@ conversation removes only that conversation's links and preserves the physical
 Saved files. Link metadata is versioned and protected by a nonblocking lock;
 future versions fail closed without rewrite.
 
+**Saved files → Export** explicitly copies a file to a plaintext external
+destination. Native `copy_notes` likewise requires preview and confirmation.
+Neither operation implicitly moves the original or removes its chat links.
+
 For `@save`, the model still returns the complete requested file body for TCUI
 to capture. TCUI saves it directly as the canonical file, adds the producing
 conversation's link, and replaces the user-visible assistant response with
 `Saved as <filename>` using the actual collision-resolved filename.
+If saving fails, TCUI retains the original assistant response and reports the error.
 
 ## Insert documents into chat text
 
@@ -217,10 +262,10 @@ rescan; it never silently expands the bound.
 | Read | 1 MiB per file. Oversized reads return bounded partial content. |
 | Search | 10,000 files, 256 MiB total bytes read, 1 MiB per file, and 500 matches. |
 | Native skill transport | Skill source and tool catalogs are each capped at 20,000 characters; rendered tool results are capped at 48,000 characters and marked partial before clipping. |
-| Move | 100 regular files and 256 MiB total source bytes per plan. |
+| Move/copy | 100 regular files and 256 MiB total source bytes per plan. |
 | Insert-to-chat expansion | 256 KiB per document and 1 MiB total pending document bytes per Chat tab. Binary, empty, or oversized documents are rejected without changing pending state. |
 | Saved filenames | Generated names are sanitized and capped at 120 bytes before any collision suffix is added. |
 | Watch events | Queue capacity 256 and at most 256 events drained per workspace per runtime tick. Overflow requests a full rescan. |
 | Full-rescan reconciliation | At most 1,000 entries converted per tick, within the same 50,000-entry and depth-64 walk bounds. |
 | Open workspaces | One app tab per profile. Tabs are process-local and never persisted. |
-| Recovery retention | Seven days by default for terminal standalone backups and completed/rolled-back move journals; nonterminal or unrecognized records are retained. |
+| Recovery retention | Seven days by default for terminal standalone backups and completed/rolled-back move/copy journals; nonterminal or unrecognized records are retained. |

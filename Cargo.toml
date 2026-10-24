@@ -37,7 +37,7 @@ reqwest = { version = "0.13.5", default-features = false, features = ["json", "q
 rmcp = { version = "1.8", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 lol_html = "3.0.1"
 htmlize = { version = "1.1", features = ["unescape"] }
-rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled", "serialize"] }
 similar = "3.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

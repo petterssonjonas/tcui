@@ -180,3 +180,21 @@ fn auth_exit_codes_are_stable() {
     assert_eq!(AuthExitCode::MissingExternalCli.as_i32(), 13);
     assert_eq!(AuthExitCode::TransportFailure.as_i32(), 14);
 }
+
+#[test]
+fn only_deliberate_external_codex_logout_bypasses_the_owned_store_gate() {
+    for (args, owned) in [
+        (vec!["auth", "status", "codex"], true),
+        (vec!["auth", "login", "codex"], true),
+        (vec!["auth", "logout", "codex"], true),
+        (vec!["auth", "logout", "codex", "--external"], false),
+        (vec!["auth", "logout", "openrouter", "--external"], true),
+        (vec!["auth", "logout", "unknown", "--external"], true),
+    ] {
+        let cli = Cli::try_parse_from(std::iter::once("tcui").chain(args)).expect("auth arguments");
+        let Some(Command::Auth(auth)) = cli.command else {
+            panic!("auth request");
+        };
+        assert_eq!(auth.uses_tcui_store(), owned);
+    }
+}

@@ -27,7 +27,7 @@ impl TestEnvironment {
             "XDG_CONFIG_HOME",
             "XDG_CACHE_HOME",
             "HOME",
-            "TCUI_TEST_CHAT_SAVED_LEGACY_RESET",
+            "TCUI_TEST_SAVED_FILE_MIGRATION",
         ]
         .into_iter()
         .map(|name| (name, std::env::var_os(name)))
@@ -39,7 +39,7 @@ impl TestEnvironment {
         std::env::set_var("XDG_CONFIG_HOME", root.join("config"));
         std::env::set_var("XDG_CACHE_HOME", root.join("cache"));
         std::env::set_var("HOME", root.join("home"));
-        std::env::set_var("TCUI_TEST_CHAT_SAVED_LEGACY_RESET", "1");
+        std::env::set_var("TCUI_TEST_SAVED_FILE_MIGRATION", "1");
         Self { root, previous }
     }
 
@@ -78,7 +78,7 @@ fn start_app(config: AppConfig) -> TuiApp {
 }
 
 #[test]
-fn chat_saved_legacy_reset_runs_once_before_the_saved_store_opens() {
+fn saved_file_migration_preserves_existing_files_before_the_saved_store_opens() {
     // Given
     let _guard = env_lock().lock().expect("environment lock poisoned");
     let environment = TestEnvironment::new("startup");
@@ -101,14 +101,21 @@ fn chat_saved_legacy_reset_runs_once_before_the_saved_store_opens() {
     drop(start_app(config.clone()));
 
     // Then
-    assert!(!environment.path("saved/legacy.md").exists());
-    assert!(!environment.path("cache/tcui/chat-files").exists());
+    assert_eq!(
+        std::fs::read(environment.path("saved/legacy.md")).expect("source retained"),
+        b"legacy saved"
+    );
+    assert_eq!(
+        std::fs::read(environment.path("data/tcui/vault/legacy.md")).expect("internal copy"),
+        b"legacy saved"
+    );
+    assert!(environment.path("cache/tcui/chat-files/1/payload").exists());
     assert_eq!(
         std::fs::read(environment.path("vault-profile/sentinel.md")).expect("read Vault sentinel"),
         b"vault sentinel"
     );
     assert!(environment
-        .path("data/tcui/migrations/chat-saved-files-v2.done")
+        .path("data/tcui/migrations/saved-internal-vault-v1.done")
         .is_file());
 
     // Given
@@ -126,7 +133,7 @@ fn chat_saved_legacy_reset_runs_once_before_the_saved_store_opens() {
 }
 
 #[test]
-fn chat_saved_legacy_reset_surfaces_warning_and_preserves_data_for_unsafe_root() {
+fn saved_file_migration_refuses_home_root_without_mutating_source_or_cache() {
     // Given
     let _guard = env_lock().lock().expect("environment lock poisoned");
     let environment = TestEnvironment::new("unsafe-warning");
@@ -140,10 +147,9 @@ fn chat_saved_legacy_reset_surfaces_warning_and_preserves_data_for_unsafe_root()
     };
 
     // When
-    let app = start_app(config);
+    drop(start_app(config));
 
     // Then
-    assert_eq!(app.ui.toast_stack.len(), 1);
     assert_eq!(
         std::fs::read(environment.path("home/legacy.md")).expect("read home sentinel"),
         b"home sentinel"
@@ -154,6 +160,6 @@ fn chat_saved_legacy_reset_surfaces_warning_and_preserves_data_for_unsafe_root()
         b"cache sentinel"
     );
     assert!(!environment
-        .path("data/tcui/migrations/chat-saved-files-v2.done")
+        .path("data/tcui/migrations/saved-internal-vault-v1.done")
         .exists());
 }

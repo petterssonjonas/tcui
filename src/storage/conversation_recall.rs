@@ -349,6 +349,7 @@ mod tests {
 
     #[test]
     fn recall_ranks_matching_user_and_assistant_excerpts_and_excludes_other_material() {
+        let _guard = crate::test_support::env_lock().lock().expect("env lock");
         let fixture = Fixture::new();
         let current = fixture.chat("Current", "user", "quartz compiler current-only");
         let source = fixture.chat(
@@ -405,6 +406,7 @@ mod tests {
 
     #[test]
     fn recall_is_unicode_safe_bounded_and_does_not_modify_encrypted_chats() {
+        let _guard = crate::test_support::env_lock().lock().expect("env lock");
         let fixture = Fixture::new();
         let mut snapshots = Vec::new();
         for index in 0..5 {

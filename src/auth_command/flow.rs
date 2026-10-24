@@ -37,31 +37,58 @@ async fn login(
     request: AuthLoginRequest,
     cancellation: &OAuthCancellation,
 ) -> Result<AuthCommandResult, AuthCommandError> {
-    let result = match request.provider {
-        AuthProvider::Codex => {
-            native_codex_login(request.headless, request.open_browser, cancellation).await
-        }
-        AuthProvider::OpenRouter => {
-            openrouter_login(request.headless, request.open_browser, cancellation).await
-        }
-    }?;
-    let name = match request.provider {
+    let base = match request.provider {
         AuthProvider::Codex => "Codex",
         AuthProvider::OpenRouter => "OpenRouter OAuth",
     };
+    let initial_config = config(request.provider)?;
+    let storage = KeyStore::vault_status(&initial_config)
+        .map_err(|_| AuthCommandError::CredentialStore {
+            provider: request.provider,
+        })?
+        .storage;
+    let name = KeyStore::connection_id(&initial_config, base, storage).map_err(|_| {
+        AuthCommandError::CredentialStore {
+            provider: request.provider,
+        }
+    })?;
+    crate::llm::auth::invalidate_provider_refreshes(&name);
+    let result = match request.provider {
+        AuthProvider::Codex => {
+            native_codex_login(
+                request.headless,
+                request.open_browser,
+                cancellation,
+                &name,
+                storage,
+            )
+            .await
+        }
+        AuthProvider::OpenRouter => {
+            openrouter_login(
+                request.headless,
+                request.open_browser,
+                cancellation,
+                &name,
+                storage,
+            )
+            .await
+        }
+    }?;
     let mut config = config(request.provider)?;
-    let preset = crate::config::app_config::provider_presets()
+    let mut preset = crate::config::app_config::provider_presets()
         .into_iter()
-        .find(|preset| preset.name == name)
+        .find(|preset| preset.name == base)
         .ok_or(AuthCommandError::CredentialStore {
             provider: request.provider,
         })?;
+    preset.name = name.clone();
     if let Some(existing) = config.providers.iter_mut().find(|entry| entry.name == name) {
         *existing = preset;
     } else {
         config.providers.push(preset);
     }
-    config.disabled_providers.retain(|entry| entry != name);
+    config.disabled_providers.retain(|entry| entry != &name);
     config
         .save()
         .map_err(|_| AuthCommandError::CredentialStore {
@@ -74,9 +101,13 @@ async fn native_codex_login(
     headless: bool,
     open_browser: bool,
     cancellation: &OAuthCancellation,
+    connection: &str,
+    storage: crate::config::key_store::CredentialStorage,
 ) -> Result<AuthCommandResult, AuthCommandError> {
     let config = config(AuthProvider::Codex)?;
-    let adapter = codex_native_adapter()?;
+    let adapter = codex_native_adapter()?
+        .for_connection(connection)
+        .with_storage(storage);
     if headless {
         let authorization = adapter
             .begin_device(cancellation)
@@ -111,9 +142,13 @@ async fn openrouter_login(
     headless: bool,
     open_browser: bool,
     cancellation: &OAuthCancellation,
+    connection: &str,
+    storage: crate::config::key_store::CredentialStorage,
 ) -> Result<AuthCommandResult, AuthCommandError> {
     let config = config(AuthProvider::OpenRouter)?;
-    let adapter = openrouter_adapter()?;
+    let adapter = openrouter_adapter()?
+        .for_connection(connection)
+        .with_storage(storage);
     let grant = if headless {
         let authorization = adapter
             .begin_headless(
@@ -172,6 +207,21 @@ async fn openrouter_login(
     })
 }
 
+fn selected_connection(
+    config: &AppConfig,
+    provider: AuthProvider,
+) -> Result<String, AuthCommandError> {
+    let base = match provider {
+        AuthProvider::Codex => "Codex",
+        AuthProvider::OpenRouter => "OpenRouter OAuth",
+    };
+    let storage = KeyStore::vault_status(config)
+        .map_err(|_| AuthCommandError::CredentialStore { provider })?
+        .storage;
+    KeyStore::connection_id(config, base, storage)
+        .map_err(|_| AuthCommandError::CredentialStore { provider })
+}
+
 async fn logout(
     request: AuthLogoutRequest,
     cancellation: &OAuthCancellation,
@@ -186,9 +236,12 @@ async fn logout(
             })
         }
         AuthProvider::Codex => {
-            let adapter = codex_native_adapter()?;
+            let config = config(AuthProvider::Codex)?;
+            let connection = selected_connection(&config, AuthProvider::Codex)?;
+            crate::llm::auth::invalidate_provider_refreshes(&connection);
+            let adapter = codex_native_adapter()?.for_connection(&connection);
             let message = match adapter
-                .logout(&config(AuthProvider::Codex)?, cancellation)
+                .logout(&config, cancellation)
                 .await
                 .map_err(map_native)?
             {
@@ -204,8 +257,11 @@ async fn logout(
             Ok(AuthCommandResult::Logout { message })
         }
         AuthProvider::OpenRouter => {
-            let removed = OpenRouterAdapter::logout(&config(AuthProvider::OpenRouter)?)
-                .map_err(map_openrouter)?;
+            let config = config(AuthProvider::OpenRouter)?;
+            let connection = selected_connection(&config, AuthProvider::OpenRouter)?;
+            crate::llm::auth::invalidate_provider_refreshes(&connection);
+            let removed =
+                OpenRouterAdapter::logout(&config, &connection).map_err(map_openrouter)?;
             let message = if removed {
                 "Removed TCUI-owned OpenRouter credential.".to_owned()
             } else {
@@ -241,16 +297,17 @@ fn status(request: AuthStatusRequest) -> Result<AuthCommandResult, AuthCommandEr
 }
 
 fn status_for(provider: AuthProvider) -> Result<Option<String>, AuthCommandError> {
+    let config = config(provider)?;
+    let connection = selected_connection(&config, provider)?;
     match provider {
-        AuthProvider::Codex => match codex_status(&config(provider)?) {
+        AuthProvider::Codex => match codex_status(&config, &connection) {
             Ok(CodexStatus::Unauthenticated) => Ok(None),
             Ok(status) => Ok(Some(status.to_string())),
             Err(_) => Err(AuthCommandError::CredentialStore { provider }),
         },
         AuthProvider::OpenRouter => {
-            let credential =
-                KeyStore::get_api_key_credential(&config(provider)?, "OpenRouter OAuth")
-                    .map_err(|_| AuthCommandError::CredentialStore { provider })?;
+            let credential = KeyStore::get_api_key_credential(&config, &connection)
+                .map_err(|_| AuthCommandError::CredentialStore { provider })?;
             Ok(credential.map(|credential| match credential.source() {
                 ApiKeyCredentialSource::OpenRouterPkce => {
                     "OpenRouter: authenticated source=tcui-pkce expires_at=none".to_owned()

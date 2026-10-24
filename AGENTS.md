@@ -5,9 +5,10 @@ This file governs agents working in the TCUI repository. Follow current task ins
 ## Workflow rules
 
 - Never enable auto-merge.
-- Only `development` and `main` are long-lived. Start feature branches from current `origin/development` in `~/Projects/.worktrees/<project>/<feature>`; deliver coherent PRs to `development` and squash merge.
+- Only `development` and `main` are long-lived. Refresh `origin/development` before creating each feature branch and worktree at `~/Projects/.worktrees/<project>/<feature>`; deliver coherent PRs to `development` and squash merge.
 - Promote `development` to `main` through a reviewed PR. Use a merge commit to preserve shared ancestry; never delete `development`. Agents must never merge to `main`.
-- Never commit or push directly to either long-lived branch. Merge into `development` only with explicit current-task authorization and passing required checks. Implementation approval does not authorize merging or publishing.
+- Build and publish distribution packages only for an explicitly published Release, which may create its tag. A tag alone must not create a Release or trigger distribution packaging. Keep validation CI separate from CD.
+- Never commit or push directly to either long-lived branch. Merge into `development` only with explicit current-task authorization and passing required checks. Conditional authorization such as “you may merge after CI is green” permits the merge only after those conditions and required review are satisfied; it does not authorize auto-merge. Implementation approval does not authorize merging or publishing.
 - PRs state the outcome, verification, and material risks. Require independent review for security, data integrity, and CI/release changes; keep other review proportionate. Resolve blockers and validate the final candidate before merging.
 - Preserve unrelated changes and user data. Never expose secrets or bypass safeguards. Obtain authorization before destructive cleanup or external changes.
 - Reuse existing patterns and standard library facilities. Trace affected callers, finish necessary migrations, and avoid unrelated refactoring.

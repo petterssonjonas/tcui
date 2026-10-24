@@ -73,6 +73,34 @@ impl ArtifactViewerState {
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect, props: ArtifactViewerProps<'_>) {
+        let access = crate::protection::require_app().and_then(|()| match &self.artifact.handle {
+            ArtifactHandle::Memory(_) => {
+                crate::protection::require(crate::protection::Domain::Memories)
+            }
+            ArtifactHandle::ChatFile { .. } | ArtifactHandle::Saved(_) => {
+                crate::protection::require(crate::protection::Domain::Vault)
+            }
+            _ => {
+                if let Some(path) = &self.artifact.path {
+                    crate::vault::require_root(path)?;
+                }
+                Ok(())
+            }
+        });
+        if let Err(error) = access {
+            let popup = popup_area(area);
+            f.render_widget(Clear, popup);
+            f.render_widget(
+                Paragraph::new(format!("{error}\nUse /unlock to view this artifact.")).block(
+                    Block::default()
+                        .title("Locked artifact")
+                        .borders(Borders::ALL),
+                ),
+                popup,
+            );
+            self.hit_areas = ArtifactViewerHitAreas::default();
+            return;
+        }
         let theme = crate::theme::active_theme();
         let popup_area = popup_area(area);
         let block = Block::default().style(Style::default().bg(theme.code_bg));
@@ -193,6 +221,7 @@ mod tests {
 
     #[test]
     fn markdown_vault_baseline_viewer_content_stays_inside_inner_gutter() {
+        let _guard = crate::test_support::env_lock().lock().expect("env lock");
         let artifact = crate::ui::artifact_sidebar::ArtifactEntry::temp_markdown(
             1,
             "short.md".to_string(),
@@ -240,6 +269,7 @@ mod tests {
 
     #[test]
     fn markdown_vault_baseline_viewer_handles_tiny_rectangles() {
+        let _guard = crate::test_support::env_lock().lock().expect("env lock");
         let artifact = crate::ui::artifact_sidebar::ArtifactEntry::temp_markdown(
             1,
             "short.md".to_string(),
@@ -273,6 +303,7 @@ mod tests {
 
     #[test]
     fn preview_scroll_is_clamped_to_rendered_content() {
+        let _guard = crate::test_support::env_lock().lock().expect("env lock");
         // Given
         let artifact = crate::ui::artifact_sidebar::ArtifactEntry::temp_markdown(
             1,

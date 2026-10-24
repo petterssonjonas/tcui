@@ -2,6 +2,7 @@
 use color_eyre::Result;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
+#[cfg(test)]
 use std::path::PathBuf;
 
 use crate::config::vault_profiles::{VaultProfile, VaultProfileId};
@@ -348,6 +349,8 @@ impl AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
+        let profile = VaultProfile::internal();
+        let saved_files_dir = profile.root.display().to_string();
         Self {
             theme: "system".to_string(),
             default_model: "gpt-4o".to_string(),
@@ -366,15 +369,15 @@ impl Default for AppConfig {
             disabled_models: Vec::new(),
             key_file: None,
             image_protocol: "auto".to_string(),
-            vaults: HashMap::new(),
-            default_vault_id: None,
+            vaults: HashMap::from([(profile.id.clone(), profile)]),
+            default_vault_id: Some(VaultProfileId::internal()),
             vault_operation_retention_days: 7,
-            saved_files_dir: Some(default_artifact_save_dir()),
+            saved_files_dir: Some(saved_files_dir.clone()),
             show_saved_files: true,
             show_memories: true,
             show_markdown_vault: true,
             vault_path: None,
-            artifact_save_dir: Some(default_artifact_save_dir()),
+            artifact_save_dir: Some(saved_files_dir),
             notifications: NotificationConfig::default(),
             local_inference: LocalInferenceConfig::default(),
             web_search: WebSearchConfig::default(),
@@ -412,15 +415,6 @@ impl Default for LocalInferenceConfig {
             api_token_env: None,
         }
     }
-}
-
-pub(crate) fn default_artifact_save_dir() -> String {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("tcui")
-        .join("artifacts")
-        .display()
-        .to_string()
 }
 
 impl Default for NtfyConfig {

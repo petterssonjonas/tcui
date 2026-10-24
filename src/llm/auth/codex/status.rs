@@ -2,7 +2,7 @@ use std::fmt;
 
 use chrono::{DateTime, Utc};
 
-use super::credential::{resolve_credential, CodexCredentialSource, CodexResolutionError};
+use super::credential::{resolve_connection, CodexCredentialSource, CodexResolutionError};
 use crate::config::AppConfig;
 
 pub(crate) enum CodexStatus {
@@ -14,8 +14,11 @@ pub(crate) enum CodexStatus {
     },
 }
 
-pub(crate) fn codex_status(config: &AppConfig) -> Result<CodexStatus, CodexResolutionError> {
-    let Some(credential) = resolve_credential(config)? else {
+pub(crate) fn codex_status(
+    config: &AppConfig,
+    connection: &str,
+) -> Result<CodexStatus, CodexResolutionError> {
+    let Some(credential) = resolve_connection(config, connection)? else {
         return Ok(CodexStatus::Unauthenticated);
     };
     Ok(CodexStatus::Authenticated {

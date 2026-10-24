@@ -73,11 +73,22 @@ use top_bar::TopBar;
 
 pub const HELP_MARKDOWN: &str = include_str!("help.md");
 
-pub(crate) fn provider_display_name(name: &str) -> &str {
-    match name {
+pub(crate) fn provider_display_name(name: &str) -> std::borrow::Cow<'_, str> {
+    use crate::config::key_store::{provider_base_name, CredentialStorage, KeyStore};
+    let base = provider_base_name(name);
+    let label = match base {
         "Codex" => "OpenAI OAuth",
         "OpenRouter" => "OpenRouter API key",
-        _ => name,
+        _ => base,
+    };
+    if KeyStore::provider_storage(&crate::config::AppConfig::default(), name)
+        .ok()
+        .flatten()
+        == Some(CredentialStorage::Encrypted)
+    {
+        format!("{label} (encrypted)").into()
+    } else {
+        label.into()
     }
 }
 
@@ -181,6 +192,7 @@ pub struct UI {
     pub disabled_providers: HashSet<String>,
     pub disabled_models: HashSet<String>,
     pub frame_tick: u64,
+    pub(crate) protection_blocked: bool,
     pub tui_config: crate::config::TuiConfig,
 }
 
@@ -211,6 +223,8 @@ pub struct ModalAreas {
 pub enum Modal {
     QuitConfirm,
     DiscardPendingDocuments,
+    DiscardSecurityDrafts,
+    ExportChatDraft,
 }
 
 pub struct ChatTabState {
@@ -403,11 +417,20 @@ impl UI {
             disabled_providers: HashSet::new(),
             disabled_models: HashSet::new(),
             frame_tick: 0,
+            protection_blocked: false,
             tui_config: crate::config::TuiConfig::default(),
         }
     }
 
     pub fn render(&mut self, f: &mut Frame) {
+        if self.protection_blocked {
+            f.render_widget(ratatui::widgets::Clear, f.area());
+            f.render_widget(
+                ratatui::widgets::Paragraph::new("Application protection transition in progress."),
+                f.area(),
+            );
+            return;
+        }
         let theme = crate::theme::active_theme();
         self.frame_tick = self.frame_tick.wrapping_add(1);
         let area = f.area();
@@ -1035,6 +1058,26 @@ impl UI {
                         .title("Discard documents?")
                         .message("Discard inserted documents and continue?");
                     let areas = modal.render(f);
+                    self.modal_areas = Some(ModalAreas {
+                        yes: areas.yes,
+                        no: areas.no,
+                    });
+                }
+                Modal::DiscardSecurityDrafts => {
+                    let areas = QuitConfirmModal::new()
+                        .title("Discard work and close processes?")
+                        .message("Continue and discard ALL composer/history drafts, inserted documents, open editor changes, and temporary chats? Running terminal and vault editor processes will close; unsaved work may be lost. Cancel keeps your work and processes.")
+                        .render(f);
+                    self.modal_areas = Some(ModalAreas {
+                        yes: areas.yes,
+                        no: areas.no,
+                    });
+                }
+                Modal::ExportChatDraft => {
+                    let areas = QuitConfirmModal::new()
+                        .title("Export protected draft as plaintext?")
+                        .message("The external editor requires a PLAINTEXT file. TCUI uses private temporary permissions, but the editor may retain backups or copies. Export this draft? Cancel keeps it only in TCUI.")
+                        .render(f);
                     self.modal_areas = Some(ModalAreas {
                         yes: areas.yes,
                         no: areas.no,

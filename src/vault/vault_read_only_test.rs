@@ -82,6 +82,9 @@ fn vault_target_resolution_rejects_non_relative_tool_path_before_io() {
 
 #[test]
 fn vault_target_resolution_bounded_read_reports_partial_file_limit() {
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
     let fixture = ReadFixture::new();
     fixture.write("large.md", "abcdef");
     let operation = parse_read_only_operation(
@@ -118,6 +121,9 @@ fn vault_target_resolution_default_read_bound_matches_t04a_file_limit() {
 
 #[test]
 fn vault_target_resolution_bounded_search_reports_partial_match_limit() {
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
     let fixture = ReadFixture::new();
     fixture.write("notes.md", "needle needle");
     let operation = parse_read_only_operation(
@@ -150,6 +156,9 @@ fn vault_target_resolution_bounded_search_reports_partial_match_limit() {
 
 #[test]
 fn vault_target_resolution_list_returns_relative_paths_without_profile_root() {
+    let _env_guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
     let fixture = ReadFixture::new();
     fixture.write("projects/roadmap.md", "roadmap");
     let operation = parse_read_only_operation(

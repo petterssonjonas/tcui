@@ -56,6 +56,20 @@ struct AuthStatusArgs {
     provider: Option<String>,
 }
 
+impl AuthCommandArgs {
+    pub(crate) fn uses_tcui_store(&self) -> bool {
+        !matches!(
+            &self.operation,
+            AuthOperationArgs::Logout(logout)
+                if logout.external
+                    && matches!(
+                        AuthProvider::try_from(logout.provider.as_str()),
+                        Ok(AuthProvider::Codex)
+                    )
+        )
+    }
+}
+
 impl TryFrom<AuthCommandArgs> for AuthCommandRequest {
     type Error = AuthCommandError;
 

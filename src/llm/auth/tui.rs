@@ -46,6 +46,7 @@ impl BrowserLauncher for LoginBrowser {
 pub(crate) async fn login(
     provider: &str,
     config: AppConfig,
+    storage: crate::config::key_store::CredentialStorage,
     events: UnboundedSender<LoginEvent>,
     cancellation: OAuthCancellation,
     mut responses: tokio::sync::mpsc::Receiver<zeroize::Zeroizing<String>>,
@@ -57,16 +58,20 @@ pub(crate) async fn login(
     let input = async { responses.recv().await.ok_or(OAuthError::Cancelled) };
     match super::canonical_provider_name(provider).as_str() {
         "Codex" => {
-            let adapter =
-                crate::auth_command::codex_native_adapter().map_err(|error| error.to_string())?;
+            let adapter = crate::auth_command::codex_native_adapter()
+                .map_err(|error| error.to_string())?
+                .for_connection(provider)
+                .with_storage(storage);
             adapter
                 .login_browser(&config, &browser, &cancellation, input)
                 .await
                 .map_err(|error| error.to_string())?;
         }
         "OpenRouter OAuth" => {
-            let adapter =
-                crate::auth_command::openrouter_adapter().map_err(|error| error.to_string())?;
+            let adapter = crate::auth_command::openrouter_adapter()
+                .map_err(|error| error.to_string())?
+                .for_connection(provider)
+                .with_storage(storage);
             let callback = LoopbackCallbackConfig::new(
                 CallbackPath::parse("/auth/openrouter").map_err(|error| error.to_string())?,
                 CallbackTimeout::new(Duration::from_secs(300))
@@ -109,6 +114,7 @@ mod tests {
         let error = login(
             "Codex",
             AppConfig::default(),
+            crate::config::key_store::CredentialStorage::Encrypted,
             events,
             cancellation,
             response_receiver,

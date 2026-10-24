@@ -467,6 +467,9 @@ pub fn has_duplicate_ids(commands: &[Command]) -> bool {
 pub fn all_commands() -> Vec<Command> {
     let rows: Vec<(&str, &str, CommandCategory, Option<&str>, Action, bool)> = vec![
         ("open_settings", "/settings", C::System, Some("Ctrl+,"), Action::ShowSettings, true),
+        ("open_security", "/security", C::System, None, Action::OpenSecurity, false),
+        ("unlock_application", "/unlock", C::System, None, Action::UnlockApplication, false),
+        ("lock_application", "/lock", C::System, None, Action::LockApplication, false),
         ("open_providers", "/providers", C::Provider, None, Action::OpenProviders, true),
         ("connect_provider", "/connect", C::Provider, None, Action::OpenProviders, false),
         ("open_credential_vault", "/vault", C::System, None, Action::OpenCredentialVault, false),

@@ -48,8 +48,8 @@ mod vault_mutation_execute_tests;
 mod chat_file_lifecycle;
 
 #[cfg(test)]
-#[path = "app/chat_saved_legacy_reset_tests.rs"]
-mod chat_saved_legacy_reset_tests;
+#[path = "app/saved_file_migration_tests.rs"]
+mod saved_file_migration_tests;
 
 #[cfg(test)]
 #[path = "app/markdown_vault_restart_tests.rs"]
@@ -85,6 +85,9 @@ pub struct TuiApp {
         HashMap<crate::ui::app_tabs::AppTabId, submission::SubmissionState>,
     pub(crate) pending_document_discard_action:
         Option<pending_documents::PendingDocumentDiscardAction>,
+    pub(crate) security_restart: Option<crate::protection::ui::SecurityRestart>,
+    pub(crate) security_notice: Option<String>,
+    background_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl TuiApp {
@@ -97,13 +100,12 @@ impl TuiApp {
         let mut ui = crate::ui::UI::new();
         let loaded_config_snapshot = config.try_read().ok().map(|cfg| cfg.clone());
         let config_snapshot = loaded_config_snapshot.as_ref().cloned().unwrap_or_default();
-        let reset_startup = crate::storage::chat_saved_legacy_reset::ChatSavedLegacyReset::startup(
+        let reset_startup = crate::storage::saved_file_migration::SavedFileMigration::startup(
             loaded_config_snapshot.as_ref(),
-            vault.as_ref().map(|active| active.root.as_path()),
         );
         let reset_warning = reset_startup.warning;
         #[cfg(test)]
-        let chat_files = if std::env::var_os("TCUI_TEST_CHAT_SAVED_LEGACY_RESET").is_some() {
+        let chat_files = if std::env::var_os("TCUI_TEST_SAVED_FILE_MIGRATION").is_some() {
             crate::storage::chat_files::ChatSavedFileStore::new(
                 reset_startup.saved_root,
                 reset_startup.data_paths,
@@ -176,9 +178,10 @@ impl TuiApp {
             active_tab.tab.model = default_model.clone();
         }
 
+        let mut background_tasks = Vec::new();
         if std::io::stdin().is_terminal() {
             let model_action_tx = action_tx.clone();
-            tokio::task::spawn_blocking(move || {
+            background_tasks.push(tokio::task::spawn_blocking(move || {
                 let Ok(runtime_storage) = crate::storage::Storage::new() else {
                     return;
                 };
@@ -193,7 +196,7 @@ impl TuiApp {
                     )
                     .await;
                 });
-            });
+            }));
         }
 
         let app = Self {
@@ -213,6 +216,9 @@ impl TuiApp {
             pending_documents: HashMap::new(),
             submission_states: HashMap::new(),
             pending_document_discard_action: None,
+            security_restart: None,
+            security_notice: None,
+            background_tasks: std::sync::Mutex::new(background_tasks),
         };
         let mut app = app;
         app.refresh_visible_selectors();
@@ -224,10 +230,113 @@ impl TuiApp {
         }
         if let Some(error) = reset_warning {
             app.ui
-                .show_toast(format!("Legacy Chat/Saved reset skipped: {error}"));
+                .show_toast(format!("Legacy saved-file migration skipped: {error}"));
         }
         app.queue_connection_check_for_active_tab();
         app
+    }
+
+    pub(crate) fn lock_application(&mut self) -> Result<(), String> {
+        self.request_security_restart(crate::protection::ui::SecurityRestart::Lock);
+        Ok(())
+    }
+
+    pub(crate) fn unlock_application(&mut self) {
+        self.request_security_restart(crate::protection::ui::SecurityRestart::Unlock);
+    }
+
+    pub(crate) fn initialize_application_password(&mut self) -> Result<(), String> {
+        self.request_security_restart(crate::protection::ui::SecurityRestart::InitializePassword);
+        Ok(())
+    }
+
+    pub(crate) fn recover_security_restart(&mut self, error: &color_eyre::eyre::Report) -> bool {
+        if self.security_restart.is_none() || self.security_notice.is_some() {
+            return false;
+        }
+        self.security_restart = None;
+        self.ui.protection_blocked = false;
+        self.ui.show_toast(format!(
+            "Protection transition stopped: {error}\nThe application is NOT locked. Unsaved responses remain available. Fix the save error, then retry /lock, /unlock, or /security."
+        ));
+        true
+    }
+
+    fn has_unsaved_security_drafts(&self) -> bool {
+        self.pending_documents
+            .values()
+            .any(|documents| !documents.is_empty())
+            || self.ui.tabs.iter().any(|tab| {
+                !tab.input_content.is_empty()
+                    || tab
+                        .input_history_draft
+                        .as_ref()
+                        .is_some_and(|draft| !draft.is_empty())
+            })
+            || self.ui.ephemeral.is_some()
+            || self.ui.editor_popup.is_some()
+    }
+
+    fn has_security_process_close_risk(&self) -> bool {
+        self.ui.terminals.has_running()
+            || self.ui.app_tabs.tabs().iter().any(|tab| {
+                self.ui
+                    .markdown_vault_workspaces
+                    .get(tab.id())
+                    .and_then(|state| state.editor.as_ref())
+                    .is_some_and(|editor| editor.has_unsaved_risk())
+            })
+    }
+
+    pub(crate) fn lock_application_after_error(&mut self, error: String) {
+        // Authentication has already revoked the key: do not leave caches visible behind a modal.
+        let process_notice = if self.has_security_process_close_risk() {
+            "\nRunning terminal and vault editor processes were closed for security; unsaved work may have been lost."
+        } else {
+            ""
+        };
+        self.security_notice = Some(format!(
+            "Application locked after authentication failed: {error}{process_notice}"
+        ));
+        self.security_restart = Some(crate::protection::ui::SecurityRestart::Lock);
+        self.ui.protection_blocked = true;
+        self.pending_document_discard_action = None;
+        self.ui.active_modal = None;
+    }
+
+    fn request_security_restart(&mut self, restart: crate::protection::ui::SecurityRestart) {
+        if self.has_unsaved_security_drafts() || self.has_security_process_close_risk() {
+            self.pending_document_discard_action =
+                Some(pending_documents::PendingDocumentDiscardAction::SecurityRestart(restart));
+            self.ui.active_modal = Some(crate::ui::Modal::DiscardSecurityDrafts);
+        } else {
+            self.security_restart = Some(restart);
+            self.ui.protection_blocked = true;
+        }
+    }
+
+    fn track_background_task(&self, task: tokio::task::JoinHandle<()>) {
+        let mut tasks = self
+            .background_tasks
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(task);
+    }
+
+    async fn stop_background_tasks(&mut self) {
+        let tasks = std::mem::take(
+            self.background_tasks
+                .get_mut()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
+        for task in &tasks {
+            task.abort();
+        }
+        // Already-running blocking storage work cannot be aborted: finish it before clearing keys.
+        for task in tasks {
+            let _ = task.await;
+        }
     }
 
     #[cfg(test)]
@@ -513,7 +622,7 @@ impl TuiApp {
         }
 
         let filter = trimmed.trim_start_matches('/').to_ascii_lowercase();
-        let commands = [
+        let mut commands = [
             ("/fork", "Continue this conversation in an independent chat"),
             ("/temp", "Open a temporary fork in the wide right sidebar"),
             ("/temp close", "Close and delete the temporary conversation"),
@@ -523,6 +632,9 @@ impl TuiApp {
                 "Steer an active request when the transport supports it",
             ),
             ("/settings", "Open the Settings tab"),
+            ("/security", "Choose app and data protection"),
+            ("/unlock", "Unlock selected protected data"),
+            ("/lock", "Lock application protection"),
             ("/terminal", "Open an interactive terminal"),
             ("/providers", "Manage your added provider connections"),
             ("/connect", "Add or reconnect a provider"),
@@ -542,6 +654,13 @@ impl TuiApp {
             ("/web", "Toggle local web search"),
             ("/quit", "Quit the app"),
         ];
+        // A typed command outranks another command's descriptive substring match.
+        if let Some(index) = commands
+            .iter()
+            .position(|(command, _)| command.trim_end() == trimmed.trim_end())
+        {
+            commands[..=index].rotate_right(1);
+        }
         let items = commands
             .into_iter()
             .filter_map(|(command, description)| {
@@ -634,7 +753,7 @@ impl TuiApp {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 #[path = "app/runtime_guard_tests.rs"]

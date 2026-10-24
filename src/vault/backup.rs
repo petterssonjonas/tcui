@@ -1,14 +1,14 @@
 // allow: SIZE_OK - T04B keeps the envelope codec, lifecycle, retention, and recovery tests together.
 
-use std::fs::{self, File, OpenOptions};
+#[cfg(test)]
+use std::fs;
+use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-
-use crate::storage::paths::{ensure_directory, set_unix_mode};
 
 use super::VaultRelativePath;
 
@@ -141,9 +141,13 @@ impl BackupStore {
         self.ensure_root()?;
         let id = StandaloneBackupId::new();
         let record = self.root.join(id.as_str());
-        fs::create_dir(&record).map_err(|source| io_error("create", &record, source))?;
-        set_unix_mode(&record, 0o700)
-            .map_err(|source| io_error("set permissions on", &record, source))?;
+        let directory = open_directory(&self.root, false)?;
+        rustix::fs::mkdirat(
+            &directory,
+            id.as_str(),
+            rustix::fs::Mode::from_bits_truncate(0o700),
+        )
+        .map_err(|error| io_error("create", &record, error.into()))?;
 
         let original_state = match original {
             Some(bytes) => {
@@ -186,7 +190,15 @@ impl BackupStore {
             rand::random::<u128>()
         ));
         write_new_synced(&temporary, &bytes)?;
-        fs::rename(&temporary, record.join(ENVELOPE_FILE))
+        let directory = open_directory(&record, false)?;
+        directory
+            .rename(
+                temporary.file_name().ok_or(BackupError::Corrupt {
+                    reason: "missing temporary filename",
+                })?,
+                &directory,
+                ENVELOPE_FILE,
+            )
             .map_err(|source| io_error("replace envelope in", &record, source))?;
         sync_directory(&record)
     }
@@ -194,8 +206,10 @@ impl BackupStore {
     pub(crate) fn load(&self, id: &StandaloneBackupId) -> Result<LoadedBackup, BackupError> {
         let record = self.root.join(id.as_str());
         let envelope_path = record.join(ENVELOPE_FILE);
-        let bytes =
-            fs::read(&envelope_path).map_err(|source| io_error("read", &envelope_path, source))?;
+        let bytes = crate::protection::read(crate::protection::Domain::Vault, &envelope_path)
+            .map_err(|error| {
+                io_error("read", &envelope_path, io::Error::other(error.to_string()))
+            })?;
         let version = serde_json::from_slice::<VersionProbe>(&bytes)?.version;
         if version != u64::from(BACKUP_VERSION) {
             return Err(BackupError::UnknownVersion { version });
@@ -210,8 +224,11 @@ impl BackupStore {
             BackupOriginal::Missing => None,
             BackupOriginal::File { len, blake3 } => {
                 let payload_path = record.join(PAYLOAD_FILE);
-                let payload = fs::read(&payload_path)
-                    .map_err(|source| io_error("read", &payload_path, source))?;
+                let payload =
+                    crate::protection::read(crate::protection::Domain::Vault, &payload_path)
+                        .map_err(|error| {
+                            io_error("read", &payload_path, io::Error::other(error.to_string()))
+                        })?;
                 if u64::try_from(payload.len()).ok() != Some(*len) {
                     return Err(BackupError::Corrupt {
                         reason: "payload length mismatch",
@@ -229,29 +246,48 @@ impl BackupStore {
     }
 
     pub(crate) fn prune_terminal(&self, retention_days: i64) -> Result<(), BackupError> {
+        crate::protection::require(crate::protection::Domain::Vault).map_err(|error| {
+            io_error(
+                "unlock before pruning",
+                &self.root,
+                io::Error::other(error.to_string()),
+            )
+        })?;
         let cutoff = Utc::now() - Duration::days(retention_days);
-        let entries = match fs::read_dir(&self.root) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(source) => return Err(io_error("list", &self.root, source)),
+        let directory = match crate::protection::open_directory(&self.root, false) {
+            Ok(directory) => directory,
+            Err(error)
+                if error
+                    .downcast_ref::<io::Error>()
+                    .is_some_and(|error| error.kind() == io::ErrorKind::NotFound) =>
+            {
+                return Ok(())
+            }
+            Err(error) => {
+                return Err(io_error(
+                    "list",
+                    &self.root,
+                    io::Error::other(error.to_string()),
+                ))
+            }
         };
-        for entry in entries {
+        for entry in directory
+            .entries()
+            .map_err(|source| io_error("list", &self.root, source))?
+        {
             let entry = entry.map_err(|source| io_error("list", &self.root, source))?;
             if !entry
                 .file_type()
-                .map_err(|source| io_error("inspect", &entry.path(), source))?
+                .map_err(|source| io_error("inspect", &self.root.join(entry.file_name()), source))?
                 .is_dir()
             {
                 continue;
             }
-            let envelope_path = entry.path().join(ENVELOPE_FILE);
-            let Ok(metadata) = fs::symlink_metadata(&envelope_path) else {
-                continue;
-            };
-            if metadata.file_type().is_symlink() {
-                continue;
-            }
-            let Ok(bytes) = fs::read(&envelope_path) else {
+            let record = self.root.join(entry.file_name());
+            let envelope_path = record.join(ENVELOPE_FILE);
+            let Ok(bytes) =
+                crate::protection::read(crate::protection::Domain::Vault, &envelope_path)
+            else {
                 continue;
             };
             let Ok(probe) = serde_json::from_slice::<VersionProbe>(&bytes) else {
@@ -264,15 +300,16 @@ impl BackupStore {
                 continue;
             };
             if envelope.state == BackupState::Complete && envelope.created_at < cutoff {
-                fs::remove_dir_all(entry.path())
-                    .map_err(|source| io_error("remove", &entry.path(), source))?;
+                directory
+                    .remove_dir_all(entry.file_name())
+                    .map_err(|source| io_error("remove", &record, source))?;
             }
         }
         sync_directory(&self.root)
     }
 
     fn ensure_root(&self) -> Result<(), BackupError> {
-        ensure_directory(&self.root).map_err(|source| io_error("create", &self.root, source))
+        open_directory(&self.root, true).map(|_| ())
     }
 
     fn write_new_envelope(
@@ -304,25 +341,42 @@ struct VersionProbe {
 }
 
 fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), BackupError> {
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(path)
-        .map_err(|source| io_error("create", path, source))?;
-    file.write_all(bytes)
+    let bytes = crate::protection::encode(crate::protection::Domain::Vault, bytes)
+        .map_err(|error| io_error("encrypt", path, io::Error::other(error.to_string())))?;
+    let parent = path.parent().ok_or(BackupError::Corrupt {
+        reason: "missing parent",
+    })?;
+    let directory = open_directory(parent, false)?;
+    let name = path.file_name().ok_or(BackupError::Corrupt {
+        reason: "missing filename",
+    })?;
+    let descriptor = rustix::fs::openat(
+        &directory,
+        name,
+        rustix::fs::OFlags::WRONLY
+            | rustix::fs::OFlags::CREATE
+            | rustix::fs::OFlags::EXCL
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::from_bits_truncate(0o600),
+    )
+    .map_err(|error| io_error("create", path, error.into()))?;
+    let mut file = File::from(descriptor);
+    file.write_all(&bytes)
         .map_err(|source| io_error("write", path, source))?;
     file.sync_all()
         .map_err(|source| io_error("sync", path, source))
 }
 
 fn sync_directory(path: &Path) -> Result<(), BackupError> {
-    #[cfg(unix)]
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|source| io_error("sync", path, source))?;
-    #[cfg(not(unix))]
-    let _ = path;
+    rustix::fs::fsync(open_directory(path, false)?)
+        .map_err(|error| io_error("sync", path, error.into()))?;
     Ok(())
+}
+
+fn open_directory(path: &Path, create: bool) -> Result<cap_std::fs::Dir, BackupError> {
+    crate::protection::open_directory(path, create)
+        .map_err(|error| io_error("open directory", path, io::Error::other(error.to_string())))
 }
 
 fn io_error(operation: &'static str, path: &Path, source: io::Error) -> BackupError {
@@ -449,6 +503,9 @@ mod tests {
 
     #[test]
     fn vault_confined_write_unknown_backup_version_is_rejected_and_retained() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let root = test_root("unknown-version");
         let store = BackupStore::new(root.clone());
@@ -475,6 +532,9 @@ mod tests {
 
     #[test]
     fn vault_confined_write_retention_removes_only_old_terminal_backups() {
+        let _env_guard = crate::test_support::env_lock()
+            .lock()
+            .expect("environment lock");
         // Given
         let root = test_root("retention");
         let store = BackupStore::new(root.clone());

@@ -21,6 +21,7 @@ impl ValidatedEditorTarget {
                 .map_err(|source| spawn_io_error("resolve", source))?
                 .join(path)
         };
+        reject_encrypted_target(&absolute)?;
         let mut options = OpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);
         let file = File::open_ambient_with(&absolute, &options, cap_std::ambient_authority())
@@ -38,6 +39,7 @@ impl ValidatedEditorTarget {
     }
 
     pub(crate) fn revalidate_for_spawn(self) -> Result<PathBuf, EditorTargetError> {
+        reject_encrypted_target(&self.absolute)?;
         let mut options = OpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);
         let file = File::open_ambient_with(&self.absolute, &options, cap_std::ambient_authority())
@@ -99,11 +101,27 @@ pub enum EditorTargetError {
     },
 }
 
+fn reject_encrypted_target(path: &Path) -> Result<(), EditorTargetError> {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if super::is_internal_root(&canonical)
+        && crate::protection::is_protected(crate::protection::Domain::Vault).map_err(|error| {
+            spawn_io_error("check protection", io::Error::other(error.to_string()))
+        })?
+    {
+        return Err(spawn_io_error(
+            "open encrypted file; explicitly export plaintext first",
+            io::Error::other("Protected files cannot be opened in an external editor"),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_editor_target(
     canonical_root: &Path,
     held_root: &Dir,
     path: &VaultRelativePath,
 ) -> Result<ValidatedEditorTarget, EditorTargetError> {
+    reject_encrypted_target(&canonical_root.join(path.as_path()))?;
     validate_editor_target_with_hook(canonical_root, held_root, path, || {})
 }
 

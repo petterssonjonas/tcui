@@ -277,7 +277,8 @@ impl DocumentViewerState {
                     .source
                     .path
                     .as_ref()
-                    .and_then(|path| std::fs::read_to_string(path).ok());
+                    .and_then(|path| crate::vault::read_artifact_path(path).ok())
+                    .and_then(|bytes| String::from_utf8(bytes).ok());
                 let content = self
                     .source
                     .content

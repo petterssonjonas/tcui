@@ -91,7 +91,9 @@ pub(crate) fn prepare_chat_request(
                 ));
             }
             crate::llm::codex_responses::validate_request(&request)?;
-            Some(crate::llm::codex_responses::prepare_session()?)
+            Some(crate::llm::codex_responses::prepare_session(
+                &request.provider,
+            )?)
         }
         _ => {
             if crate::llm::auth::canonical_provider_name(&request.provider) == "Codex" {

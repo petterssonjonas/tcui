@@ -7,7 +7,9 @@ use super::{
     launcher_entry, LauncherEntry, VaultProfileManagerState, VaultProfilePhase,
     VaultProfileUiCommand, VaultProfileUiError,
 };
-use crate::config::vault_profiles::{VaultCatalog, VaultProfile, VaultProfileId};
+use crate::config::vault_profiles::{
+    VaultCatalog, VaultProfile, VaultProfileError, VaultProfileId,
+};
 use crate::ui::app_tabs::{AppTabs, AppView};
 
 #[path = "flow_tests.rs"]
@@ -173,8 +175,11 @@ fn rename_default_and_remove_preserve_identity_and_never_touch_files() {
     let marker = second.join("keep.md");
     std::fs::write(&marker, "keep").expect("write marker");
     let mut catalog = VaultCatalog::default();
+    let internal = VaultProfile::internal();
+    let internal_id = catalog.add(internal.clone()).expect("add internal profile");
     let first_id = add_profile(&mut catalog, "First", &first);
     let second_id = add_profile(&mut catalog, "Second", &second);
+    assert_eq!(catalog.default_id, Some(internal_id.clone()));
     let mut manager =
         VaultProfileManagerState::for_settings(catalog, root.path()).expect("settings manager");
 
@@ -194,6 +199,7 @@ fn rename_default_and_remove_preserve_identity_and_never_touch_files() {
     );
     manager.commit_catalog(catalog);
     let (catalog, _) = persisted(manager.set_default(&second_id));
+    assert_eq!(catalog.default_id, Some(second_id.clone()));
     manager.commit_catalog(catalog);
     let (catalog, _) = persisted(manager.remove(&first_id, &HashSet::new()));
 
@@ -206,6 +212,7 @@ fn rename_default_and_remove_preserve_identity_and_never_touch_files() {
         Some("Renamed")
     );
     assert!(catalog.get(&first_id).is_none());
+    assert_eq!(catalog.get(&internal_id), Some(&internal));
     assert!(marker.exists());
 }
 
@@ -242,4 +249,78 @@ fn bound_profile_cannot_be_removed_or_repointed() {
             .map(|profile| profile.root.as_path()),
         Some(first.as_path())
     );
+}
+
+#[test]
+fn builtin_profiles_with_reserved_or_reused_ids_cannot_be_removed_or_relocated() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
+    struct DataHome(Option<std::ffi::OsString>);
+    impl Drop for DataHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(previous) => std::env::set_var("XDG_DATA_HOME", previous),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+        }
+    }
+
+    let root = TestDir::new("builtin-guards");
+    let _data_home = DataHome(std::env::var_os("XDG_DATA_HOME"));
+    std::env::set_var("XDG_DATA_HOME", root.path());
+    let replacement = root.child("replacement");
+    let internal = VaultProfile::internal();
+    std::fs::create_dir_all(&internal.root).expect("create internal root");
+    let source = internal.root.join("keep.md");
+    std::fs::write(&source, b"original internal content").expect("write source");
+    let reused_id = VaultProfileId::new();
+    assert_ne!(reused_id, VaultProfileId::internal());
+
+    for id in [VaultProfileId::internal(), reused_id] {
+        let mut profile = internal.clone();
+        profile.id = id.clone();
+        let mut catalog = VaultCatalog::default();
+        catalog.add(profile).expect("add internal profile");
+        let mut manager =
+            VaultProfileManagerState::for_settings(catalog, root.path()).expect("settings manager");
+
+        let (catalog, _) = persisted(manager.rename(&id, "Private Notes", &HashSet::new()));
+        let renamed = catalog.get(&id).expect("renamed internal profile");
+        assert_eq!(renamed.display_name, "Private Notes");
+        assert_eq!(renamed.root, internal.root);
+        manager.commit_catalog(catalog.clone());
+
+        assert_eq!(
+            manager.remove(&id, &HashSet::new()),
+            VaultProfileUiCommand::None
+        );
+        assert!(matches!(
+            manager.last_error(),
+            Some(VaultProfileUiError::Profile(
+                VaultProfileError::BuiltinProfile
+            ))
+        ));
+        assert_eq!(manager.catalog(), &catalog);
+        assert_eq!(
+            std::fs::read(&source).expect("source survives removal attempt"),
+            b"original internal content"
+        );
+        assert_eq!(
+            manager.repoint(&id, &replacement, &HashSet::new()),
+            VaultProfileUiCommand::None
+        );
+        assert!(matches!(
+            manager.last_error(),
+            Some(VaultProfileUiError::Profile(
+                VaultProfileError::BuiltinProfile
+            ))
+        ));
+        assert_eq!(manager.catalog(), &catalog);
+        assert_eq!(
+            std::fs::read(&source).expect("source survives relocation attempt"),
+            b"original internal content"
+        );
+        assert!(!replacement.join("keep.md").exists());
+    }
 }
