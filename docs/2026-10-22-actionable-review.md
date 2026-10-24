@@ -616,7 +616,7 @@ The remaining batches overlap runtime dispatch and configuration publication. Us
 
 ## 6. Next-session handoff
 
-Read this review before restarting work. Selective protection is published in [PR #17](https://github.com/petterssonjonas/tcui/pull/17), from `/home/jp/Projects/.worktrees/tcui/app-protection` on `feat/app-protection`. Check the actual PR and exact-candidate CI status; publication or green CI is not merge authorization. Continue protection corrections in that worktree if needed. After publication is resolved, create the next feature worktree from refreshed `origin/development` under `~/Projects/.worktrees/tcui/<feature>`. The older contextual-memory handoff is historical; do not reapply the preserved original-checkout snapshot.
+Selective protection [PR #17](https://github.com/petterssonjonas/tcui/pull/17) was squash-merged into `development` at `661131a93d30faed06d56ae5c0eca4343d1e689b` with explicit owner authorization after its required checks passed. This persistence branch is `fix/review-hardening` in `~/Projects/.worktrees/tcui/review-hardening`. The separate native-only feature is `feat/internal-vault` in `~/Projects/.worktrees/tcui/internal-vault`; its implementation is not part of this branch. Inspect both PR heads and exact-candidate checks. Publication does not authorize either merge. Preserve the original checkout and start later feature worktrees from refreshed `origin/development` under `~/Projects/.worktrees/tcui/<feature>`.
 
 - **AR-01 — Mostly complete:** request preparation is not independently cancellable. Live `/steer` needs a provider transport that supports it; current transports report the limit. Future scheduled tasks must use the existing origin/destination/request ownership contract.
 - **AR-02 — Open:** prevent config migration/serialization from dropping unsupported settings.
@@ -644,12 +644,12 @@ Next recommended item: AR-02 unless the owner selects CI/CD alignment first. The
 Continue the TCUI actionable review. Read AGENTS.md and
 docs/2026-10-22-actionable-review.md first.
 
-Protection is PR #17 from feat/app-protection in
-~/Projects/.worktrees/tcui/app-protection. Inspect its actual status and
-exact-candidate checks. Green CI alone does not authorize merging.
-Continue any protection corrections there. Once publication is resolved,
-create the next feature worktree from refreshed origin/development under
-~/Projects/.worktrees/tcui/<feature>, and PR back to development.
+PR #17 was merged after explicit authorization and green checks. Inspect
+fix/review-hardening in ~/Projects/.worktrees/tcui/review-hardening and the
+separate feat/internal-vault branch in ~/Projects/.worktrees/tcui/internal-vault.
+Use each PR's actual head and exact-candidate evidence. Publication alone does
+not authorize merge. Start new work from refreshed origin/development under
+~/Projects/.worktrees/tcui/<feature> and PR back to development.
 Never enable auto-merge or reapply the preserved original-checkout snapshot.
 
 Run project commands inside the tcui toolbox with mise and the pinned
