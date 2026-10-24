@@ -52,6 +52,19 @@ All fixtures used temporary HOME/XDG directories and were removed. No real crede
 
 The terminal, local fixture server, and isolated data were removed. Existing user data, build-cache permissions, and CI/CD work were not changed by this session.
 
+### Persistence-hardening follow-up verification
+
+The separate `fix/review-hardening` branch was checked with pinned Rust **1.99.1** inside `tcui`, using an immutable staged source snapshot and isolated HOME/XDG directories. Formatting, strict Clippy for all targets with all features and no default features, and an all-features build passed.
+
+| Configuration | Unit tests passed | Integration tests passed | Tests ignored |
+|---|---:|---:|---:|
+| `--all-features` | 1,316 | 18 | 3 |
+| `--no-default-features` | 1,259 | 18 | 1 |
+
+Both locked, offline, all-target test runs passed with two test threads. A real `tcui reminder-dispatch review-no-such-record` invocation preserved a sentinel behind both old fixed temporary-file symlinks. It published a regular 0600 config file and a regular 0600 lock, and retained the unowned symlinks. No notification, real credential, user data, or systemd change was involved.
+
+An independent source review found no additional blocker in this patch. Disk or directory-sync failure can still make rollback fail; errors remain visible. Cooperating TCUI processes use stable locks, but an uncooperative process with the same filesystem authority is not isolated by those locks. Reminder metadata and external systemd operations remain separate transactions. Hosted CI is reported in the separate PR, not inferred from these local checks.
+
 ### Contextual-memory follow-up verification
 
 Work is isolated in `/home/jp/Projects/.worktrees/tcui/contextual-memory`, branch `fix/contextual-memory`, based on `2234c71`. The worktree includes the pre-existing application and completed CI/release changes from `/home/jp/Projects/tcui`. The implementation checkpoint below preceded publication; its checks are local working-tree evidence.
@@ -144,11 +157,13 @@ An explicit request in main to read the temporary chat copies visible branch mes
 
 **P2 · Observed + Source · SET-11, SEC-10**
 
-Config persistence now has locking, sync, rename, and rollback (`src/config/app_config/persistence/atomic.rs:48-128`), so the old direct-write finding is obsolete. However, fixed `.config.toml.tmp` and `.config.toml.restore.tmp` files use create/truncate opens that follow symlinks. The sentinel overwrite in §1 demonstrates the normal-write path. `config_root()` and `data_root()` still fall back to the working directory (`persistence.rs:110-119`).
+**Historical finding:** fixed `.config.toml.tmp` and `.config.toml.restore.tmp` files followed symlinks, as demonstrated by the isolated sentinel overwrite in §1. Configuration/data root discovery also fell back to CWD.
 
-**Fix:** create a unique sibling temporary file with exclusive creation and restrictive creation-time permissions, retain ownership of that file through sync/rename, and apply the same rule to rollback. Keep the existing lock and durability semantics. Return a path-discovery error instead of silently writing under CWD. Treat lock-file and parent-directory trust explicitly if hostile/shared config directories are supported.
+**Implemented and locally verified:** the existing writer now uses capability-based no-follow parent traversal, unique exclusive 0600 sibling files, retained file identities for publication/cleanup, checked file/directory sync, and equivalent rollback writes. Backups are published complete and without replacement. Config reads, backup paths, and the stable config lock reject links and special files; new directories are 0700 and new locks are 0600. Config load discovers both roots before writing and returns an error for absent or relative roots. Public `AppConfig::load`/`save` Result contracts, migration backups, lock-contention errors, and failure injection remain.
 
-**Done when:** a pre-existing temporary symlink cannot alter its target; failures preserve the previous config; recovery writes satisfy the same checks; a missing configuration root does not write into an arbitrary project.
+The same writer serves reminder metadata under its own stable read-modify-write lock. This is not a claim that AR-02's unknown-field/comment preservation or AR-04/05's lifecycle/settings work is complete. Existing symlinked config/data parent components are now rejected rather than followed. Locks coordinate TCUI processes, not an uncooperative process that can replace entries in a user-owned directory.
+
+**Regression coverage passed in both feature configurations:** fixed-temp sentinel preservation during normal save and rollback; config/lock/backup/parent link rejection; ownership-safe temporary cleanup and creation modes; existing sync/rename/reload failure preservation; backup publication failure; missing-root failures; and reminder write failures plus competing different-record changes. The real CLI sentinel check and complete local check results are recorded in §1.
 
 ### AR-04 — Fix the remaining crash/input-lifecycle defects
 
@@ -509,8 +524,8 @@ Acceptance: unchanged long chats do not repeatedly parse/layout their contents; 
 - **CWD trust:** `load_system_prompt` now embeds a fallback but still prefers `assets/TCUI.md` from CWD (`src/app.rs:255-257`). Skill discovery also scans CWD and other apps' directories (`src/skills/catalog.rs:18-48`). Prefer embedded defaults plus explicit trusted override locations; use an explicit project trust decision for local skills. Built-ins are loaded first, so do not claim external files overwrite every built-in. Do not hash-pin an unrelated installer lockfile as an improvised trust policy. Acceptance: launching inside an untrusted checkout does not silently replace system instructions.
 - **Auth test marker:** `src/auth_command/runner.rs:69-70` still creates/truncates an environment-selected path. Remove the production write or gate the instrumentation appropriately, preserving integration-test synchronization. `cfg(test)` alone does not apply to the normal binary launched by integration tests; debug gating also needs care if release integration tests are supported. This is a low-severity environment-controlled hazard, not an independent privilege escalation.
 - **Draft files — Source follow-up in AR-17:** private draft directories and exclusively created 0600 files replace ordinary temporary writes, with explicit plaintext-export consent for protected content. External editors can retain their own copies. Keep auditing replacement-safe cleanup rather than treating export consent as secure erasure.
-- **Reminder store:** `src/reminders/store.rs:48-50` still directly rewrites metadata. Use atomic replacement with a clear concurrent-update policy. Acceptance: interrupted writes do not lose the existing schedule metadata.
-- **Shared-key writes:** `src/storage/crypto.rs:207-217` uses exclusive creation but changes permissions only after writing. Set restrictive mode at creation. The usual data directory is already 0700, so do not inflate this into a demonstrated cross-user leak.
+- **Reminder store — Implemented and locally verified:** `src/reminders/store.rs` uses the hardened existing private writer, no-follow capability IO, and a stable `.reminders.lock`. Each reader holds the lock; each writer reloads and changes its record while holding it through durable publication/rollback. Different-record updates merge; same-ID changes use lock order. Metadata TOML and stored message bytes stay compatible. Absent/relative data roots error instead of falling back to CWD. External systemd creation/cancellation remains outside this metadata transaction; this patch does not promise atomicity across systemd and the store.
+- **Shared-key writes — Implemented and locally verified:** `src/storage/crypto.rs` creates the legacy shared-key file exclusively with mode 0600 before its first secret byte and changes the opened handle to the existing final 0400 mode before sync. Existing key bytes, encodings, and legacy reminder/plaintext compatibility are preserved. Passing regressions inspect the empty file's creation mode and verify that exclusive creation retains existing bytes. The usual data directory was already 0700; this is not a demonstrated cross-user leak.
 - **Diagnostics:** `src/diagnostics.rs:33-51` needs private creation permissions/path handling, not whole-file atomic replacement on every log append. Keep redaction and append semantics.
 - **Plaintext compatibility:** `decrypt_shared_text_with_key` still accepts un-enveloped text (`src/storage/crypto.rs:130-136`). Inventory actual stored formats and implement an explicit migration before rejecting old data. Do not break existing reminders merely by removing the fallback.
 - **Gemini file permissions:** the old automatic token-file reader was removed by the explicit-credential cutover. Do not add permission checks to a deleted import path; review any actual opt-in importer separately.
@@ -557,7 +572,7 @@ Acceptance: CI exercises terminal teardown on failure, catches feature-specific 
 | SET-8 | Superseded | Live dispatch consults keyboard overrides. Keep and verify current behavior. |
 | SET-9 | Partial | Cache ownership/unused APIs remain maintenance work; table removal needs migration evidence. |
 | SET-10 | Partial | Several legacy fields are explicitly listed as inactive in `settings_workspace.rs:54-80`; keybinding overrides and `provider_config` now have real consumers. Kitty startup drift remains. |
-| SET-11 | Partial | Atomic save implemented; temp-file safety and CWD fallback remain AR-03. |
+| SET-11 | Implemented and locally verified | AR-03 hardens config temporary files, lock/backup/recovery IO, and missing-root handling. AR-02 remains separate. |
 | SET-12 | Partial | Publishing is centralized for the settings page; startup/sidebar drift remains AR-05. |
 | SET-13 | Mostly superseded | Old bool/reset scaffolding diagnosis is stale. Navigator `all_settings()` still allocates; optimize only after the larger rendering cost is measured. |
 | CQ-1, CQ-2 | Partial: Unicode title fixed; memory export remains | AR-04. |
@@ -590,7 +605,7 @@ Acceptance: CI exercises terminal teardown on failure, catches feature-specific 
 
 **Implemented:** AR-01 request ownership, cancellation, recovery, forks, and bounded cross-conversation recall; AR-08 explicit memory authorization; AR-13 literal text and action separation; Unicode title safety within AR-04; and AR-17 selective protection/native storage. Preserve these contracts. Final protection-candidate hosted evidence belongs to PR #17, not the historical checkpoints.
 
-1. **Configuration patch:** AR-02, AR-03, and remaining mutations in AR-05. Preserve the new settings workspace and existing migration semantics.
+1. **Configuration patch:** the separate AR-03/shared-key/reminder persistence patch passed local checks and a real CLI sentinel probe. AR-02 and remaining mutations in AR-05 stay open. Preserve the settings workspace and existing migration semantics.
 2. **Crash and visible-error patch:** remaining AR-04 and AR-06 work. Include startup PTY teardown, real memory export, shortcut ownership, and separate operation notices from connectivity.
 3. **Model/host trust patch:** remaining AR-07, AR-09, and AR-10 work. Preserve explicit terminal-command approval, explicit memory authorization, and native Vault confinement. Treat local-file reads as authorization decisions, not prompt-engineering fixes.
 4. **Dependency/update patch:** AR-12 and immediate AR-11 hardening. Keep dependency churn separate from application fixes; design signing independently if desired.
@@ -605,7 +620,7 @@ Read this review before restarting work. Selective protection is published in [P
 
 - **AR-01 — Mostly complete:** request preparation is not independently cancellable. Live `/steer` needs a provider transport that supports it; current transports report the limit. Future scheduled tasks must use the existing origin/destination/request ownership contract.
 - **AR-02 — Open:** prevent config migration/serialization from dropping unsupported settings.
-- **AR-03 — Open:** harden temporary-file creation and atomic writes against symlinks.
+- **AR-03 — Implemented and locally verified:** no-follow private temporary/lock/backup/recovery IO and explicit config/data root failures. The separate persistence batch also covers shared-key birth permissions and serialized durable reminder metadata. See §1 for checks and limits.
 - **AR-04 — Partly complete:** Unicode title handling is fixed; AR-17 adds protected-editor consent and terminal lifecycle fixes. Finish direct memory-dialog export, complete shortcut ownership, and startup/draw/panic teardown proof.
 - **AR-05 — Open:** complete settings mutation, startup/live consistency, and sidebar persistence.
 - **AR-06 — Partly complete:** dispatch errors reach toasts; contextual saves/removals report partial index failure and retain host activity after provider failure. Connection-status misuse and other silent failures remain.
@@ -621,7 +636,7 @@ Read this review before restarting work. Selective protection is published in [P
 - **AR-16 — Locally cleared:** strict Clippy passes for all features and no default features with Rust 1.99.1. Consult the exact protection-PR candidate for hosted evidence; development CI is not the full promotion tier.
 - **AR-17 — Implemented:** first-run/later selective protection, mandatory app/chat gating, mixed credentials, independent Memories and built-in Vault, explicit external-vault copying, and authenticated recoverable migration. Verification and limits are recorded above and in PR #17.
 
-Next recommended item: AR-02/AR-03 after the protection publication is resolved, unless the owner selects CI/CD alignment first. Follow §5 for later batches. Retain the current memory backend unless the owner chooses a replacement.
+Next recommended item: AR-02 unless the owner selects CI/CD alignment first. The separate persistence batch passed local checks; its PR records hosted evidence. AR-04/05 remain separate. Follow §5 for later batches. Retain the current memory backend unless the owner chooses a replacement.
 
 ### Copyable next-session prompt
 
@@ -653,8 +668,9 @@ authenticated recoverable migration. External vaults remain plaintext;
 explicit copies follow the destination's policy. Keep the privacy limits.
 Use AR-17 and the PR for current verification, not old checkpoint counts.
 
-First reconcile the remaining concerns against current source. Recommend one
-item next, normally AR-02 before AR-03, or AR-14 if the owner prioritizes CI/CD.
+First reconcile the remaining concerns against current source. The separate
+AR-03/shared-key/reminder persistence patch passed the local checks recorded in §1.
+Recommend AR-02 next, or AR-14 if the owner prioritizes CI/CD.
 Work on one agreed item at a time. Keep dependency upgrades separate and
 preserve the current memory backend unless I choose a replacement.
 Exercise the changed real scenario and relevant checks, update this review,
