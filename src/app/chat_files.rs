@@ -193,12 +193,7 @@ impl TuiApp {
         conversation_id: i64,
     ) -> color_eyre::Result<()> {
         self.ui.artifact_sidebar_state.clear_hit_areas();
-        let saved = self
-            .chat_files
-            .list_saved()?
-            .into_iter()
-            .map(|record| crate::ui::artifact_sidebar::ArtifactEntry::saved_file(record.path))
-            .collect();
+        self.refresh_vault_artifacts();
         if self
             .ui
             .tabs
@@ -207,7 +202,6 @@ impl TuiApp {
         {
             self.hydrate_chat_files(tab_id, conversation_id)?;
         }
-        self.ui.saved_artifacts = saved;
         Ok(())
     }
 
@@ -217,19 +211,12 @@ impl TuiApp {
     ) {
         let deleted_path = self
             .find_artifact(handle)
-            .and_then(|artifact| artifact.path)
-            .or_else(|| match handle {
-                crate::ui::artifact_sidebar::ArtifactHandle::Saved(path) => Some(path.clone()),
-                _ => None,
-            });
+            .and_then(|artifact| artifact.path);
         let deletion = match handle {
             crate::ui::artifact_sidebar::ArtifactHandle::ChatFile {
                 conversation_id,
                 id,
             } => self.chat_files.delete_by_link(*conversation_id, *id),
-            crate::ui::artifact_sidebar::ArtifactHandle::Saved(path) => {
-                self.chat_files.delete_by_saved_path(path)
-            }
             _ => return,
         };
         if let Err(error) = deletion {

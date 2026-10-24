@@ -3,7 +3,7 @@ use std::path::Path;
 use super::atomic::{sync_directory, AtomicWriteTarget};
 use super::lock::GlobalLinkLock;
 use super::model::{link_filename_is_valid, validate_conversation_id};
-use super::{ChatFileError, ChatFileId, ChatFileLinkManifestV1, ChatSavedFileStore};
+use super::{ChatFileError, ChatFileId, ChatFileManifest, ChatSavedFileStore};
 
 impl ChatSavedFileStore {
     pub(crate) fn delete_by_link(
@@ -12,6 +12,7 @@ impl ChatSavedFileStore {
         id: ChatFileId,
     ) -> Result<(), ChatFileError> {
         validate_conversation_id(conversation_id)?;
+        let _mutation = self.acquire_mutation_lock()?;
         let _lock = GlobalLinkLock::acquire(&self.paths)?;
         self.ensure_saved_root()?;
         let mut manifest = self.load_manifest()?;
@@ -27,13 +28,12 @@ impl ChatSavedFileStore {
 
     pub(crate) fn delete_by_saved_path(&self, path: &Path) -> Result<(), ChatFileError> {
         let filename = path
-            .file_name()
-            .and_then(|name| name.to_str())
+            .strip_prefix(&self.saved_root)
+            .ok()
+            .and_then(Path::to_str)
             .filter(|filename| link_filename_is_valid(filename))
             .ok_or(ChatFileError::PathOutsideSavedRoot)?;
-        if path.parent() != Some(self.saved_root.as_path()) {
-            return Err(ChatFileError::PathOutsideSavedRoot);
-        }
+        let _mutation = self.acquire_mutation_lock()?;
         let _lock = GlobalLinkLock::acquire(&self.paths)?;
         self.ensure_saved_root()?;
         let mut manifest = self.load_manifest()?;
@@ -53,6 +53,7 @@ impl ChatSavedFileStore {
         {
             return Err(ChatFileError::InjectedPurgeFailure);
         }
+        let _mutation = self.acquire_mutation_lock()?;
         let _lock = GlobalLinkLock::acquire(&self.paths)?;
         self.remove_conversation_links_locked(conversation_id)
     }
@@ -62,8 +63,9 @@ impl ChatSavedFileStore {
         conversation_id: i64,
     ) -> Result<(), ChatFileError> {
         validate_conversation_id(conversation_id)?;
-        crate::protection::require(crate::protection::Domain::Vault)
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let _mutation = self.acquire_mutation_lock()?;
+        let _lock = GlobalLinkLock::acquire(&self.paths)?;
+        self.require_native_adoption()?;
         crate::protection::open_directory(&self.paths.chat_file_links_dir, true)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         let empty = crate::protection::encode(crate::protection::Domain::Vault, b"")
@@ -78,6 +80,7 @@ impl ChatSavedFileStore {
     pub(crate) fn cleanup_orphans(&self) -> Result<usize, ChatFileError> {
         crate::protection::require(crate::protection::Domain::Vault)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let _mutation = self.acquire_mutation_lock()?;
         let _lock = GlobalLinkLock::acquire(&self.paths)?;
         let directory = crate::protection::open_directory(&self.paths.chat_file_links_dir, true)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -132,12 +135,12 @@ impl ChatSavedFileStore {
     fn delete_filename(
         &self,
         filename: &str,
-        manifest: ChatFileLinkManifestV1,
+        manifest: ChatFileManifest,
     ) -> Result<(), ChatFileError> {
         let target = self.saved_path(filename);
         self.target_is_regular(&target)?;
         let tombstone = self.allocate_tombstone(filename);
-        let directory = self.open_saved_root()?;
+        let (directory, _) = self.item_parent(Path::new(filename))?;
         directory.rename(
             target.file_name().ok_or(ChatFileError::InvalidFileName)?,
             &directory,
@@ -145,11 +148,18 @@ impl ChatSavedFileStore {
                 .file_name()
                 .ok_or(ChatFileError::InvalidFileName)?,
         )?;
-        sync_directory(&self.saved_root)?;
+        super::atomic::sync_handle(&directory)?;
 
         let prior = manifest;
         let mut updated = prior.clone();
         updated.links.retain(|link| link.filename != filename);
+        for item in &mut updated.items {
+            if item.relative_path == Path::new(filename)
+                && matches!(item.state, super::model::VaultItemState::Active)
+            {
+                item.state = super::model::VaultItemState::Missing;
+            }
+        }
         if let Err(error) = self.write_manifest(&updated) {
             self.restore_tombstone(&tombstone, &target, "delete")?;
             return Err(error);
@@ -159,16 +169,18 @@ impl ChatSavedFileStore {
             self.rollback_delete(&prior, &tombstone, &target)?;
             return Err(error);
         }
-        sync_directory(&self.saved_root)
+        super::atomic::sync_handle(&directory)?;
+        Ok(())
     }
 
     fn allocate_tombstone(&self, filename: &str) -> std::path::PathBuf {
+        let relative = Path::new(filename);
+        let parent = self
+            .saved_root
+            .join(relative.parent().unwrap_or_else(|| Path::new("")));
+        let name = relative.file_name().unwrap_or_default().to_string_lossy();
         loop {
-            let path = self.saved_root.join(format!(
-                ".delete-{}-{}.tmp",
-                filename,
-                rand::random::<u64>()
-            ));
+            let path = parent.join(format!(".delete-{}-{}.tmp", name, rand::random::<u64>()));
             if !path.exists() {
                 return path;
             }
@@ -181,7 +193,10 @@ impl ChatSavedFileStore {
         target: &Path,
         operation: &'static str,
     ) -> Result<(), ChatFileError> {
-        let directory = self.open_saved_root()?;
+        let relative = target
+            .strip_prefix(&self.saved_root)
+            .map_err(|_| ChatFileError::PathOutsideSavedRoot)?;
+        let (directory, _) = self.item_parent(relative)?;
         directory
             .rename(
                 tombstone
@@ -194,12 +209,13 @@ impl ChatSavedFileStore {
                 operation,
                 rollback,
             })?;
-        sync_directory(&self.saved_root)
+        super::atomic::sync_handle(&directory)?;
+        Ok(())
     }
 
     fn rollback_delete(
         &self,
-        prior: &ChatFileLinkManifestV1,
+        prior: &ChatFileManifest,
         tombstone: &Path,
         target: &Path,
     ) -> Result<(), ChatFileError> {
@@ -219,11 +235,11 @@ impl ChatSavedFileStore {
         {
             return Err(ChatFileError::InjectedTombstoneRemoveFailure);
         }
-        self.open_saved_root()?.remove_file(
-            tombstone
-                .file_name()
-                .ok_or(ChatFileError::InvalidFileName)?,
-        )?;
+        let relative = tombstone
+            .strip_prefix(&self.saved_root)
+            .map_err(|_| ChatFileError::PathOutsideSavedRoot)?;
+        let (directory, name) = self.saved_parent(relative)?;
+        directory.remove_file(name)?;
         Ok(())
     }
 

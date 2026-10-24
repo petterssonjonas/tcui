@@ -126,12 +126,8 @@ pub fn catalog() -> &'static [WorkspaceSetting] {
         entry!("notifications.ntfy.host", "ntfy host", "Notification service hostname or HTTP(S) URL without credentials. Configure before enabling delivery.", Notifications, Text),
         entry!("notifications.ntfy.port", "ntfy port", "Notification service TCP port, 1–65535.", Notifications, Number { min: 1, max: 65535 }),
         entry!("notifications.ntfy.topic", "ntfy topic", "Notification topic. May be sensitive: value is concealed until explicitly edited.", Notifications, Text),
-        entry!("saved_files_dir", "Default export directory", "Default absolute folder for subsequent export dialogs. Managed saved files and existing exports are not moved. Empty uses the application default.", Obsidian, OptionalText),
-        entry!("show_saved_files", "Show saved files", "Show saved files in the Chat files sidebar.", Obsidian, Bool),
-        entry!("show_memories", "Show memories", "Show memories in the Chat files sidebar.", Obsidian, Bool),
-        entry!("show_markdown_vault", "Show Markdown Vault", "Show Markdown Vault in the Chat files sidebar.", Obsidian, Bool),
-        entry!("vaults", "Manage vault profiles", "Manage profile display names, roots and default_vault_id in the dedicated vault manager. IDs, normalized name keys and availability are derived, not editable settings.", Obsidian, Manager("manage_vault_profiles")),
-        entry!("vault_operation_retention_days", "Recovery retention (days)", "Retention policy for the next startup vault-move recovery pass. This does not run cleanup immediately or alter an operation in progress.", Obsidian, Number { min: 0, max: u64::MAX }),
+        entry!("show_memories", "Show memories", "Show memories in the Chat Artifacts sidebar.", Files, Bool),
+        entry!("show_vault", "Show Vault", "Show the internal Vault in the Chat Artifacts sidebar.", Files, Bool),
         entry!("credential_vault", "Credential vault", "Unlock, lock and manage credentials in the dedicated encrypted vault. Passwords, API keys and private keys are never shown in settings.", Privacy, Manager("open_credential_vault")),
         entry!("application_protection", "Application protection", "Choose entry password and encryption independently for credentials, chats, memories and the internal vault. Unchecked data stays plaintext. Active requests are cancelled and saved before the application is reconstructed.", Privacy, Manager("open_security")),
         entry!("key_file", "Legacy credential import path", "Optional legacy key-file path, not a secret. Changing this does not import credentials; use the credential manager for migration and unlock.", Privacy, OptionalText),
@@ -276,7 +272,7 @@ impl SettingsWorkspaceState {
             Model,
             Local,
             Notifications,
-            Obsidian,
+            Files,
             Keybind,
             Mcp,
             Privacy,
@@ -913,9 +909,7 @@ pub fn validate_edit(config: &Value, id: &str, text: &str) -> Result<AppConfig, 
                 return Err("Enter an existing absolute directory on the TCUI host".into());
             }
         }
-        "saved_files_dir" | "key_file"
-            if !text.trim().is_empty() && !std::path::Path::new(text).is_absolute() =>
-        {
+        "key_file" if !text.trim().is_empty() && !std::path::Path::new(text).is_absolute() => {
             return Err("Enter an absolute path".into())
         }
         "notifications.ntfy.host" if !text.trim().is_empty() => {
@@ -1048,7 +1042,7 @@ mod tests {
     #[test]
     fn every_serialized_knob_is_catalogued_or_deliberately_managed() {
         let config = config();
-        let managed = ["vaults", "default_vault_id", "providers"];
+        let managed = ["providers", "saved_files_dir"];
         fn leaves(value: &Value, prefix: String, found: &mut Vec<String>) {
             if let Value::Object(fields) = value {
                 for (key, value) in fields {
@@ -1102,7 +1096,7 @@ mod tests {
 
     #[test]
     fn settings_never_accept_unknown_or_manager_mutation() {
-        assert!(validate_edit(&config(), "vaults", "{}").is_err());
+        assert!(validate_edit(&config(), "providers", "{}").is_err());
         assert!(validate_edit(&config(), "not_a_setting", "true").is_err());
         assert!(validate_edit(
             &config(),

@@ -28,6 +28,8 @@ pub(crate) enum MemoryError {
     Path(#[from] PathError),
     #[error("invalid memory request: {0}")]
     Invalid(String),
+    #[error("memory #{id} changed since the editor opened it; the draft was not saved")]
+    EntryChanged { id: u64 },
     #[error("memory scan failed: {0}")]
     Walk(String),
     #[error("memory serialization failed: {0}")]
@@ -106,6 +108,7 @@ impl MemoryStore {
             database: Self::default_cache_path(),
             key,
         };
+        store.require_native_policy()?;
         Ok(store)
     }
 
@@ -121,6 +124,7 @@ impl MemoryStore {
             database: Self::default_cache_path(),
             key: Some(key),
         };
+        store.require_native_policy()?;
         Ok(store)
     }
 
@@ -151,6 +155,7 @@ impl MemoryStore {
             database: database.to_path_buf(),
             key: Some(key),
         };
+        store.require_native_policy()?;
         Ok(store)
     }
 
@@ -168,6 +173,7 @@ impl MemoryStore {
 
     pub(crate) fn sync(&self) -> Result<(), MemoryError> {
         protection::require(Domain::Memories)?;
+        self.require_native_policy()?;
         synchronize(self)
     }
 
@@ -184,6 +190,7 @@ impl MemoryStore {
         machine_id: Option<&str>,
     ) -> Result<Vec<MemoryHit>, MemoryError> {
         protection::require(Domain::Memories)?;
+        self.require_native_policy()?;
         if machine_id.is_some_and(|id| id.trim().is_empty()) {
             return Err(MemoryError::Invalid("machine ID is empty".to_string()));
         }
@@ -316,12 +323,14 @@ impl MemoryStore {
 
     pub(crate) fn reindex(&self) -> Result<MemoryStatus, MemoryError> {
         protection::require(Domain::Memories)?;
+        self.require_native_policy()?;
         super::sync::rebuild(self)?;
         self.indexed_status()
     }
 
     pub(crate) fn active_documents(&self) -> Result<Vec<(PathBuf, MemoryDocument)>, MemoryError> {
         protection::require(Domain::Memories)?;
+        self.require_native_policy()?;
         let mut documents = Vec::new();
         if !self.paths.root().exists() {
             return Ok(documents);
@@ -378,6 +387,9 @@ impl MemoryStore {
 
     pub(crate) fn read_document_at(&self, path: &Path) -> Result<MemoryDocument, MemoryError> {
         protection::require(Domain::Memories)?;
+        let _directories = self.paths.directories()?;
+        super::management::require_native_cache_policy(&self.database)?;
+        super::management::require_native_file_policy(path)?;
         if protection::configured()? {
             Ok(serde_json::from_slice(&protection::read(
                 Domain::Memories,
@@ -397,6 +409,7 @@ impl MemoryStore {
         document: &MemoryDocument,
     ) -> Result<(), MemoryError> {
         protection::require(Domain::Memories)?;
+        self.require_native_policy()?;
         if let Some(metadata) = &document.metadata {
             metadata.validate()?;
         }
@@ -415,8 +428,9 @@ impl MemoryStore {
         protection::require(Domain::Memories)?;
         loop {
             let id = rand::random::<u64>();
-            if !self.paths.active_document_path(id).exists()
-                && !self.paths.trash_document_path(id).exists()
+            if id != 0
+                && !self.paths.active_document_path(id).try_exists()?
+                && !self.paths.trash_document_path(id).try_exists()?
             {
                 return Ok(id);
             }

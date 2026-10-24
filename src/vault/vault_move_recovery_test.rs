@@ -4,7 +4,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crate::config::vault_profiles::{VaultCatalog, VaultProfile, VaultProfileId};
 use crate::vault::move_execute::{
     inject_failure as inject_move_failure, inject_interruption as inject_move_interruption,
     MoveExecutor, TestFailurePoint as MoveFailurePoint,
@@ -22,9 +21,6 @@ struct Fixture {
     source_root: PathBuf,
     destination_root: PathBuf,
     data_root: PathBuf,
-    source_id: VaultProfileId,
-    destination_id: VaultProfileId,
-    catalog: VaultCatalog,
 }
 
 impl Fixture {
@@ -34,42 +30,29 @@ impl Fixture {
             std::process::id(),
             rand::random::<u64>()
         ));
-        let source_root = base.join("source");
-        let destination_root = base.join("destination");
         let data_root = base.join("data").join("tcui");
+        let source_root = data_root.join("vault/source");
+        let destination_root = data_root.join("vault/destination");
         fs::create_dir_all(&source_root).expect("create source root");
         fs::create_dir_all(&destination_root).expect("create destination root");
-        let source = VaultProfile::new("Source", &source_root).expect("source profile");
-        let destination =
-            VaultProfile::new("Destination", &destination_root).expect("destination profile");
-        let source_id = source.id.clone();
-        let destination_id = destination.id.clone();
-        let mut catalog = VaultCatalog::default();
-        catalog.add(source).expect("register source profile");
-        catalog
-            .add(destination)
-            .expect("register destination profile");
         Self {
             base,
             source_root,
             destination_root,
             data_root,
-            source_id,
-            destination_id,
-            catalog,
         }
     }
 
     fn pair(&self, source: &str, destination: &str, overwrite: bool) -> MovePair {
         MovePair::new(
-            VaultFileRef::new(self.source_id.clone(), relative(source)),
-            VaultFileRef::new(self.destination_id.clone(), relative(destination)),
+            VaultFileRef::new(relative(&format!("source/{source}"))),
+            VaultFileRef::new(relative(&format!("destination/{destination}"))),
             overwrite,
         )
     }
 
     fn plan(&self, pairs: Vec<MovePair>) -> MovePlan {
-        MovePlan::build(pairs, &self.catalog, |_| false).expect("build confirmed move plan")
+        MovePlan::build(pairs, &self.data_root, |_| false).expect("build confirmed move plan")
     }
 
     fn write_source(&self, path: &str, bytes: &[u8]) {
@@ -81,7 +64,9 @@ impl Fixture {
     }
 
     fn operation_root(&self, operation_id: &MoveOperationId) -> PathBuf {
-        self.data_root.join("vault-ops").join(operation_id.as_str())
+        self.data_root
+            .join("vault-native-ops")
+            .join(operation_id.as_str())
     }
 
     fn journal_state(&self, operation_id: &MoveOperationId) -> MoveJournalState {
@@ -92,11 +77,7 @@ impl Fixture {
     }
 
     fn recovery(&self, retention_days: u64) -> MoveRecoveryService<'_> {
-        MoveRecoveryService::at_data_root(
-            &self.catalog,
-            &self.data_root,
-            MoveRecoveryConfig { retention_days },
-        )
+        MoveRecoveryService::at_data_root(&self.data_root, MoveRecoveryConfig { retention_days })
     }
 
     fn interrupt(&self, move_failure: MoveFailurePoint, overwrite: bool) -> MoveOperationId {
@@ -107,7 +88,7 @@ impl Fixture {
         let plan = self.plan(vec![self.pair("note.md", "moved.md", overwrite)]);
         let operation_id = MoveOperationId::from_plan(&plan);
         inject_move_interruption(move_failure);
-        assert!(MoveExecutor::at_data_root(&self.catalog, &self.data_root)
+        assert!(MoveExecutor::at_data_root(&self.data_root)
             .execute(plan)
             .is_err());
         assert_eq!(
@@ -270,7 +251,7 @@ fn vault_move_recovery_failed_immediate_rollback_blocks_until_startup_resume() {
     inject_recovery_failure(RecoveryFailurePoint::RestoreSource);
 
     // When
-    let result = MoveExecutor::at_data_root(&fixture.catalog, &fixture.data_root).execute(plan);
+    let result = MoveExecutor::at_data_root(&fixture.data_root).execute(plan);
 
     // Then
     assert!(matches!(
@@ -302,7 +283,7 @@ fn vault_move_recovery_retention_deletes_only_old_known_terminal_sets() {
     fixture.write_source("complete.md", b"complete source");
     let complete_plan = fixture.plan(vec![fixture.pair("complete.md", "complete.md", false)]);
     let complete_id = MoveOperationId::from_plan(&complete_plan);
-    MoveExecutor::at_data_root(&fixture.catalog, &fixture.data_root)
+    MoveExecutor::at_data_root(&fixture.data_root)
         .execute(complete_plan)
         .expect("complete move");
 
@@ -327,14 +308,14 @@ fn vault_move_recovery_retention_deletes_only_old_known_terminal_sets() {
     }
     let unknown = fixture
         .data_root
-        .join("vault-ops")
+        .join("vault-native-ops")
         .join("move-00000000000000000000000000000000");
     fs::create_dir_all(&unknown).expect("create unknown operation");
     fs::write(unknown.join("journal.json"), br#"{"version":99}"#).expect("write unknown journal");
     age_journal(&unknown, 8);
     let malformed = fixture
         .data_root
-        .join("vault-ops")
+        .join("vault-native-ops")
         .join("move-11111111111111111111111111111111");
     fs::create_dir_all(&malformed).expect("create malformed operation");
     fs::write(malformed.join("journal.json"), b"not-json").expect("write malformed journal");
@@ -354,18 +335,6 @@ fn vault_move_recovery_retention_deletes_only_old_known_terminal_sets() {
     assert!(fixture.operation_root(&recovery_required_id).exists());
     assert!(unknown.exists());
     assert!(malformed.exists());
-}
-
-#[test]
-fn vault_move_recovery_retention_config_defaults_to_seven_days() {
-    let _env_guard = crate::test_support::env_lock()
-        .lock()
-        .expect("environment lock");
-    // Given / When
-    let config = crate::config::AppConfig::default();
-
-    // Then
-    assert_eq!(config.vault_operation_retention_days, 7);
 }
 
 #[test]

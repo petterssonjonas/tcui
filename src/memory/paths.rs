@@ -1,6 +1,9 @@
 use std::path::{Component, Path, PathBuf};
 
-use crate::storage::paths::{ensure_directory, TcuiDataPaths};
+use cap_std::fs::Dir;
+use rustix::fs::{fchmod, fsync, mkdirat, openat, Mode, OFlags};
+
+use crate::storage::paths::TcuiDataPaths;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -33,8 +36,7 @@ impl MemoryPaths {
             }
         }
         let storage = TcuiDataPaths::discover();
-        ensure_directory(&storage.memories_dir)?;
-        ensure_directory(&storage.memories_trash_dir)?;
+        Self::storage_directories(&storage.memories_dir, true)?;
         Ok(Self {
             vault,
             legacy_memories,
@@ -45,8 +47,7 @@ impl MemoryPaths {
 
     pub(crate) fn open_default() -> Result<Self, PathError> {
         let storage = TcuiDataPaths::discover();
-        ensure_directory(&storage.memories_dir)?;
-        ensure_directory(&storage.memories_trash_dir)?;
+        Self::storage_directories(&storage.memories_dir, true)?;
         Ok(Self {
             vault: storage.root.clone(),
             legacy_memories: storage.memories_dir.clone(),
@@ -63,19 +64,54 @@ impl MemoryPaths {
         &self.memories
     }
 
-    pub(crate) fn logical_path(&self, path: &Path) -> Result<PathBuf, PathError> {
-        if path.is_absolute() {
-            return Err(PathError::Invalid);
+    /// Opens both native directories without following any path component.
+    /// Mutations retain these handles instead of resolving `.trash` again.
+    pub(super) fn directories(&self) -> Result<(Dir, Dir), PathError> {
+        Self::storage_directories(&self.memories, false)
+    }
+
+    fn storage_directories(root: &Path, create: bool) -> Result<(Dir, Dir), PathError> {
+        let root = crate::protection::open_native_directory(root, create)?;
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let descriptor = match openat(&root, ".trash", flags, Mode::empty()) {
+            Ok(descriptor) => descriptor,
+            Err(rustix::io::Errno::NOENT) if create => {
+                match mkdirat(&root, ".trash", Mode::from_bits_truncate(0o700)) {
+                    Ok(()) => fsync(&root).map_err(std::io::Error::from)?,
+                    Err(rustix::io::Errno::EXIST) => {}
+                    Err(error) => return Err(std::io::Error::from(error).into()),
+                }
+                openat(&root, ".trash", flags, Mode::empty()).map_err(std::io::Error::from)?
+            }
+            Err(error) => return Err(std::io::Error::from(error).into()),
+        };
+        let trash = Dir::from(descriptor);
+        if create {
+            // Validate both handles before changing either directory's mode.
+            fchmod(&root, Mode::from_bits_truncate(0o700)).map_err(std::io::Error::from)?;
+            fchmod(&trash, Mode::from_bits_truncate(0o700)).map_err(std::io::Error::from)?;
         }
-        let relative = path.strip_prefix("memories").unwrap_or(path);
-        if relative.as_os_str().is_empty()
-            || relative.extension().and_then(|value| value.to_str()) != Some("md")
-            || relative
+        Ok((root, trash))
+    }
+
+    pub(super) fn validate_logical_path(path: &Path) -> Result<(), PathError> {
+        if path.as_os_str().is_empty()
+            || path.extension().and_then(|value| value.to_str()) != Some("md")
+            || path
                 .components()
                 .any(|component| !matches!(component, Component::Normal(_)))
         {
             return Err(PathError::Invalid);
         }
+        Ok(())
+    }
+
+    pub(crate) fn logical_path(&self, path: &Path) -> Result<PathBuf, PathError> {
+        if path.is_absolute() {
+            return Err(PathError::Invalid);
+        }
+        let relative = path.strip_prefix("memories").unwrap_or(path);
+        Self::validate_logical_path(relative)?;
 
         let mut cursor = self.legacy_memories.clone();
         for component in relative.components() {

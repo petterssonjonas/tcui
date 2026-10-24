@@ -2,18 +2,14 @@ use std::fmt;
 use std::path::Path;
 
 use crate::app::message::Message;
-use crate::config::vault_profiles::{VaultCatalog, VaultProfileId};
 use crate::storage::Storage;
 use crate::vault::move_execute::{MoveExecuteError, MoveExecutor};
 use crate::vault::mutation_plan::VaultMutationKind;
 use crate::vault::watcher::VaultWatchChange;
-use crate::vault::{
-    VaultProfileRegistration, VaultRelativePath, VaultWriteError, VaultWriteService,
-};
+use crate::vault::{VaultRelativePath, VaultWriteError, VaultWriteService};
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct VaultMutationAffectedPath {
-    pub(crate) profile_id: VaultProfileId,
     pub(crate) path: VaultRelativePath,
     pub(crate) change: VaultWatchChange,
 }
@@ -22,7 +18,6 @@ impl fmt::Debug for VaultMutationAffectedPath {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("VaultMutationAffectedPath")
-            .field("profile_id", &self.profile_id)
             .field("path", &self.path)
             .field("change", &self.change)
             .finish()
@@ -47,7 +42,6 @@ impl VaultMutationToolResult {
             .iter()
             .map(|item| {
                 serde_json::json!({
-                    "profile_id": item.profile_id.to_string(),
                     "path": item.path.display().to_string(),
                     "change": format!("{:?}", item.change).to_ascii_lowercase(),
                 })
@@ -82,21 +76,20 @@ impl fmt::Debug for VaultMutationToolResult {
 pub(crate) enum VaultMutationExecutionError {
     #[error("{message}")]
     Failed { message: &'static str },
-    #[error("Vault recovery is required for operation {operation_id}; run @vault restore {operation_id}")]
+    #[error("Vault recovery is required for operation {operation_id}; restart TCUI to retry native recovery")]
     RecoveryRequired { operation_id: String },
 }
 
 pub(crate) fn execute(
     kind: &VaultMutationKind,
-    catalog: &VaultCatalog,
     data_root: &Path,
 ) -> Result<VaultMutationToolResult, VaultMutationExecutionError> {
     let affected = affected_paths(kind);
     match kind {
         VaultMutationKind::Write(plan) => {
-            let service = write_service(catalog, data_root)?;
+            let service = VaultWriteService::at_data_root(data_root).map_err(map_write_error)?;
             let outcome = service
-                .write(&plan.profile_id, &plan.path, plan.replacement.as_bytes())
+                .write(&plan.path, plan.replacement.as_bytes())
                 .map_err(map_write_error)?;
             Ok(VaultMutationToolResult {
                 operation_id: outcome.backup_id.as_str().to_owned(),
@@ -105,9 +98,9 @@ pub(crate) fn execute(
             })
         }
         VaultMutationKind::Restore(plan) => {
-            let service = write_service(catalog, data_root)?;
+            let service = VaultWriteService::at_data_root(data_root).map_err(map_write_error)?;
             let outcome = service
-                .restore(&plan.profile_id, &plan.path, &plan.backup_id)
+                .restore(&plan.path, &plan.backup_id)
                 .map_err(map_write_error)?;
             Ok(VaultMutationToolResult {
                 operation_id: outcome.replaced_content_backup_id.as_str().to_owned(),
@@ -116,7 +109,7 @@ pub(crate) fn execute(
             })
         }
         VaultMutationKind::Move(plan) => {
-            let outcome = MoveExecutor::at_data_root(catalog, data_root)
+            let outcome = MoveExecutor::at_data_root(data_root)
                 .execute(plan.clone())
                 .map_err(map_move_error)?;
             Ok(VaultMutationToolResult {
@@ -130,20 +123,18 @@ pub(crate) fn execute(
 
 pub(crate) fn affected_paths(kind: &VaultMutationKind) -> Vec<VaultMutationAffectedPath> {
     match kind {
-        VaultMutationKind::Write(plan) => file_refresh(&plan.profile_id, &plan.path),
-        VaultMutationKind::Restore(plan) => file_refresh(&plan.profile_id, &plan.path),
+        VaultMutationKind::Write(plan) => file_refresh(&plan.path),
+        VaultMutationKind::Restore(plan) => file_refresh(&plan.path),
         VaultMutationKind::Move(plan) => plan
             .pairs()
             .iter()
             .flat_map(|pair| {
                 [
                     (!plan.copy_only()).then(|| VaultMutationAffectedPath {
-                        profile_id: pair.source().profile_id().clone(),
                         path: pair.source().path().clone(),
                         change: VaultWatchChange::Remove,
                     }),
                     Some(VaultMutationAffectedPath {
-                        profile_id: pair.destination().profile_id().clone(),
                         path: pair.destination().path().clone(),
                         change: VaultWatchChange::Create,
                     }),
@@ -155,34 +146,11 @@ pub(crate) fn affected_paths(kind: &VaultMutationKind) -> Vec<VaultMutationAffec
     }
 }
 
-fn file_refresh(
-    profile_id: &VaultProfileId,
-    path: &VaultRelativePath,
-) -> Vec<VaultMutationAffectedPath> {
+fn file_refresh(path: &VaultRelativePath) -> Vec<VaultMutationAffectedPath> {
     vec![VaultMutationAffectedPath {
-        profile_id: profile_id.clone(),
         path: path.clone(),
         change: VaultWatchChange::Create,
     }]
-}
-
-fn write_service(
-    catalog: &VaultCatalog,
-    data_root: &Path,
-) -> Result<VaultWriteService<VaultProfileId>, VaultMutationExecutionError> {
-    let registrations = catalog
-        .profiles
-        .values()
-        .map(|profile| VaultProfileRegistration::new(profile.id.clone(), profile.root.clone()));
-    #[cfg(test)]
-    {
-        VaultWriteService::at_data_root(registrations, data_root).map_err(map_write_error)
-    }
-    #[cfg(not(test))]
-    {
-        let _ = data_root;
-        VaultWriteService::new(registrations).map_err(map_write_error)
-    }
 }
 
 fn map_write_error(error: VaultWriteError) -> VaultMutationExecutionError {
@@ -193,8 +161,7 @@ fn map_write_error(error: VaultWriteError) -> VaultMutationExecutionError {
         VaultWriteError::VaultBusy => VaultMutationExecutionError::Failed {
             message: "Vault is busy with another mutation",
         },
-        VaultWriteError::UnknownProfile { .. }
-        | VaultWriteError::Symlink { .. }
+        VaultWriteError::Symlink { .. }
         | VaultWriteError::NotFile { .. }
         | VaultWriteError::NotDirectory { .. }
         | VaultWriteError::InvalidUtf8 { .. }
@@ -267,4 +234,49 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn inject_chat_persistence_failure_once() {
     CHAT_PERSISTENCE_FAILURE.set(true);
+}
+
+impl super::TuiApp {
+    pub(crate) fn prepare_vault_workspace_move(
+        &mut self,
+        source: std::path::PathBuf,
+        destination: std::path::PathBuf,
+    ) {
+        use crate::app::submission::{
+            InputSubmission, PendingDocuments, PendingVaultMutation, PreparedUserTurn,
+        };
+        use crate::vault::move_plan::{MovePair, MovePlan, VaultFileRef};
+
+        if self.ui.pending_vault_mutation.is_some() {
+            self.ui
+                .show_toast("Confirm or cancel the pending Vault mutation first".into());
+            return;
+        }
+        let prepared = (|| -> color_eyre::Result<_> {
+            let pair = MovePair::new(
+                VaultFileRef::new(VaultRelativePath::parse(&source)?),
+                VaultFileRef::new(VaultRelativePath::parse(&destination)?),
+                false,
+            );
+            let kind = VaultMutationKind::Move(MovePlan::build(
+                vec![pair],
+                &crate::storage::paths::TcuiDataPaths::discover().root,
+                |_| false,
+            )?);
+            let instruction = format!(
+                "Move Vault file {} to {}",
+                source.display(),
+                destination.display()
+            );
+            let submission = InputSubmission::new(&instruction, PendingDocuments::default());
+            Ok(PendingVaultMutation::new_workspace(
+                PreparedUserTurn::prepare(&submission)?,
+                kind,
+            )?)
+        })();
+        match prepared {
+            Ok(pending) => self.ui.pending_vault_mutation = Some(pending),
+            Err(error) => self.ui.show_toast(error.to_string()),
+        }
+    }
 }

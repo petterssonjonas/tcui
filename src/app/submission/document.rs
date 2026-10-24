@@ -1,6 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use base64::{engine::general_purpose::STANDARD, Engine};
 use thiserror::Error;
 
 pub const MAX_DOCUMENT_BYTES: usize = 256 * 1024;
@@ -37,6 +38,31 @@ impl fmt::Debug for DocumentDigest {
     }
 }
 
+/// A user-selected resource whose label is kept with its immutable prompt snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextReference {
+    Memory(u64),
+    Vault(u64),
+}
+
+impl ContextReference {
+    pub(super) const fn closing_tag(self) -> &'static str {
+        match self {
+            Self::Memory(_) => "</Memory>",
+            Self::Vault(_) => "</Vault item>",
+        }
+    }
+}
+
+impl fmt::Display for ContextReference {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Memory(id) => write!(formatter, "<Memory #{id}>"),
+            Self::Vault(id) => write!(formatter, "<Vault item #{id}>"),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct PendingDocument {
     id: PendingDocumentId,
@@ -46,6 +72,7 @@ pub struct PendingDocument {
     byte_count: usize,
     digest: DocumentDigest,
     content: Arc<str>,
+    reference: Option<ContextReference>,
 }
 
 impl PendingDocument {
@@ -72,7 +99,53 @@ impl PendingDocument {
             byte_count: bytes.len(),
             digest,
             content: Arc::from(content),
+            reference: None,
         })
+    }
+
+    pub fn snapshot_context(
+        reference: ContextReference,
+        bytes: &[u8],
+    ) -> Result<Self, PendingDocumentError> {
+        if bytes.len() > MAX_DOCUMENT_BYTES {
+            return Err(PendingDocumentError::ItemTooLarge);
+        }
+        let label = reference.to_string();
+        let text = std::str::from_utf8(bytes).ok().filter(|text| {
+            !text
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+        });
+        let mut document = if text.is_some() {
+            Self::snapshot(&label, &label, bytes)?
+        } else {
+            const PREFIX: &str = "Binary file content (base64):\n";
+            let encoded_len = bytes.len().div_ceil(3) * 4;
+            if PREFIX.len() + encoded_len > MAX_DOCUMENT_BYTES {
+                return Err(PendingDocumentError::ItemTooLarge);
+            }
+            let mut encoded = String::with_capacity(PREFIX.len() + encoded_len);
+            encoded.push_str(PREFIX);
+            STANDARD.encode_string(bytes, &mut encoded);
+            Self::snapshot(&label, &label, encoded.as_bytes())?
+        };
+        document.reference = Some(reference);
+        Ok(document)
+    }
+
+    pub const fn context_reference(&self) -> Option<ContextReference> {
+        self.reference
+    }
+
+    pub(crate) fn display_name_arc(&self) -> Arc<str> {
+        Arc::clone(&self.display_name)
+    }
+
+    fn prompt_bytes(&self) -> usize {
+        self.byte_count
+            + self.reference.map_or(0, |reference| {
+                self.display_name.len() + reference.closing_tag().len() + 2
+            })
     }
 
     pub const fn id(&self) -> PendingDocumentId {
@@ -129,25 +202,53 @@ pub enum PendingDocumentError {
 }
 
 #[derive(Clone)]
-pub struct PendingDocumentInput {
-    pub source_identity: String,
-    pub display_name: String,
-    pub bytes: Vec<u8>,
+pub enum PendingDocumentInput {
+    Document {
+        source_identity: String,
+        display_name: String,
+        bytes: Vec<u8>,
+    },
+    Resource {
+        reference: ContextReference,
+        bytes: Vec<u8>,
+    },
 }
 
 impl PendingDocumentInput {
     pub(crate) fn snapshot(self) -> Result<PendingDocument, PendingDocumentError> {
-        PendingDocument::snapshot(&self.source_identity, &self.display_name, &self.bytes)
+        match self {
+            Self::Resource { reference, bytes } => {
+                PendingDocument::snapshot_context(reference, &bytes)
+            }
+            Self::Document {
+                source_identity,
+                display_name,
+                bytes,
+            } => PendingDocument::snapshot(&source_identity, &display_name, &bytes),
+        }
     }
 }
 
 impl fmt::Debug for PendingDocumentInput {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PendingDocumentInput")
-            .field("display_name", &self.display_name)
-            .field("byte_count", &self.bytes.len())
-            .finish_non_exhaustive()
+        let mut debug = formatter.debug_struct("PendingDocumentInput");
+        match self {
+            Self::Document {
+                display_name,
+                bytes,
+                ..
+            } => {
+                debug
+                    .field("display_name", display_name)
+                    .field("byte_count", &bytes.len());
+            }
+            Self::Resource { reference, bytes } => {
+                debug
+                    .field("reference", reference)
+                    .field("byte_count", &bytes.len());
+            }
+        }
+        debug.finish_non_exhaustive()
     }
 }
 
@@ -169,16 +270,16 @@ impl PendingDocuments {
         {
             return Err(PendingDocumentsError::DuplicateSource);
         }
-        if self
-            .items
-            .iter()
-            .any(|existing| existing.digest == document.digest)
-        {
+        if self.items.iter().any(|existing| {
+            existing.reference.is_none()
+                && document.reference.is_none()
+                && existing.digest == document.digest
+        }) {
             return Err(PendingDocumentsError::DuplicateDigest);
         }
         let total_bytes = self
             .total_bytes
-            .checked_add(document.byte_count)
+            .checked_add(document.prompt_bytes())
             .filter(|total| *total <= MAX_DOCUMENTS_BYTES)
             .ok_or(PendingDocumentsError::AggregateTooLarge)?;
         let id = document.id();
@@ -190,7 +291,7 @@ impl PendingDocuments {
     pub fn remove(&mut self, id: PendingDocumentId) -> Option<PendingDocument> {
         let index = self.items.iter().position(|document| document.id == id)?;
         let removed = self.items.remove(index);
-        self.total_bytes = self.total_bytes.saturating_sub(removed.byte_count);
+        self.total_bytes = self.total_bytes.saturating_sub(removed.prompt_bytes());
         Some(removed)
     }
 

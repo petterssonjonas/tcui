@@ -8,6 +8,7 @@ mod chat_saved_file_store_deletion;
 mod chat_saved_file_store_failures;
 mod chat_saved_file_store_persistence;
 mod chat_saved_file_store_reconciliation;
+mod native_items;
 
 struct TestRoot {
     path: PathBuf,

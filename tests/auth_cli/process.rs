@@ -37,11 +37,6 @@ impl ProcessGuard {
         self.child.as_mut().expect("child already consumed").kill()
     }
 
-    pub(super) fn wait(mut self) -> std::io::Result<std::process::ExitStatus> {
-        let mut child = self.child.take().expect("child already consumed");
-        child.wait()
-    }
-
     pub(super) fn wait_with_output(mut self) -> std::io::Result<std::process::Output> {
         let child = self.child.take().expect("child already consumed");
         child.wait_with_output()

@@ -94,7 +94,7 @@ pub(crate) fn spawn_stdio(
 fn build_stdio_command(
     server: &McpServerConfig,
     profile: Option<&McpProfile>,
-    config: &AppConfig,
+    _config: &AppConfig,
     secret: Option<&str>,
 ) -> McpResult<Command> {
     let program = server
@@ -114,22 +114,6 @@ fn build_stdio_command(
         }
     }
     if let Some(profile) = profile {
-        if let Some(env_var) = profile.vault_env {
-            let vault_path = std::env::var(env_var)
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .or_else(|| {
-                    config
-                        .vault_path
-                        .clone()
-                        .filter(|value| !value.trim().is_empty())
-                })
-                .ok_or(McpError::MissingVaultPath {
-                    profile: profile.name,
-                    env_var,
-                })?;
-            command.env(env_var, vault_path);
-        }
         if let (Some(env_var), Some(secret)) = (profile.api_key_env, secret) {
             command.env(env_var, secret);
         }

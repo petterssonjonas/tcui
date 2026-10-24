@@ -13,7 +13,6 @@ pub(crate) mod mutation_plan;
 mod mutation_preview;
 mod path;
 pub(crate) mod read_tools;
-pub(crate) mod target;
 pub(crate) mod watcher;
 mod write;
 
@@ -30,10 +29,6 @@ mod vault_move_recovery;
 mod vault_read_only;
 
 #[cfg(test)]
-#[path = "vault_target_resolution_test.rs"]
-mod vault_target_resolution;
-
-#[cfg(test)]
 mod protection_tests;
 
 pub use backup::{BackupError, BackupIdError, StandaloneBackupId};
@@ -46,30 +41,58 @@ pub use fs::{
 pub use limits::{VaultLimitKind, VaultLimitReached, VaultSearchLimits, VaultWalkLimits};
 pub use path::{VaultPathError, VaultRelativePath};
 pub use write::{
-    VaultDiff, VaultMutationGuard, VaultMutationLock, VaultProfileRegistration,
-    VaultRestoreOutcome, VaultWriteError, VaultWriteOutcome, VaultWriteService,
+    VaultDiff, VaultMutationGuard, VaultMutationLock, VaultRestoreOutcome, VaultWriteError,
+    VaultWriteOutcome, VaultWriteService,
 };
 
-/// Protection is attached to the application-owned root, never to external profiles.
+/// Only the application-owned Vault root and its descendants are managed.
 pub(crate) fn is_internal_root(root: &std::path::Path) -> bool {
-    let internal = crate::protection::internal_vault_root();
-    root.starts_with(&internal)
-        || std::fs::canonicalize(&internal).is_ok_and(|canonical| root.starts_with(canonical))
+    root.starts_with(crate::protection::internal_vault_root())
+        && !root
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
 }
 
 pub(crate) fn require_root(root: &std::path::Path) -> std::io::Result<()> {
     crate::protection::require_app().map_err(|error| std::io::Error::other(error.to_string()))?;
-    if is_internal_root(root) {
-        crate::protection::require(crate::protection::Domain::Vault)
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
+    #[cfg(test)]
+    if !is_internal_root(root) {
+        return Ok(());
     }
-    Ok(())
+    if !is_internal_root(root)
+        || root
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Vault access is limited to the internal data root",
+        ));
+    }
+    crate::protection::require(crate::protection::Domain::Vault)
+        .map_err(|error| std::io::Error::other(error.to_string()))
+}
+
+pub(crate) fn require_native_bytes(bytes: &[u8]) -> std::io::Result<()> {
+    crate::protection::require_native_store_adoption(crate::protection::Domain::Vault, bytes)
+        .map_err(protection_io_error)
+}
+
+fn protection_io_error(error: color_eyre::Report) -> std::io::Error {
+    if let Some(error) = error.downcast_ref::<crate::protection::NativeStoreAdoptionNeeded>() {
+        return std::io::Error::other(*error);
+    }
+    if let Some(error) = error.downcast_ref::<crate::protection::PortableUnlockNeeded>() {
+        return std::io::Error::other(*error);
+    }
+    std::io::Error::other(error.to_string())
 }
 
 pub(crate) fn decode_root(root: &std::path::Path, bytes: Vec<u8>) -> std::io::Result<Vec<u8>> {
     if is_internal_root(root) {
+        require_native_bytes(&bytes)?;
         crate::protection::decode(crate::protection::Domain::Vault, &bytes)
-            .map_err(|error| std::io::Error::other(error.to_string()))
+            .map_err(protection_io_error)
     } else {
         Ok(bytes)
     }
@@ -109,17 +132,18 @@ pub(crate) fn read_artifact_path(path: &std::path::Path) -> std::io::Result<Vec<
         }
     }
     let result = if is_internal_root(&absolute) {
-        crate::protection::read(crate::protection::Domain::Vault, &absolute)
+        crate::protection::read_native(crate::protection::Domain::Vault, &absolute)
     } else {
         crate::protection::read_regular(&absolute)
     };
-    result.map_err(|error| std::io::Error::other(error.to_string()))
+    result.map_err(protection_io_error)
 }
 
 /// An explicit destination outside the internal Vault is a plaintext export.
 pub(crate) fn write_artifact_path(path: &std::path::Path, bytes: &[u8]) -> color_eyre::Result<()> {
     let absolute = artifact_destination(path)?;
     if is_internal_root(&absolute) {
+        let _guard = artifact_mutation_guard()?;
         crate::protection::write(crate::protection::Domain::Vault, &absolute, bytes)
     } else {
         crate::protection::write_plain(&absolute, bytes)
@@ -129,10 +153,19 @@ pub(crate) fn write_artifact_path(path: &std::path::Path, bytes: &[u8]) -> color
 pub(crate) fn create_artifact_path(path: &std::path::Path, bytes: &[u8]) -> color_eyre::Result<()> {
     let absolute = artifact_destination(path)?;
     if is_internal_root(&absolute) {
+        let _guard = artifact_mutation_guard()?;
         crate::protection::write_new(crate::protection::Domain::Vault, &absolute, bytes)
     } else {
         crate::protection::write_new_plain(&absolute, bytes)
     }
+}
+
+fn artifact_mutation_guard() -> color_eyre::Result<VaultMutationGuard> {
+    let paths = crate::storage::paths::TcuiDataPaths::discover();
+    let guard = VaultMutationLock::at_data_root(&paths.root).try_acquire()?;
+    crate::storage::chat_files::ChatSavedFileStore::discover().require_native_adoption()?;
+    move_journal::JournalStore::at_data_root(&paths.root).ensure_mutation_allowed()?;
+    Ok(guard)
 }
 
 fn artifact_destination(path: &std::path::Path) -> color_eyre::Result<std::path::PathBuf> {
@@ -151,31 +184,46 @@ fn artifact_destination(path: &std::path::Path) -> color_eyre::Result<std::path:
     })
 }
 
-/// Settle already-authorized transfers under the old policy before changing codecs.
-pub(crate) fn prepare_protection_migration(
-    config: &crate::config::AppConfig,
-) -> color_eyre::Result<()> {
+/// Settle native transfers before changing codecs. Legacy external journals are never replayed.
+pub(crate) fn prepare_protection_migration() -> color_eyre::Result<()> {
     use color_eyre::eyre::WrapErr;
-    let catalog = crate::config::vault_profiles::VaultCatalog {
-        profiles: config.vaults.clone(),
-        default_id: config.default_vault_id.clone(),
-    };
-    catalog
-        .validate()
-        .wrap_err("Resolve the Markdown Vault profile catalog before changing protection")?;
     let paths = crate::storage::paths::TcuiDataPaths::discover();
     let recovery = move_recovery::MoveRecoveryService::at_data_root(
-        &catalog,
         &paths.root,
         move_recovery::MoveRecoveryConfig::default(),
     );
     let report = recovery
         .recover_pending()
-        .wrap_err("Resolve pending transfers in Markdown Vault before changing protection")?;
+        .wrap_err("Resolve pending Vault transfers")?;
     if report.blocked() {
-        color_eyre::eyre::bail!("Resolve the remaining recovery conflict in Markdown Vault before changing protection; no protection settings were changed");
+        color_eyre::eyre::bail!(
+            "Resolve the remaining Vault recovery conflict before changing protection"
+        );
     }
     move_journal::JournalStore::at_data_root(&paths.root)
         .ensure_mutation_allowed()
-        .wrap_err("Resolve pending transfers in Markdown Vault before changing protection")
+        .wrap_err("Resolve pending Vault transfers before changing protection")
+}
+
+/// Preserve only identity-verified private stages while an authenticated native store is rewrapped.
+pub(crate) fn protection_migration_stage_paths() -> color_eyre::Result<Vec<std::path::PathBuf>> {
+    protection_stage_paths(false)
+}
+
+/// A local format upgrade must not decrypt or authenticate already-portable foreign journals.
+pub(crate) fn protection_format_upgrade_stage_paths() -> color_eyre::Result<Vec<std::path::PathBuf>>
+{
+    protection_stage_paths(true)
+}
+
+fn protection_stage_paths(
+    skip_portable_journals: bool,
+) -> color_eyre::Result<Vec<std::path::PathBuf>> {
+    let paths = crate::storage::paths::TcuiDataPaths::discover();
+    let mut stages = move_journal::JournalStore::at_data_root(&paths.root)
+        .protection_migration_stages(&paths.root, skip_portable_journals)?
+        .into_iter()
+        .collect::<Vec<_>>();
+    stages.sort();
+    Ok(stages)
 }

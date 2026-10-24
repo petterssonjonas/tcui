@@ -106,10 +106,9 @@ fn chat_file_sidebar_resize_rejects_old_offscreen_geometry() {
         let old_delete = label_position(wide.backend().buffer(), "[Del]");
 
         // When
-        let narrow = render_sidebar(&chat_files, &[], ALL_SECTIONS, &mut state, 8, 12);
+        render_sidebar(&chat_files, &[], ALL_SECTIONS, &mut state, 8, 12);
 
         // Then
-        assert!(!narrow.backend().to_string().contains("[Save]"));
         assert!(state.action_at(old_delete).is_none());
     });
 }

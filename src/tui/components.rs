@@ -55,6 +55,21 @@ impl SearchField {
         }
     }
 
+    pub fn from_text(query: String) -> Self {
+        let cursor = query.len();
+        Self { query, cursor }
+    }
+
+    pub fn set_cursor(&mut self, cursor: usize) {
+        self.cursor = self.query.floor_char_boundary(cursor.min(self.query.len()));
+    }
+
+    pub fn replace_range(&mut self, range: std::ops::Range<usize>, text: &str) {
+        let cursor = range.start + text.len();
+        self.query.replace_range(range, text);
+        self.cursor = cursor;
+    }
+
     pub fn query(&self) -> &str {
         &self.query
     }

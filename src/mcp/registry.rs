@@ -27,7 +27,6 @@ pub struct McpProfile {
     pub args: &'static [&'static str],
     pub api_key_env: Option<&'static str>,
     pub key_store_name: Option<&'static str>,
-    pub vault_env: Option<&'static str>,
     pub capabilities: McpCapabilities,
 }
 
@@ -61,7 +60,7 @@ impl McpProfile {
     }
 }
 
-const PROFILES: [McpProfile; 5] = [
+const PROFILES: [McpProfile; 4] = [
     McpProfile {
         name: "Exa",
         skill: "exa",
@@ -70,7 +69,6 @@ const PROFILES: [McpProfile; 5] = [
         args: &["-y", "exa-mcp-server@3.2.1"],
         api_key_env: Some("EXA_API_KEY"),
         key_store_name: Some("Exa Search"),
-        vault_env: None,
         capabilities: McpCapabilities::tools_only(),
     },
     McpProfile {
@@ -81,7 +79,6 @@ const PROFILES: [McpProfile; 5] = [
         args: &["-y", "tavily-mcp@0.2.20"],
         api_key_env: Some("TAVILY_API_KEY"),
         key_store_name: Some("Tavily Search"),
-        vault_env: None,
         capabilities: McpCapabilities::tools_only(),
     },
     McpProfile {
@@ -92,7 +89,6 @@ const PROFILES: [McpProfile; 5] = [
         args: &["-y", "firecrawl-mcp@3.22.1"],
         api_key_env: Some("FIRECRAWL_API_KEY"),
         key_store_name: Some("Firecrawl Search"),
-        vault_env: None,
         capabilities: McpCapabilities::tools_only(),
     },
     McpProfile {
@@ -103,27 +99,7 @@ const PROFILES: [McpProfile; 5] = [
         args: &["gnome-desktop-mcp==0.1.0"],
         api_key_env: None,
         key_store_name: None,
-        vault_env: None,
         capabilities: McpCapabilities::tools_only(),
-    },
-    McpProfile {
-        name: "Obsidian",
-        skill: "obsidian",
-        description: "Obsidian",
-        program: "uvx",
-        args: &[
-            "--from",
-            "git+https://github.com/Vasallo94/obsidian-mcp-server.git@ac9889f93c39c3a6a38515fdeb374e61f87c70a2",
-            "obsidian-mcp-server",
-        ],
-        api_key_env: None,
-        key_store_name: None,
-        vault_env: Some("OBSIDIAN_VAULT_PATH"),
-        capabilities: McpCapabilities {
-            tools: true,
-            resources: true,
-            prompts: true,
-        },
     },
 ];
 
@@ -204,7 +180,7 @@ mod tests {
         ];
         let merged = merged_configs(&existing);
         assert_eq!(&merged[..existing.len()], existing.as_slice());
-        assert_eq!(merged.len(), 6);
+        assert_eq!(merged.len(), 5);
         assert!(merged[2..].iter().all(|row| !row.enabled));
         assert!(merged[2..4]
             .iter()

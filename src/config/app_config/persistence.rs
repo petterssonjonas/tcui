@@ -10,7 +10,7 @@ use self::atomic::{
     acquire_lock, atomic_replace, maybe_fail, restore_previous, write_backup_once, FailurePoint,
     CONFIG_FILE,
 };
-use self::migration::{deserialize_config, migrate_value, validate_catalog};
+use self::migration::{deserialize_config, migrate_value};
 use super::AppConfig;
 
 #[cfg(test)]
@@ -43,7 +43,6 @@ pub(super) fn save(config: &AppConfig) -> Result<()> {
     let config_root = config_root();
     std::fs::create_dir_all(&config_root)?;
     let _lock = acquire_lock(&config_root)?;
-    validate_catalog(config)?;
     let content = toml::to_string_pretty(config)?;
     atomic_replace(&config_root.join(CONFIG_FILE), content.as_bytes())
 }

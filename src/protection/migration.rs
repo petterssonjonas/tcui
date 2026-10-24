@@ -28,6 +28,14 @@ struct Journal {
     target: Manifest,
     entries: Vec<Entry>,
     convert_credentials: bool,
+    #[serde(default)]
+    recover_native_after: bool,
+    #[serde(default = "clear_memory_indexes_by_default")]
+    clear_memory_indexes: bool,
+}
+
+fn clear_memory_indexes_by_default() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize)]
@@ -60,83 +68,210 @@ pub(super) fn pending() -> Result<Option<Pending>> {
     }
 }
 
+/// Checks copied native data before configuration can create a destination key
+/// or invoke store reconciliation. This authenticates but never returns bodies.
+pub(super) fn preflight_native_adoption(domain: Domain) -> Result<()> {
+    super::require(domain)?;
+    if domain == Domain::Chats {
+        bail!("Native portable adoption is for Vault and Memories only.");
+    }
+    if super::is_protected(domain)? {
+        return Ok(());
+    }
+    let mut adoption_needed = false;
+    for (path, _) in sources(&super::root()?, |candidate| candidate == domain)? {
+        let prefix =
+            storage_io::read_regular_prefix(&path, super::NATIVE_STORE_ADOPTION_PROBE_LEN)?;
+        if matches!(
+            super::inspect_bytes(&prefix)?,
+            super::StoredFormat::Portable { .. }
+        ) {
+            let stored = storage_io::read_regular(&path)?;
+            let _verified = Zeroizing::new(super::decode(domain, &stored)?);
+            adoption_needed = true;
+        }
+    }
+    if adoption_needed {
+        return Err(super::NativeStoreAdoptionNeeded { domain }.into());
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum PrepareMode {
+    Policy,
+    Adoption(Domain),
+    FormatUpgrade,
+}
+
 pub(super) fn prepare(
     old: Option<&Manifest>,
     target: &Manifest,
     key: Option<&[u8; 32]>,
 ) -> Result<()> {
+    prepare_impl(old, target, key, PrepareMode::Policy)
+}
+
+pub(super) fn prepare_adoption(
+    old: Option<&Manifest>,
+    target: &Manifest,
+    key: Option<&[u8; 32]>,
+    domain: Domain,
+) -> Result<()> {
+    prepare_impl(old, target, key, PrepareMode::Adoption(domain))
+}
+
+pub(super) fn prepare_format_upgrade(
+    old: &Manifest,
+    target: &Manifest,
+    key: &[u8; 32],
+) -> Result<()> {
+    prepare_impl(Some(old), target, Some(key), PrepareMode::FormatUpgrade)
+}
+
+fn prepare_impl(
+    old: Option<&Manifest>,
+    target: &Manifest,
+    key: Option<&[u8; 32]>,
+    mode: PrepareMode,
+) -> Result<()> {
+    let adoption = match mode {
+        PrepareMode::Adoption(domain) => Some(domain),
+        PrepareMode::Policy | PrepareMode::FormatUpgrade => None,
+    };
+    let format_only = matches!(mode, PrepareMode::FormatUpgrade);
+    // Configuration authenticates the existing master and keeps its wrapping.
+    // Only policy/format transitions or explicit adoption need domain reencoding.
+    let include_domain = |domain| match mode {
+        PrepareMode::Policy => old.is_none_or(|old| {
+            old.policy.protects(domain) != target.policy.protects(domain)
+                || (old.version != target.version && target.policy.protects(domain))
+        }),
+        PrepareMode::Adoption(selected) => domain == selected,
+        PrepareMode::FormatUpgrade => domain != Domain::Chats && target.policy.protects(domain),
+    };
+    let migrate_vault = include_domain(Domain::Vault);
+    let migrate_chats = include_domain(Domain::Chats);
+    let migrate_memory = include_domain(Domain::Memories);
+    crate::storage::native_transfer::assert_no_pending_recovery()?;
     let root = super::root()?;
     cleanup_orphans(&root)?;
-    let config = AppConfig::load()?;
-    crate::vault::prepare_protection_migration(&config)?;
-    crate::storage::saved_file_migration::migrate_saved_files(&config)?;
-    crate::storage::chat_store::retire_legacy_database()?;
+    let excluded_stages: std::collections::HashSet<PathBuf> = match mode {
+        PrepareMode::Adoption(Domain::Vault) => crate::vault::protection_migration_stage_paths()?
+            .into_iter()
+            .collect(),
+        PrepareMode::Adoption(_) => std::collections::HashSet::new(),
+        PrepareMode::FormatUpgrade if target.policy.vault => {
+            crate::vault::protection_format_upgrade_stage_paths()?
+                .into_iter()
+                .collect()
+        }
+        PrepareMode::FormatUpgrade => std::collections::HashSet::new(),
+        PrepareMode::Policy if migrate_vault => {
+            crate::vault::prepare_protection_migration()?;
+            std::collections::HashSet::new()
+        }
+        PrepareMode::Policy => std::collections::HashSet::new(),
+    };
+    for path in &excluded_stages {
+        validate_relative(path.strip_prefix(&root)?)?;
+    }
+    if matches!(mode, PrepareMode::Policy) && (migrate_vault || migrate_chats) {
+        let config = AppConfig::load()?;
+        crate::storage::saved_file_migration::migrate_saved_files(&config)?;
+        crate::storage::chat_store::retire_legacy_database()?;
+    }
     let stage_name = format!(".protection-migration-{:032x}", rand::random::<u128>());
     let stage = root.join(&stage_name);
     storage_io::atomic_write(&stage.join("owner"), b"tcui-protection-staging-v1")?;
-    let sources = sources(&root)?;
-    let mut entries = Vec::with_capacity(sources.len());
+    let sources = sources(&root, include_domain)?;
+    let mut staging = Staging {
+        root: &root,
+        stage: &stage,
+        target: target.policy,
+        key,
+        entries: Vec::with_capacity(sources.len()),
+    };
     let mut legacy_key = None;
+    let wrapping =
+        if (migrate_vault && target.policy.vault) || (migrate_memory && target.policy.memories) {
+            key.map(|_| KeyStore::protection_wrapping()).transpose()?
+        } else {
+            None
+        };
     for (path, domain) in sources {
+        // Only authenticated journal-owned private stages can retain their inode.
+        // Native recovery removes them by captured identity after policy publication.
+        if excluded_stages.contains(&path) {
+            continue;
+        }
         let original = Zeroizing::new(storage_io::read_regular(&path)?);
+        if format_only
+            && matches!(
+                super::inspect_bytes(&original)?,
+                super::StoredFormat::Portable { .. }
+            )
+        {
+            // A portable foreign file must keep its source wrapping and bytes.
+            // Format upgrade authenticates only this instance's legacy V1 data.
+            continue;
+        }
+        // A plaintext choice for a different domain is not authorization to
+        // decrypt a copied portable store during initial configuration.
+        if old.is_none()
+            && !target.policy.protects(domain)
+            && matches!(
+                super::inspect_bytes(&original)?,
+                super::StoredFormat::Portable { .. }
+            )
+        {
+            continue;
+        }
         let plaintext = Zeroizing::new(
-            plaintext(old, domain, &path, &original, key, &mut legacy_key).wrap_err_with(|| {
+            plaintext(
+                old,
+                adoption,
+                domain,
+                &path,
+                &original,
+                key,
+                &mut legacy_key,
+            )
+            .wrap_err_with(|| {
                 format!(
                     "Cannot migrate {}; original data is preserved",
                     path.display()
                 )
             })?,
         );
-        let stored = if target.policy.protects(domain) {
-            super::seal(
-                domain.context(),
-                &plaintext,
-                key.ok_or_else(|| eyre!("Missing migration key."))?,
-            )?
-        } else {
-            plaintext.to_vec()
-        };
-        if target.policy.protects(domain) {
-            let verified = Zeroizing::new(super::open(
-                domain.context(),
-                &stored,
-                key.ok_or_else(|| eyre!("Missing migration key."))?,
-            )?);
-            if verified.as_slice() != plaintext.as_slice() {
-                bail!("Protection migration verification failed before replacing data.");
-            }
-        }
-        let backup = match key {
-            Some(key) => super::seal(BACKUP_CONTEXT, &original, key)?,
-            None => original.to_vec(),
-        };
-        let target_hash = *blake3::hash(&stored).as_bytes();
-        let staged_wrapped = key.is_some() && !target.policy.protects(domain);
-        let staged = if staged_wrapped {
-            super::seal(
-                STAGE_CONTEXT,
-                &stored,
-                key.ok_or_else(|| eyre!("Missing staging key."))?,
-            )?
-        } else {
-            stored
-        };
-        let number = entries.len();
-        storage_io::atomic_write(&stage.join(format!("{number}.new")), &staged)?;
-        storage_io::atomic_write(&stage.join(format!("{number}.old")), &backup)?;
-        entries.push(Entry {
-            relative: path.strip_prefix(&root)?.to_path_buf(),
-            original_hash: *blake3::hash(&original).as_bytes(),
-            target_hash,
-            staged_hash: *blake3::hash(&staged).as_bytes(),
-            staged_wrapped,
-            backup_hash: *blake3::hash(&backup).as_bytes(),
-        });
+        let stored = Zeroizing::new(encode_target(
+            target.policy,
+            domain,
+            &plaintext,
+            key,
+            wrapping.as_ref(),
+        )?);
+        staging.push(domain, &path, &original, &stored)?;
     }
+    let retained_root = root.join(".native-transfer-backups");
+    crate::storage::native_transfer::stage_protection_migration(
+        adoption,
+        target.policy,
+        format_only,
+        |domain, plaintext| encode_target(target.policy, domain, plaintext, key, wrapping.as_ref()),
+        |domain, path, original, stored| {
+            if !path.starts_with(&retained_root) {
+                bail!("Native transfer backup migration escaped its retained-data root.");
+            }
+            staging.push(domain, path, original, stored)
+        },
+    )?;
     let journal = Journal {
         version: VERSION,
         target: target.clone(),
-        entries,
+        entries: staging.entries,
+        recover_native_after: adoption == Some(Domain::Vault),
+        clear_memory_indexes: migrate_memory,
         convert_credentials: old
             .is_none_or(|old| old.policy.credentials != target.policy.credentials),
     };
@@ -157,7 +292,69 @@ pub(super) fn prepare(
     Ok(())
 }
 
-fn sources(root: &Path) -> Result<Vec<(PathBuf, Domain)>> {
+fn encode_target(
+    target: super::ProtectionPolicy,
+    domain: Domain,
+    plaintext: &[u8],
+    key: Option<&[u8; 32]>,
+    wrapping: Option<&crate::config::key_store::ProtectionWrapping>,
+) -> Result<Vec<u8>> {
+    if !target.protects(domain) {
+        return Ok(plaintext.to_vec());
+    }
+    let key = key.ok_or_else(|| eyre!("Missing migration key."))?;
+    let stored = super::seal_content(domain, plaintext, key, wrapping)?;
+    let verified = Zeroizing::new(super::open_content(domain, &stored, key)?);
+    if verified.as_slice() != plaintext {
+        bail!("Protection migration verification failed before replacing data.");
+    }
+    Ok(stored)
+}
+
+/// Every native body and its descriptor use the same authenticated installation
+/// plan. No callback can publish a source before the complete plan is durable.
+struct Staging<'a> {
+    root: &'a Path,
+    stage: &'a Path,
+    target: super::ProtectionPolicy,
+    key: Option<&'a [u8; 32]>,
+    entries: Vec<Entry>,
+}
+
+impl Staging<'_> {
+    fn push(&mut self, domain: Domain, path: &Path, original: &[u8], stored: &[u8]) -> Result<()> {
+        let relative = path.strip_prefix(self.root)?;
+        validate_relative(relative)?;
+        let backup = match self.key {
+            Some(key) => std::borrow::Cow::Owned(super::seal(BACKUP_CONTEXT, original, key)?),
+            None => std::borrow::Cow::Borrowed(original),
+        };
+        let staged_wrapped = self.key.is_some() && !self.target.protects(domain);
+        let staged = if staged_wrapped {
+            std::borrow::Cow::Owned(super::seal(
+                STAGE_CONTEXT,
+                stored,
+                self.key.ok_or_else(|| eyre!("Missing staging key."))?,
+            )?)
+        } else {
+            std::borrow::Cow::Borrowed(stored)
+        };
+        let number = self.entries.len();
+        storage_io::atomic_write(&self.stage.join(format!("{number}.new")), &staged)?;
+        storage_io::atomic_write(&self.stage.join(format!("{number}.old")), &backup)?;
+        self.entries.push(Entry {
+            relative: relative.to_path_buf(),
+            original_hash: *blake3::hash(original).as_bytes(),
+            target_hash: *blake3::hash(stored).as_bytes(),
+            staged_hash: *blake3::hash(&staged).as_bytes(),
+            staged_wrapped,
+            backup_hash: *blake3::hash(&backup).as_bytes(),
+        });
+        Ok(())
+    }
+}
+
+fn sources(root: &Path, include: impl Fn(Domain) -> bool) -> Result<Vec<(PathBuf, Domain)>> {
     let mut sources = Vec::new();
     for (name, domain) in [
         ("chats", Domain::Chats),
@@ -166,8 +363,11 @@ fn sources(root: &Path) -> Result<Vec<(PathBuf, Domain)>> {
         ("artifacts", Domain::Vault),
         ("chat-file-links", Domain::Vault),
         ("vault-backups", Domain::Vault),
-        ("vault-ops", Domain::Vault),
+        ("vault-native-ops", Domain::Vault),
     ] {
+        if !include(domain) {
+            continue;
+        }
         let directory = root.join(name);
         match std::fs::symlink_metadata(&directory) {
             Ok(metadata) if metadata.is_symlink() || !metadata.is_dir() => {
@@ -204,15 +404,24 @@ fn sources(root: &Path) -> Result<Vec<(PathBuf, Domain)>> {
 
 fn plaintext(
     old: Option<&Manifest>,
+    adoption: Option<Domain>,
     domain: Domain,
     path: &Path,
     stored: &[u8],
     key: Option<&[u8; 32]>,
     legacy_key: &mut Option<SharedKey>,
 ) -> Result<Vec<u8>> {
-    if old.is_some_and(|old| old.policy.protects(domain)) {
-        return super::open(
-            domain.context(),
+    let format = super::inspect_bytes(stored)?;
+    if let super::StoredFormat::Portable { .. } = format {
+        return super::portable::decode(domain, stored);
+    }
+    // Only explicit adoption authorizes copied plaintext in a protected domain.
+    // Continue through native validation and legacy enc:v1 decoding below.
+    let adopting_plaintext =
+        adoption == Some(domain) && matches!(format, super::StoredFormat::Plaintext);
+    if old.is_some_and(|old| old.policy.protects(domain)) && !adopting_plaintext {
+        return super::open_content(
+            domain,
             stored,
             key.ok_or_else(|| eyre!("Missing protected-data key."))?,
         );
@@ -248,7 +457,8 @@ pub(super) fn recover() -> Result<()> {
     let _lock = storage_io::migration_lock()?;
     let manifest = pending()?.ok_or_else(|| eyre!("Recovery plan disappeared."))?;
     if manifest.target.authentication.is_some() {
-        super::with_key(|key| recover_locked(Some(key)))
+        let key = super::with_key(|key| Ok(Zeroizing::new(*key)))?;
+        recover_locked(Some(&key))
     } else {
         recover_locked(None)
     }
@@ -271,7 +481,7 @@ pub(super) fn recover_locked(key: Option<&[u8; 32]>) -> Result<()> {
         None => stored_journal,
     });
     let journal: Journal = serde_json::from_slice(&journal_bytes)?;
-    if journal.version != VERSION {
+    if !matches!(journal.version, 1 | VERSION) {
         bail!("Unsupported protection recovery journal version.");
     }
     if journal.target != pending.target {
@@ -317,7 +527,9 @@ pub(super) fn recover_locked(key: Option<&[u8; 32]>) -> Result<()> {
     } else {
         KeyStore::set_storage_default(&AppConfig::default(), storage)?;
     }
-    clear_derived_memory_indexes()?;
+    if journal.clear_memory_indexes {
+        clear_derived_memory_indexes()?;
+    }
     storage_io::atomic_write(
         &super::manifest_path()?,
         &serde_json::to_vec(&pending.target)?,
@@ -327,6 +539,12 @@ pub(super) fn recover_locked(key: Option<&[u8; 32]>) -> Result<()> {
     sync_root(&root)?;
     // This is our own verified staging, not a user-supplied data directory.
     cleanup_stage(&root, &stage)?;
+    if journal.recover_native_after {
+        // Native journal state remains durable if this final recovery is interrupted.
+        // The protected destination policy is now published, so normal recovery
+        // cannot write a plaintext rollback or hit the adoption barrier.
+        crate::vault::prepare_protection_migration()?;
+    }
     Ok(())
 }
 
@@ -346,6 +564,8 @@ fn validate_relative(path: &Path) -> Result<()> {
         "chat-file-links",
         "vault-backups",
         "vault-ops",
+        "vault-native-ops",
+        ".native-transfer-backups",
     ];
     if !path.components().next().is_some_and(|component| {
         allowed

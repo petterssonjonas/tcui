@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-pub(super) const MANIFEST_VERSION: u32 = 1;
+pub(super) const MANIFEST_VERSION: u32 = 2;
 const MAX_NAME_BYTES: usize = 120;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -39,19 +39,85 @@ pub(crate) struct ChatFileLink {
     pub(crate) filename: String,
 }
 
+/// The single index for native Vault identities and existing chat links.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ChatFileLinkManifestV1 {
+pub(crate) struct ChatFileManifest {
     pub(crate) version: u32,
     pub(crate) links: Vec<ChatFileLink>,
+    pub(super) items: Vec<VaultItemEntry>,
+    pub(super) next_item_id: u64,
 }
 
-impl ChatFileLinkManifestV1 {
+impl ChatFileManifest {
     pub(super) const fn empty() -> Self {
         Self {
             version: MANIFEST_VERSION,
             links: Vec::new(),
+            items: Vec::new(),
+            next_item_id: 1,
         }
     }
+}
+
+/// Stable, positive native Vault identity. Chat link IDs remain independent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct VaultItemId(pub(super) u64);
+
+impl VaultItemId {
+    pub(crate) const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for VaultItemId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::str::FromStr for VaultItemId {
+    type Err = ChatFileError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let id = value
+            .parse::<u64>()
+            .map_err(|_| ChatFileError::InvalidItemId)?;
+        if id == 0 {
+            return Err(ChatFileError::InvalidItemId);
+        }
+        Ok(Self(id))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct VaultItemEntry {
+    pub(super) id: VaultItemId,
+    pub(super) relative_path: PathBuf,
+    pub(super) state: VaultItemState,
+    pub(super) archived_links: Vec<ChatFileLink>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(super) enum VaultItemState {
+    Active,
+    Missing,
+    Trashing { trash_path: PathBuf },
+    Trashed { trash_path: PathBuf },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VaultItemRecord {
+    pub(crate) id: VaultItemId,
+    pub(crate) filename: String,
+    pub(crate) path: PathBuf,
+    pub(crate) relative_path: PathBuf,
+    /// Lowercase filename extension, or "file" when there is no extension.
+    pub(crate) kind: String,
+    /// Stored file size, including the envelope when protection is enabled.
+    pub(crate) size_bytes: u64,
+    pub(crate) chat_links: Vec<ChatFileLink>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +129,18 @@ pub(crate) struct SavedFileRecord {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ChatFileError {
+    #[error("{0}")]
+    NativeStoreAdoptionNeeded(#[source] crate::protection::NativeStoreAdoptionNeeded),
+    #[error("{0}")]
+    PortableUnlockNeeded(#[source] crate::protection::PortableUnlockNeeded),
+    #[error("Vault item ID must be a positive integer")]
+    InvalidItemId,
+    #[error("Vault item {id} was not found")]
+    ItemNotFound { id: VaultItemId },
+    #[error("Vault item {id} changed since editing started; the editor draft was not saved")]
+    ItemConflict { id: VaultItemId },
+    #[error("Vault item ID space is exhausted")]
+    ItemIdExhausted,
     #[error("conversation ID must be positive")]
     InvalidConversationId,
     #[error("saved filename is invalid")]
@@ -98,6 +176,22 @@ pub(crate) enum ChatFileError {
     Io(#[from] io::Error),
     #[error(transparent)]
     Serialization(#[from] serde_json::Error),
+}
+
+impl ChatFileError {
+    pub(crate) fn from_protection(error: color_eyre::eyre::Report) -> Self {
+        for source in error.chain() {
+            if let Some(needed) =
+                source.downcast_ref::<crate::protection::NativeStoreAdoptionNeeded>()
+            {
+                return Self::NativeStoreAdoptionNeeded(*needed);
+            }
+            if let Some(needed) = source.downcast_ref::<crate::protection::PortableUnlockNeeded>() {
+                return Self::PortableUnlockNeeded(*needed);
+            }
+        }
+        Self::Io(io::Error::other(error.to_string()))
+    }
 }
 
 pub(super) fn validate_conversation_id(conversation_id: i64) -> Result<(), ChatFileError> {
@@ -152,16 +246,5 @@ pub(super) fn collision_filename(name: &str, suffix: u32) -> String {
 }
 
 pub(super) fn link_filename_is_valid(filename: &str) -> bool {
-    !filename.is_empty()
-        && filename.len() <= MAX_NAME_BYTES + 24
-        && Path::new(filename).components().count() == 1
-        && Path::new(filename)
-            .file_name()
-            .and_then(|name| name.to_str())
-            == Some(filename)
-        && !filename.starts_with('.')
-        && filename.chars().all(|character| {
-            character.is_ascii_alphanumeric()
-                || matches!(character, '.' | '-' | '_' | ' ' | '(' | ')')
-        })
+    super::items::item_path_is_valid(Path::new(filename))
 }

@@ -1,21 +1,69 @@
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
-use std::path::Component;
+use std::path::{Component, Path};
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 #[cfg(unix)]
 use cap_std::fs::OpenOptionsExt as _;
 use cap_std::fs::{Dir, MetadataExt as _, OpenOptions};
 
-use crate::config::vault_profiles::VaultCatalog;
-
 use super::move_journal::{MoveJournalFileRef, MoveOperationId, StageIdentity};
 use super::VaultRelativePath;
 
+pub(super) fn protection_migration_stages(
+    data_root: &Path,
+    journal: &super::move_journal::MoveJournalV1,
+    owner: u32,
+) -> Result<Vec<std::path::PathBuf>, RecoveryFsError> {
+    let mut stages = Vec::new();
+    for (index, (pair, artifact)) in journal
+        .plan
+        .pairs
+        .iter()
+        .zip(&journal.artifacts)
+        .enumerate()
+    {
+        let Some(path) = &artifact.staged_path else {
+            continue;
+        };
+        let mut expected_path = pair.destination.path.as_path().to_path_buf();
+        expected_path.set_file_name(format!(
+            ".tcui-{}-{index:03}.stage",
+            journal.operation_id.as_str()
+        ));
+        if path.as_path() != expected_path {
+            return Err(RecoveryFsError::Conflict { path: path.clone() });
+        }
+        let target = MoveJournalFileRef { path: path.clone() };
+        let root = open_root(data_root, &target)?;
+        let (parent, name) = match open_parent(&root, path) {
+            Ok(parent) => parent,
+            Err(RecoveryFsError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+                continue
+            }
+            Err(error) => return Err(error),
+        };
+        let metadata = match parent.symlink_metadata(&name) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io_error("inspect migration stage", path, error)),
+        };
+        if !metadata.is_file() || metadata.uid() != owner || metadata.nlink() != 1 {
+            return Err(RecoveryFsError::Conflict { path: path.clone() });
+        }
+        match artifact.staged_identity {
+            Some(expected)
+                if StageIdentity::capture(&metadata) == expected
+                    && metadata.mode() & 0o7777 == 0o600 => {}
+            None if metadata.len() == 0 && metadata.mode() & 0o022 == 0 => {}
+            _ => return Err(RecoveryFsError::Conflict { path: path.clone() }),
+        }
+        stages.push(data_root.join("vault").join(path.as_path()));
+    }
+    Ok(stages)
+}
 #[derive(Debug, thiserror::Error)]
 pub(super) enum RecoveryFsError {
-    #[error("Vault profile is unavailable for recovery path {path:?}")]
-    UnknownProfile { path: VaultRelativePath },
     #[error("Vault recovery path conflicts with unexpected data: {path:?}")]
     Conflict { path: VaultRelativePath },
     #[error("failed to {operation} Vault recovery path {path:?}: {source}")]
@@ -30,16 +78,16 @@ pub(super) enum RecoveryFsError {
 impl RecoveryFsError {
     pub(super) const fn path(&self) -> &VaultRelativePath {
         match self {
-            Self::UnknownProfile { path } | Self::Conflict { path } | Self::Io { path, .. } => path,
+            Self::Conflict { path } | Self::Io { path, .. } => path,
         }
     }
 }
 
 pub(super) fn read_optional(
-    catalog: &VaultCatalog,
+    data_root: &Path,
     target: &MoveJournalFileRef,
 ) -> Result<Option<Vec<u8>>, RecoveryFsError> {
-    let root = open_profile(catalog, target)?;
+    let root = open_root(data_root, target)?;
     let (parent, name) = open_parent(&root, &target.path)?;
     let mut options = OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
@@ -67,30 +115,18 @@ pub(super) fn read_optional(
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
         .map_err(|source| io_error("read", &target.path, source))?;
-    let profile =
-        catalog
-            .get(&target.profile_id)
-            .ok_or_else(|| RecoveryFsError::UnknownProfile {
-                path: target.path.clone(),
-            })?;
-    let bytes = super::decode_root(&profile.root.join(target.path.as_path()), bytes)
+    let bytes = super::decode_root(&data_root.join("vault").join(target.path.as_path()), bytes)
         .map_err(|source| io_error("decrypt", &target.path, source))?;
     Ok(Some(bytes))
 }
 
 pub(super) fn replace_file(
-    catalog: &VaultCatalog,
+    data_root: &Path,
     target: &MoveJournalFileRef,
     bytes: &[u8],
 ) -> Result<(), RecoveryFsError> {
-    let root = open_profile(catalog, target)?;
-    let profile =
-        catalog
-            .get(&target.profile_id)
-            .ok_or_else(|| RecoveryFsError::UnknownProfile {
-                path: target.path.clone(),
-            })?;
-    let bytes = super::encode_root(&profile.root.join(target.path.as_path()), bytes)
+    let root = open_root(data_root, target)?;
+    let bytes = super::encode_root(&data_root.join("vault").join(target.path.as_path()), bytes)
         .map_err(|source| io_error("encrypt", &target.path, source))?;
     let (parent, name) = open_parent(&root, &target.path)?;
     if parent
@@ -116,11 +152,11 @@ pub(super) fn replace_file(
 }
 
 pub(super) fn remove_if_matches(
-    catalog: &VaultCatalog,
+    data_root: &Path,
     target: &MoveJournalFileRef,
     expected: &[u8],
 ) -> Result<(), RecoveryFsError> {
-    let Some(current) = read_optional(catalog, target)? else {
+    let Some(current) = read_optional(data_root, target)? else {
         return Ok(());
     };
     if current != expected {
@@ -128,7 +164,7 @@ pub(super) fn remove_if_matches(
             path: target.path.clone(),
         });
     }
-    let root = open_profile(catalog, target)?;
+    let root = open_root(data_root, target)?;
     let (parent, name) = open_parent(&root, &target.path)?;
     parent
         .remove_file(&name)
@@ -147,7 +183,7 @@ pub(super) struct PrivateStage<'a> {
 }
 
 pub(super) fn remove_private_stage(
-    catalog: &VaultCatalog,
+    data_root: &Path,
     stage: PrivateStage<'_>,
 ) -> Result<(), RecoveryFsError> {
     let PrivateStage {
@@ -161,12 +197,12 @@ pub(super) fn remove_private_stage(
     } = stage;
     let mut expected_path = destination.path.as_path().to_path_buf();
     expected_path.set_file_name(format!(".tcui-{}-{index:03}.stage", operation_id.as_str()));
-    if target.profile_id != destination.profile_id || target.path.as_path() != expected_path {
+    if target.path.as_path() != expected_path {
         return Err(RecoveryFsError::Conflict {
             path: target.path.clone(),
         });
     }
-    let root = open_profile(catalog, target)?;
+    let root = open_root(data_root, target)?;
     let (parent, name) = open_parent(&root, &target.path)?;
     let metadata = match parent.symlink_metadata(&name) {
         Ok(metadata) => metadata,
@@ -203,7 +239,7 @@ pub(super) fn remove_private_stage(
     } else if opened.len() != 0 {
         // Old journals have no creation identity. Only authenticated, expected
         // complete contents may authorize removal of their nonempty stage.
-        if read_optional(catalog, target)?.as_deref() != legacy_contents
+        if read_optional(data_root, target)?.as_deref() != legacy_contents
             || legacy_contents.is_none()
         {
             return Err(RecoveryFsError::Conflict {
@@ -229,21 +265,13 @@ pub(super) fn remove_private_stage(
     sync_directory(&parent, &target.path)
 }
 
-fn open_profile(
-    catalog: &VaultCatalog,
-    target: &MoveJournalFileRef,
-) -> Result<Dir, RecoveryFsError> {
-    let profile =
-        catalog
-            .get(&target.profile_id)
-            .ok_or_else(|| RecoveryFsError::UnknownProfile {
-                path: target.path.clone(),
-            })?;
-    super::require_root(&profile.root.join(target.path.as_path()))
+fn open_root(data_root: &Path, target: &MoveJournalFileRef) -> Result<Dir, RecoveryFsError> {
+    let root = data_root.join("vault");
+    super::require_root(&root.join(target.path.as_path()))
         .map_err(|source| io_error("unlock before recovering", &target.path, source))?;
-    crate::protection::open_directory(&profile.root, false).map_err(|error| {
+    crate::protection::open_directory(&root, false).map_err(|error| {
         io_error(
-            "open profile for",
+            "open Vault for",
             &target.path,
             io::Error::other(error.to_string()),
         )

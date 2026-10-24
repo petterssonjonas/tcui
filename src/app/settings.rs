@@ -88,7 +88,7 @@ impl TuiApp {
             .try_write()
             .map_err(|_| eyre!("Configuration is busy; retry this change"))?;
         let serialized = serde_json::to_value(&*live)?;
-        let mut candidate = validate_edit(&serialized, id, value).map_err(|error| eyre!(error))?;
+        let candidate = validate_edit(&serialized, id, value).map_err(|error| eyre!(error))?;
         if id == "default_model" && !candidate.default_model.is_empty() {
             let provider = candidate
                 .provider_config(&candidate.default_provider)
@@ -104,8 +104,6 @@ impl TuiApp {
                 return Err(eyre!("Model is not in the saved connection's catalog. Refresh Models and choose an available model."));
             }
         }
-        candidate.vault_path = live.vault_path.clone();
-        candidate.artifact_save_dir = candidate.saved_files_dir.clone();
         candidate.save()?;
         *live = candidate.clone();
         Ok(candidate)
@@ -122,9 +120,8 @@ impl TuiApp {
         self.ui.kitty_heading_downscale = config.kitty_heading_downscale;
         self.ui.image_protocol = config.image_protocol.clone();
         self.ui.web_search_enabled = config.web_search.enabled;
-        self.ui.show_saved_files = config.show_saved_files;
         self.ui.show_memories = config.show_memories;
-        self.ui.show_markdown_vault = config.show_markdown_vault;
+        self.ui.show_vault = config.show_vault;
         self.ui.tui_config = config.tui.clone();
         self.ui.keybinding_overrides = config.tui.keybinding_overrides.clone();
         if id == "theme" {

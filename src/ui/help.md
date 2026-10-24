@@ -20,7 +20,7 @@ Type any slash command in the message box:
 - `/terminal` — open a persistent terminal session
 - `/providers`, `/connect` — manage added providers, choose a preset or add a custom endpoint
 - `/vault` — unlock, initialize or lock the credential vault; choose credential storage; manage machine passwords and SSH keys
-- `/vault-search <query>` — search the Markdown Vault
+- `/vault-search <query>` — search the internal Vault
 - `/model <id>` — select a model ID manually, including custom endpoints without a model-list API
 - `/theme` — change the theme (or `/theme <name>` to apply one directly)
 - `/mcp` — open the MCP servers popup
@@ -71,9 +71,9 @@ Type any slash command in the message box:
 First interactive launch asks which data to protect. Reopen this screen with
 `/security` or **Settings → Privacy → Application protection**. Credentials,
 chats, memories and the internal vault are independent choices. Unchecked data
-remains plaintext; an entry password alone does not encrypt it. External
-Markdown vaults remain plaintext. Existing encrypted credential connections
-remain available alongside explicitly plaintext connections.
+remains plaintext; an entry password alone does not encrypt it. There are no
+external Vault profiles. Existing encrypted credential connections remain
+available alongside explicitly plaintext connections.
 
 Protected chats or an entry password require unlock before application stores
 or chat titles load. Cancelling this startup screen exits. Other protected
@@ -91,6 +91,24 @@ Headless content commands require the same session unlock. Supply a password
 line through redirected `--unlock-password-stdin`, never through arguments or
 environment variables. For `memory-mcp`, stdin belongs to JSON-RPC: use a
 dedicated inherited descriptor with `--unlock-password-fd N` (N ≥ 3).
+
+## Vault and Memories
+
+Open these separate internal stores from the `+` tab launcher. Select an entry:
+`e` edits, `c` copies, `d` moves to Trash, `+` inserts context, and `i` opens
+import/export. Protected and binary Vault files use an in-app editor. Binary
+content uses base64. Saving rejects stale edits and keeps the unsaved buffer.
+
+The right sidebar has Chat Artifacts, Memories, and Vault. The Chat Artifact
+**Vault** action keeps an independent copy. Memory and Vault context chips use
+`<Memory #432>` and `<Vault item #32>`; sending includes their captured content.
+TCUI asks before protected content enters plaintext chat history.
+
+Portable exports and copied native folders can move to another instance. TCUI
+asks for the source password when needed, then uses the destination password.
+Add keeps conflicts; Replace retains a recovery backup; Restore retains the
+displaced data. Plaintext export needs explicit consent. Legacy encrypted files
+must first be upgraded on their source instance with its original key metadata.
 
 ## Conversation ownership and recall
 

@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use super::TuiApp;
-use crate::config::vault_profiles::VaultProfile;
 use crate::config::AppConfig;
 use crate::llm::LlmClient;
 use crate::storage::Storage;
@@ -73,7 +72,6 @@ fn start_app(config: AppConfig) -> TuiApp {
         Storage::new().expect("open isolated storage"),
         Arc::new(tokio::sync::RwLock::new(config)),
         Arc::new(LlmClient::new()),
-        None,
     )
 }
 
@@ -89,13 +87,10 @@ fn saved_file_migration_preserves_existing_files_before_the_saved_store_opens() 
     environment.write("saved/legacy.md", b"legacy saved");
     environment.write("cache/tcui/chat-files/1/payload", b"legacy cache");
     environment.write("vault-profile/sentinel.md", b"vault sentinel");
-    let mut config = AppConfig {
+    let config = AppConfig {
         saved_files_dir: Some(saved_root.display().to_string()),
-        artifact_save_dir: None,
         ..AppConfig::default()
     };
-    let profile = VaultProfile::new("Protected", &vault_root).expect("create Vault profile");
-    config.vaults.insert(profile.id.clone(), profile);
 
     // When
     drop(start_app(config.clone()));
@@ -142,7 +137,6 @@ fn saved_file_migration_refuses_home_root_without_mutating_source_or_cache() {
     drop(Storage::new().expect("prime isolated storage"));
     let config = AppConfig {
         saved_files_dir: Some(environment.path("home").display().to_string()),
-        artifact_save_dir: None,
         ..AppConfig::default()
     };
 
@@ -162,4 +156,59 @@ fn saved_file_migration_refuses_home_root_without_mutating_source_or_cache() {
     assert!(!environment
         .path("data/tcui/migrations/saved-internal-vault-v1.done")
         .exists());
+}
+
+#[test]
+fn saved_file_migration_conflict_preserves_both_files_and_retries_without_clobbering() {
+    let _guard = env_lock().lock().expect("environment lock poisoned");
+    let environment = TestEnvironment::new("conflict-retry");
+    environment.write("saved/report.md", b"legacy report");
+    environment.write("data/tcui/vault/report.md", b"native report");
+    let config = AppConfig {
+        saved_files_dir: Some(environment.path("saved").display().to_string()),
+        ..AppConfig::default()
+    };
+
+    let result = crate::storage::saved_file_migration::migrate_saved_files(&config);
+
+    assert!(matches!(
+        result,
+        Err(crate::storage::saved_file_migration::MigrationError::Conflict { .. })
+    ));
+    assert_eq!(
+        std::fs::read(environment.path("saved/report.md")).expect("read retained source"),
+        b"legacy report"
+    );
+    assert_eq!(
+        std::fs::read(environment.path("data/tcui/vault/report.md"))
+            .expect("read retained native file"),
+        b"native report"
+    );
+    let paths = crate::storage::paths::TcuiDataPaths::discover();
+    assert!(crate::storage::saved_file_migration::require_complete(&paths).is_err());
+
+    // Simulate the user resolving the conflict without removing either report.
+    std::fs::rename(
+        environment.path("data/tcui/vault/report.md"),
+        environment.path("data/tcui/vault/native-report.md"),
+    )
+    .expect("retain native report under another name");
+    crate::storage::saved_file_migration::migrate_saved_files(&config).expect("resume migration");
+
+    assert!(
+        crate::storage::saved_file_migration::require_complete(&paths).expect("read completion")
+    );
+    assert_eq!(
+        std::fs::read(environment.path("data/tcui/vault/report.md")).expect("read migrated report"),
+        b"legacy report"
+    );
+    assert_eq!(
+        std::fs::read(environment.path("data/tcui/vault/native-report.md"))
+            .expect("read original native report"),
+        b"native report"
+    );
+    assert_eq!(
+        std::fs::read(environment.path("saved/report.md")).expect("read unchanged source"),
+        b"legacy report"
+    );
 }

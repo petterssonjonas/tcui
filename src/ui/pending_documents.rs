@@ -1,12 +1,12 @@
 use crate::app::submission::{PendingDocument, PendingDocumentId};
 use ratatui::{layout::Rect, style::Style, text::Line, widgets::Paragraph, Frame};
+use std::sync::Arc;
 use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone)]
 pub struct PendingDocumentChip {
     id: PendingDocumentId,
-    display_name: String,
-    line_count: usize,
+    label: Arc<str>,
 }
 
 pub(crate) fn row_count(chips: &[PendingDocumentChip], width: u16) -> u16 {
@@ -82,7 +82,7 @@ fn placements(chips: &[PendingDocumentChip], area: Rect) -> Vec<ChipPlacement> {
 fn clipped_chip_text(chip: &PendingDocumentChip, width: usize) -> String {
     const CLOSE: &str = " [x]";
     let label = chip.label();
-    if UnicodeWidthStr::width(label.as_str()) + CLOSE.len() <= width {
+    if UnicodeWidthStr::width(label) + CLOSE.len() <= width {
         return format!("{label}{CLOSE}");
     }
     let available = width.saturating_sub(CLOSE.len());
@@ -101,8 +101,15 @@ impl PendingDocumentChip {
     pub(crate) fn from_document(document: &PendingDocument) -> Self {
         Self {
             id: document.id(),
-            display_name: document.display_name().to_string(),
-            line_count: document.line_count(),
+            label: if document.context_reference().is_some() {
+                document.display_name_arc()
+            } else {
+                Arc::from(format!(
+                    "[{} - {} lines]",
+                    document.display_name(),
+                    document.line_count()
+                ))
+            },
         }
     }
 
@@ -110,7 +117,7 @@ impl PendingDocumentChip {
         self.id
     }
 
-    pub fn label(&self) -> String {
-        format!("[{} - {} lines]", self.display_name, self.line_count)
+    pub fn label(&self) -> &str {
+        &self.label
     }
 }

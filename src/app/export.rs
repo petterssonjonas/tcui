@@ -29,8 +29,8 @@ impl TuiApp {
                         conversation_id,
                         id,
                     } => self.chat_files.open_link(*conversation_id, *id)?,
-                    crate::ui::artifact_sidebar::ArtifactHandle::Saved(path) => {
-                        self.chat_files.read_saved_path(path)?
+                    crate::ui::artifact_sidebar::ArtifactHandle::Vault(id) => {
+                        self.chat_files.read_item(*id)?
                     }
                     _ => crate::vault::read_artifact_path(source)?,
                 }
@@ -40,7 +40,7 @@ impl TuiApp {
 
         self.ui.save_file_dialog = None;
         self.promote_temporary_artifact_if_vault_path(&dialog.artifact.handle, &path);
-        self.refresh_saved_artifacts();
+        self.refresh_vault_artifacts();
         self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::CloudConnected;
         self.ui.connection_message = Some(format!("Saved {}", path.display()));
         Ok(())
@@ -82,26 +82,30 @@ impl TuiApp {
         ));
     }
 
-    pub(crate) fn open_memory_export_dialog(&mut self, logical_path: std::path::PathBuf) {
+    pub(crate) fn open_memory_export_dialog(&mut self, id: u64) {
         if let Err(error) = crate::protection::require(crate::protection::Domain::Memories) {
             self.ui.show_toast(error.to_string());
             return;
         }
         #[cfg(feature = "memory")]
         {
-            let item_name = self
-                .ui
-                .memory_artifacts
-                .iter()
-                .find_map(|artifact| match &artifact.handle {
-                    crate::ui::artifact_sidebar::ArtifactHandle::Memory(path)
-                        if path == &logical_path =>
-                    {
-                        Some(artifact.name.clone())
-                    }
-                    _ => None,
-                })
-                .unwrap_or_else(|| logical_path.display().to_string());
+            let record = match crate::memory::MemoryStore::open_default().and_then(|store| {
+                store
+                    .list_entries()?
+                    .into_iter()
+                    .find(|entry| entry.id == id)
+                    .ok_or_else(|| {
+                        crate::memory::MemoryError::Invalid("Memory is unavailable".into())
+                    })
+            }) {
+                Ok(record) => record,
+                Err(error) => {
+                    self.show_resource_error(crate::protection::Domain::Memories, error.into());
+                    return;
+                }
+            };
+            let item_name = crate::ui::artifact_sidebar::display_label(record.title);
+            let logical_path = record.logical_path;
             self.ui.export_dialog = Some(crate::ui::modals::export_dialog::ExportDialog::new(
                 crate::ui::modals::export_dialog::ExportTarget::Memory(logical_path),
                 item_name,
@@ -109,7 +113,7 @@ impl TuiApp {
             ));
         }
         #[cfg(not(feature = "memory"))]
-        let _ = logical_path;
+        let _ = id;
     }
 
     pub(crate) fn save_export_dialog(&mut self) -> color_eyre::Result<()> {

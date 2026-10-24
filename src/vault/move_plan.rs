@@ -1,17 +1,14 @@
 // allow: SIZE_OK - T05A keeps the immutable move-plan domain and its security tests together.
-#![allow(dead_code)] // Consumed by the cross-vault executor in the next implementation task.
 
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read};
-use std::path::{Component, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 use blake3::Hash;
 use cap_fs_ext::{DirExt, FollowSymlinks, MetadataExt as _, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, File, Metadata, OpenOptions};
-
-use crate::config::vault_profiles::{VaultCatalog, VaultProfile, VaultProfileId};
 
 use super::VaultRelativePath;
 
@@ -20,17 +17,12 @@ pub const MAX_MOVE_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VaultFileRef {
-    profile_id: VaultProfileId,
     path: VaultRelativePath,
 }
 
 impl VaultFileRef {
-    pub fn new(profile_id: VaultProfileId, path: VaultRelativePath) -> Self {
-        Self { profile_id, path }
-    }
-
-    pub fn profile_id(&self) -> &VaultProfileId {
-        &self.profile_id
+    pub fn new(path: VaultRelativePath) -> Self {
+        Self { path }
     }
 
     pub fn path(&self) -> &VaultRelativePath {
@@ -115,37 +107,35 @@ pub struct MovePlan {
 impl MovePlan {
     pub fn build(
         pairs: Vec<MovePair>,
-        catalog: &VaultCatalog,
+        data_root: &Path,
         is_open_in_editor: impl Fn(&VaultFileRef) -> bool,
     ) -> Result<Self, MovePlanError> {
-        Self::build_transfer(pairs, catalog, is_open_in_editor, false)
+        Self::build_transfer(pairs, data_root, is_open_in_editor, false)
     }
 
     pub fn build_copy(
         pairs: Vec<MovePair>,
-        catalog: &VaultCatalog,
+        data_root: &Path,
         is_open_in_editor: impl Fn(&VaultFileRef) -> bool,
     ) -> Result<Self, MovePlanError> {
-        Self::build_transfer(pairs, catalog, is_open_in_editor, true)
+        Self::build_transfer(pairs, data_root, is_open_in_editor, true)
     }
 
     fn build_transfer(
         pairs: Vec<MovePair>,
-        catalog: &VaultCatalog,
+        data_root: &Path,
         is_open_in_editor: impl Fn(&VaultFileRef) -> bool,
         copy_only: bool,
     ) -> Result<Self, MovePlanError> {
         validate_request(&pairs, &is_open_in_editor)?;
-        let mut readers = ProfileReaders::new(catalog);
+        let reader = VaultReader::open(data_root)?;
         let mut preconditions = Vec::with_capacity(pairs.len());
         let mut collisions = Vec::with_capacity(pairs.len());
         let mut total_size = 0_u64;
 
         for pair in &pairs {
             let remaining_bytes = MAX_MOVE_BYTES.saturating_sub(total_size);
-            let precondition = readers
-                .get(pair.source.profile_id())?
-                .precondition(pair.source(), remaining_bytes)?;
+            let precondition = reader.precondition(pair.source(), remaining_bytes)?;
             total_size = total_size.checked_add(precondition.size).ok_or(
                 MovePlanError::TotalSizeExceeded {
                     actual: u64::MAX,
@@ -159,9 +149,7 @@ impl MovePlan {
                 });
             }
 
-            let collision = readers
-                .get(pair.destination.profile_id())?
-                .classify_destination(pair)?;
+            let collision = reader.classify_destination(pair)?;
             if let MoveCollision::InvalidType(_) = collision {
                 return Err(MovePlanError::InvalidDestinationType {
                     destination: pair.destination.clone(),
@@ -172,7 +160,7 @@ impl MovePlan {
             collisions.push(collision);
         }
 
-        validate_physical_targets(&pairs, &mut readers, copy_only)?;
+        validate_physical_targets(&pairs, &reader)?;
         Ok(Self {
             id: MovePlanId::new(),
             pairs,
@@ -211,8 +199,8 @@ impl MovePlan {
         self.copy_only
     }
 
-    pub fn revalidate(&self, catalog: &VaultCatalog) -> Result<(), MovePlanError> {
-        let mut readers = ProfileReaders::new(catalog);
+    pub fn revalidate(&self, data_root: &Path) -> Result<(), MovePlanError> {
+        let reader = VaultReader::open(data_root)?;
         let mut total_size = 0_u64;
         for ((pair, expected), expected_collision) in self
             .pairs
@@ -221,25 +209,21 @@ impl MovePlan {
             .zip(&self.collisions)
         {
             let remaining_bytes = MAX_MOVE_BYTES.saturating_sub(total_size);
-            let actual = readers
-                .get(pair.source.profile_id())?
-                .precondition(pair.source(), remaining_bytes)?;
+            let actual = reader.precondition(pair.source(), remaining_bytes)?;
             if actual != *expected {
                 return Err(MovePlanError::SourceChanged {
                     file: pair.source.clone(),
                 });
             }
             total_size = total_size.saturating_add(actual.size);
-            let actual_collision = readers
-                .get(pair.destination.profile_id())?
-                .classify_destination(pair)?;
+            let actual_collision = reader.classify_destination(pair)?;
             if actual_collision != *expected_collision {
                 return Err(MovePlanError::DestinationChanged {
                     destination: pair.destination.clone(),
                 });
             }
         }
-        validate_physical_targets(&self.pairs, &mut readers, self.copy_only)?;
+        validate_physical_targets(&self.pairs, &reader)?;
         Ok(())
     }
 }
@@ -258,11 +242,8 @@ pub enum MovePlanError {
     OverlappingSourceDestination { file: VaultFileRef },
     #[error("move plan path is open in an editor: {file:?}")]
     OpenInEditor { file: VaultFileRef },
-    #[error("vault profile is unavailable: {profile_id}")]
-    MissingProfile { profile_id: VaultProfileId },
-    #[error("failed to open vault profile {profile_id}: {source}")]
-    OpenProfile {
-        profile_id: VaultProfileId,
+    #[error("failed to open internal Vault: {source}")]
+    OpenRoot {
         #[source]
         source: io::Error,
     },
@@ -347,25 +328,11 @@ enum PhysicalTarget {
 
 fn validate_physical_targets(
     pairs: &[MovePair],
-    readers: &mut ProfileReaders<'_>,
-    copy_only: bool,
+    reader: &VaultReader,
 ) -> Result<(), MovePlanError> {
     let mut sources = HashSet::with_capacity(pairs.len().saturating_mul(2));
     let mut destinations = HashSet::with_capacity(pairs.len().saturating_mul(2));
     for pair in pairs {
-        let reader = readers.get(pair.source.profile_id())?;
-        if !copy_only {
-            let source = reader.path.join(pair.source.path().as_path());
-            crate::storage::chat_files::ChatSavedFileStore::discover()
-                .require_unlinked_move(&source)
-                .map_err(|error| {
-                    io_error(
-                        "move linked Saved file; explicitly copy/export instead",
-                        pair.source(),
-                        io::Error::other(error.to_string()),
-                    )
-                })?;
-        }
         for identity in reader.physical_target(pair.source())?.into_iter().flatten() {
             if !sources.insert(identity) {
                 return Err(MovePlanError::DuplicateSource {
@@ -373,8 +340,7 @@ fn validate_physical_targets(
                 });
             }
         }
-        for identity in readers
-            .get(pair.destination.profile_id())?
+        for identity in reader
             .physical_target(pair.destination())?
             .into_iter()
             .flatten()
@@ -397,55 +363,19 @@ fn validate_physical_targets(
     Ok(())
 }
 
-struct ProfileReaders<'a> {
-    catalog: &'a VaultCatalog,
-    readers: HashMap<VaultProfileId, ProfileReader>,
-}
-
-impl<'a> ProfileReaders<'a> {
-    fn new(catalog: &'a VaultCatalog) -> Self {
-        Self {
-            catalog,
-            readers: HashMap::new(),
-        }
-    }
-
-    fn get(&mut self, profile_id: &VaultProfileId) -> Result<&mut ProfileReader, MovePlanError> {
-        match self.readers.entry(profile_id.clone()) {
-            Entry::Occupied(entry) => Ok(entry.into_mut()),
-            Entry::Vacant(entry) => {
-                let profile =
-                    self.catalog
-                        .get(profile_id)
-                        .ok_or_else(|| MovePlanError::MissingProfile {
-                            profile_id: profile_id.clone(),
-                        })?;
-                Ok(entry.insert(ProfileReader::open(profile)?))
-            }
-        }
-    }
-}
-
-struct ProfileReader {
+struct VaultReader {
     root: Dir,
     path: PathBuf,
 }
 
-impl ProfileReader {
-    fn open(profile: &VaultProfile) -> Result<Self, MovePlanError> {
-        super::require_root(&profile.root).map_err(|source| MovePlanError::OpenProfile {
-            profile_id: profile.id.clone(),
-            source,
-        })?;
-        crate::protection::open_directory(&profile.root, false)
-            .map_err(|error| io::Error::other(error.to_string()))
-            .map(|root| Self {
-                root,
-                path: profile.root.clone(),
-            })
-            .map_err(|source| MovePlanError::OpenProfile {
-                profile_id: profile.id.clone(),
-                source,
+impl VaultReader {
+    fn open(data_root: &Path) -> Result<Self, MovePlanError> {
+        let path = data_root.join("vault");
+        super::require_root(&path).map_err(|source| MovePlanError::OpenRoot { source })?;
+        crate::protection::open_directory(&path, false)
+            .map(|root| Self { root, path })
+            .map_err(|error| MovePlanError::OpenRoot {
+                source: io::Error::other(error.to_string()),
             })
     }
 
@@ -773,7 +703,6 @@ mod vault_move_plan {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use crate::config::vault_profiles::{VaultCatalog, VaultProfile, VaultProfileId};
     use crate::vault::VaultRelativePath;
 
     use super::{
@@ -785,9 +714,7 @@ mod vault_move_plan {
         base: PathBuf,
         source_root: PathBuf,
         destination_root: PathBuf,
-        source_id: VaultProfileId,
-        destination_id: VaultProfileId,
-        catalog: VaultCatalog,
+        data_root: PathBuf,
     }
 
     impl Fixture {
@@ -797,37 +724,26 @@ mod vault_move_plan {
                 std::process::id(),
                 rand::random::<u64>()
             ));
-            let source_root = base.join("source");
-            let destination_root = base.join("destination");
+            let data_root = base.join("data");
+            let source_root = data_root.join("vault/source");
+            let destination_root = data_root.join("vault/destination");
             fs::create_dir_all(&source_root).expect("create source vault");
             fs::create_dir_all(&destination_root).expect("create destination vault");
 
-            let source = VaultProfile::new("Source", &source_root).expect("source profile");
-            let destination =
-                VaultProfile::new("Destination", &destination_root).expect("destination profile");
-            let source_id = source.id.clone();
-            let destination_id = destination.id.clone();
-            let mut catalog = VaultCatalog::default();
-            catalog.add(source).expect("register source profile");
-            catalog
-                .add(destination)
-                .expect("register destination profile");
             Self {
                 base,
                 source_root,
                 destination_root,
-                source_id,
-                destination_id,
-                catalog,
+                data_root,
             }
         }
 
         fn source_ref(&self, path: &str) -> VaultFileRef {
-            file_ref(self.source_id.clone(), path)
+            file_ref(&format!("source/{path}"))
         }
 
         fn destination_ref(&self, path: &str) -> VaultFileRef {
-            file_ref(self.destination_id.clone(), path)
+            file_ref(&format!("destination/{path}"))
         }
 
         fn pair(&self, source: &str, destination: &str, overwrite: bool) -> MovePair {
@@ -853,9 +769,8 @@ mod vault_move_plan {
         }
     }
 
-    fn file_ref(profile_id: VaultProfileId, path: &str) -> VaultFileRef {
+    fn file_ref(path: &str) -> VaultFileRef {
         VaultFileRef::new(
-            profile_id,
             VaultRelativePath::parse(Path::new(path)).expect("valid vault-relative test path"),
         )
     }
@@ -884,7 +799,7 @@ mod vault_move_plan {
         // When
         let plan = MovePlan::build(
             vec![fixture.pair("note.md", "moved.md", false)],
-            &fixture.catalog,
+            &fixture.data_root,
             |_| false,
         )
         .expect("build move plan");
@@ -921,10 +836,11 @@ mod vault_move_plan {
         }
 
         // When
-        let accepted = MovePlan::build(pairs[..MAX_MOVE_FILES].to_vec(), &fixture.catalog, |_| {
-            false
-        });
-        let rejected = MovePlan::build(pairs, &fixture.catalog, |_| false);
+        let accepted =
+            MovePlan::build(pairs[..MAX_MOVE_FILES].to_vec(), &fixture.data_root, |_| {
+                false
+            });
+        let rejected = MovePlan::build(pairs, &fixture.data_root, |_| false);
 
         // Then
         assert_eq!(accepted.expect("100 files are allowed").file_count(), 100);
@@ -958,12 +874,12 @@ mod vault_move_plan {
         // When
         let accepted = MovePlan::build(
             vec![fixture.pair("exact.md", "exact.md", false)],
-            &fixture.catalog,
+            &fixture.data_root,
             |_| false,
         );
         let rejected = MovePlan::build(
             vec![fixture.pair("oversized.md", "oversized.md", false)],
-            &fixture.catalog,
+            &fixture.data_root,
             |_| false,
         );
 
@@ -993,7 +909,7 @@ mod vault_move_plan {
         // When
         let result = MovePlan::build(
             vec![fixture.pair("folder", "folder.md", false)],
-            &fixture.catalog,
+            &fixture.data_root,
             |_| false,
         );
 
@@ -1024,7 +940,7 @@ mod vault_move_plan {
         // When
         let result = MovePlan::build(
             vec![fixture.pair("linked.md", "moved.md", false)],
-            &fixture.catalog,
+            &fixture.data_root,
             |_| false,
         );
 
@@ -1058,7 +974,7 @@ mod vault_move_plan {
         // When
         let result = MovePlan::build(
             vec![fixture.pair("socket.md", "moved.md", false)],
-            &fixture.catalog,
+            &fixture.data_root,
             |_| false,
         );
 
@@ -1092,7 +1008,7 @@ mod vault_move_plan {
                 fixture.pair("replace.md", "replace.md", true),
                 fixture.pair("blocked.md", "blocked.md", false),
             ],
-            &fixture.catalog,
+            &fixture.data_root,
             |_| false,
         )
         .expect("classify destination states");
@@ -1121,7 +1037,7 @@ mod vault_move_plan {
         // When
         let result = MovePlan::build(
             vec![fixture.pair("note.md", "folder", false)],
-            &fixture.catalog,
+            &fixture.data_root,
             |_| false,
         );
 
@@ -1145,14 +1061,14 @@ mod vault_move_plan {
         fixture.write_source("note.md", b"alpha");
         let plan = MovePlan::build(
             vec![fixture.pair("note.md", "moved.md", false)],
-            &fixture.catalog,
+            &fixture.data_root,
             |_| false,
         )
         .expect("build move plan");
         fs::write(fixture.source_root.join("note.md"), b"bravo").expect("modify source contents");
 
         // When
-        let result = plan.revalidate(&fixture.catalog);
+        let result = plan.revalidate(&fixture.data_root);
 
         // Then
         assert!(matches!(result, Err(MovePlanError::SourceChanged { .. })));
@@ -1170,7 +1086,7 @@ mod vault_move_plan {
         let open_file = pair.source().clone();
 
         // When
-        let result = MovePlan::build(vec![pair], &fixture.catalog, |candidate| {
+        let result = MovePlan::build(vec![pair], &fixture.data_root, |candidate| {
             candidate == &open_file
         });
 
@@ -1193,7 +1109,7 @@ mod vault_move_plan {
                 fixture.pair("note.md", "first.md", false),
                 fixture.pair("note.md", "second.md", false),
             ],
-            &fixture.catalog,
+            &fixture.data_root,
             |_| false,
         );
 
@@ -1217,7 +1133,7 @@ mod vault_move_plan {
                 fixture.pair("first.md", "moved.md", false),
                 fixture.pair("second.md", "moved.md", false),
             ],
-            &fixture.catalog,
+            &fixture.data_root,
             |_| false,
         );
 
@@ -1229,12 +1145,12 @@ mod vault_move_plan {
     }
 
     #[test]
-    fn same_profile_pair_with_distinct_paths_is_allowed() {
+    fn same_directory_pair_with_distinct_paths_is_allowed() {
         let _env_guard = crate::test_support::env_lock()
             .lock()
             .expect("environment lock");
         // Given
-        let fixture = Fixture::new("same-profile");
+        let fixture = Fixture::new("same-directory");
         fixture.write_source("note.md", b"note");
         let source = fixture.source_ref("note.md");
         let destination = fixture.source_ref("moved.md");
@@ -1242,21 +1158,21 @@ mod vault_move_plan {
         // When
         let result = MovePlan::build(
             vec![MovePair::new(source, destination, false)],
-            &fixture.catalog,
+            &fixture.data_root,
             |_| false,
         );
 
         // Then
-        assert_eq!(result.expect("same-profile move plan").file_count(), 1);
+        assert_eq!(result.expect("same-directory move plan").file_count(), 1);
     }
 
     #[test]
-    fn same_profile_plan_rejects_any_source_destination_overlap() {
+    fn native_plan_rejects_any_source_destination_overlap() {
         let _env_guard = crate::test_support::env_lock()
             .lock()
             .expect("environment lock");
         // Given
-        let fixture = Fixture::new("same-profile-overlap");
+        let fixture = Fixture::new("native-overlap");
         fixture.write_source("first.md", b"first");
         fixture.write_source("second.md", b"second");
         let first = MovePair::new(
@@ -1271,7 +1187,7 @@ mod vault_move_plan {
         );
 
         // When
-        let result = MovePlan::build(vec![first, second], &fixture.catalog, |_| false);
+        let result = MovePlan::build(vec![first, second], &fixture.data_root, |_| false);
 
         // Then
         assert!(matches!(
@@ -1293,13 +1209,13 @@ mod vault_move_plan {
         // When
         let first = MovePlan::build(
             vec![fixture.pair("first.md", "first.md", false)],
-            &fixture.catalog,
+            &fixture.data_root,
             |_| false,
         )
         .expect("first plan");
         let second = MovePlan::build(
             vec![fixture.pair("second.md", "second.md", false)],
-            &fixture.catalog,
+            &fixture.data_root,
             |_| false,
         )
         .expect("second plan");

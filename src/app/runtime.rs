@@ -18,6 +18,11 @@ impl TuiApp {
         if self.quit_requires_confirmation()
             || self.has_pending_documents()
             || self.ui.terminals.has_running()
+            || self
+                .ui
+                .resource_editor
+                .as_ref()
+                .is_some_and(|editor| editor.is_dirty())
         {
             Action::ShowQuitConfirm
         } else {
@@ -55,13 +60,13 @@ impl TuiApp {
                         continue;
                     }
                     self.poll_terminals();
-                    for notice in self.ui.markdown_vault_workspaces.reconcile_tick() {
+                    for notice in self.ui.vault_workspaces.reconcile_tick() {
                         self.ui.show_toast(notice);
                     }
                     let active_app_tab_id = self.ui.app_tabs.active_id();
                     let _ = self
                         .ui
-                        .markdown_vault_workspaces
+                        .vault_workspaces
                         .poll_editor(active_app_tab_id);
                     if let Some(editor) = self.ui.editor_popup.as_mut() {
                         let done = editor.poll_output();
@@ -113,11 +118,13 @@ impl TuiApp {
                             } else if self.ui.command_review.is_some() || self.ui.terminals.close_pending.is_some()
                                 || self.ui.active_modal.is_some() || self.ui.editor_popup.is_some()
                                 || self.ui.artifact_viewer.is_some() || self.ui.save_file_dialog.is_some()
-                                || self.ui.export_dialog.is_some() || self.ui.vault_profile_manager.is_some()
+                                || self.ui.export_dialog.is_some()
                                 || self.ui.pending_vault_mutation.is_some() || self.ui.list_popup.is_some()
                                 || self.ui.delete_confirm.is_some() || self.ui.show_keybinds || self.ui.show_session_list
                             {
                                 // Modal input must never reach a hidden PTY or chat composer.
+                            } else if let Some(editor) = self.ui.resource_editor.as_mut() {
+                                editor.insert(&text);
                             } else if let Some(settings) = self.ui.settings_v2.as_mut() {
                                 for character in text.chars().filter(|character| !character.is_control()) {
                                     settings.insert_char(character);
@@ -203,6 +210,25 @@ impl TuiApp {
                 self.request_security_restart(crate::protection::ui::SecurityRestart::Unlock);
                 Ok(())
             }
+            Action::OpenNativeTransfer(domain) => {
+                self.request_security_restart(crate::protection::ui::SecurityRestart::Transfer(
+                    domain,
+                ));
+                Ok(())
+            }
+            Action::SaveResourceEditor => {
+                self.save_resource_editor();
+                Ok(())
+            }
+            Action::CopyResourceEditor => {
+                self.copy_resource_editor();
+                Ok(())
+            }
+            Action::CopyArtifact(handle) => {
+                self.copy_artifact(handle);
+                Ok(())
+            }
+            Action::ConfirmProtectedContext => self.confirm_protected_context(),
             Action::LockApplication => self
                 .lock_application()
                 .map_err(color_eyre::eyre::Error::msg),
@@ -230,6 +256,7 @@ impl TuiApp {
             }
             Action::CancelModal => {
                 self.ui.active_modal = None;
+                self.ui.pending_protected_context = None;
                 self.cancel_pending_document_discard();
                 self.ctrl_c_count = 0;
                 Ok(())
@@ -241,7 +268,14 @@ impl TuiApp {
                     );
                     self.ctrl_c_count = 1;
                     self.last_ctrl_c = Some(std::time::Instant::now());
-                } else if self.quit_requires_confirmation() || self.ui.terminals.has_running() {
+                } else if self.quit_requires_confirmation()
+                    || self.has_security_process_close_risk()
+                    || self
+                        .ui
+                        .resource_editor
+                        .as_ref()
+                        .is_some_and(|editor| editor.is_dirty())
+                {
                     self.ui.active_modal = Some(crate::ui::Modal::QuitConfirm);
                     self.ctrl_c_count = 1;
                     self.last_ctrl_c = Some(std::time::Instant::now());
@@ -639,12 +673,13 @@ impl TuiApp {
                 self.transfer_command_review();
                 Ok(())
             }
-            Action::OpenMarkdownVaultLauncher => {
-                self.open_markdown_vault_launcher();
+            Action::OpenVaultLauncher => {
+                self.open_vault_launcher();
                 Ok(())
             }
-            Action::OpenVaultProfileManager => {
-                self.open_vault_profile_manager();
+            #[cfg(feature = "memory")]
+            Action::OpenMemoriesLauncher => {
+                self.open_memories_launcher();
                 Ok(())
             }
             Action::SetPinnedCommands(pinned) => {
@@ -741,9 +776,7 @@ impl TuiApp {
         }
         let tab_endpoint = tab_state.tab.endpoint.clone();
         let config_snapshot = self.config.read().await.clone();
-        if let Some(response) =
-            crate::reminders::maybe_handle_request(&config_snapshot, &canonical_content)
-        {
+        if let Some(response) = crate::reminders::maybe_handle_request(&config_snapshot, &content) {
             self.transition_submission(
                 app_tab_id,
                 crate::app::submission::SubmissionState::finish_preparing,
@@ -867,8 +900,8 @@ impl TuiApp {
             .map(|(_, env_var, _)| env_var.clone());
         let action_tx = self.action_tx.clone();
         let system_prompt = self.system_prompt.clone();
-        let user_request = canonical_content.clone();
-        let save_requested = crate::skills::mentions(&canonical_content)
+        let user_request = content.clone();
+        let save_requested = crate::skills::mentions(&content)
             .iter()
             .any(|mention| mention == "save");
         let terminal_has_focus = Arc::clone(&self.terminal_has_focus);
@@ -898,7 +931,7 @@ impl TuiApp {
             system_prompt,
             messages,
             config: config_snapshot.clone(),
-            user_request: canonical_content.clone(),
+            user_request: content.clone(),
             #[cfg(feature = "memory")]
             memory_instruction: content,
             is_local_provider,
@@ -918,24 +951,17 @@ impl TuiApp {
         let prepared = match preparation_outcome {
             crate::app::submission_runtime::PreparationOutcome::Ready(prepared) => *prepared,
             crate::app::submission_runtime::PreparationOutcome::VaultMutation(kind) => {
-                let catalog = crate::config::vault_profiles::VaultCatalog {
-                    profiles: config_snapshot.vaults.clone(),
-                    default_id: config_snapshot.default_vault_id.clone(),
-                };
-                let pending = match crate::app::submission::PendingVaultMutation::new(
-                    prepared_turn,
-                    kind,
-                    &catalog,
-                ) {
-                    Ok(pending) => pending,
-                    Err(error) => {
-                        self.transition_submission(
-                            app_tab_id,
-                            crate::app::submission::SubmissionState::return_to_draft,
-                        )?;
-                        return Err(error.into());
-                    }
-                };
+                let pending =
+                    match crate::app::submission::PendingVaultMutation::new(prepared_turn, kind) {
+                        Ok(pending) => pending,
+                        Err(error) => {
+                            self.transition_submission(
+                                app_tab_id,
+                                crate::app::submission::SubmissionState::return_to_draft,
+                            )?;
+                            return Err(error.into());
+                        }
+                    };
                 self.transition_submission(
                     app_tab_id,
                     crate::app::submission::SubmissionState::await_confirmation,
@@ -1209,20 +1235,12 @@ impl TuiApp {
             | VaultMutationConfirmationState::ReadyForExecution
             | VaultMutationConfirmationState::ExecutionFailed { .. } => {}
         }
-        let catalog = self
-            .config
-            .try_read()
-            .map(|config| crate::config::vault_profiles::VaultCatalog {
-                profiles: config.vaults.clone(),
-                default_id: config.default_vault_id.clone(),
-            })
-            .map_err(|_| color_eyre::eyre::eyre!("Vault configuration is busy"))?;
         let data_root = crate::storage::paths::TcuiDataPaths::discover().root;
         if matches!(
             pending.state,
             VaultMutationConfirmationState::Reviewing { .. }
         ) {
-            if let Err(error) = pending.confirm(&catalog, &data_root) {
+            if let Err(error) = pending.confirm(&data_root) {
                 self.ui.pending_vault_mutation = Some(pending);
                 return Err(error.into());
             }
@@ -1235,7 +1253,7 @@ impl TuiApp {
             }
         }
         let changes = crate::app::vault_mutation_execute::affected_paths(&pending.kind);
-        let targets = match self.ui.markdown_vault_workspaces.mutation_targets(&changes) {
+        let targets = match self.ui.vault_workspaces.mutation_targets(&changes) {
             Ok(targets) => targets,
             Err(error) => {
                 let message = error.to_string();
@@ -1246,12 +1264,9 @@ impl TuiApp {
                 return Err(color_eyre::eyre::eyre!(message));
             }
         };
-        match crate::app::vault_mutation_execute::execute(&pending.kind, &catalog, &data_root) {
+        match crate::app::vault_mutation_execute::execute(&pending.kind, &data_root) {
             Ok(submission) => {
-                let _ = self
-                    .ui
-                    .markdown_vault_workspaces
-                    .refresh_mutation_targets(&targets);
+                let _ = self.ui.vault_workspaces.refresh_mutation_targets(&targets);
                 if pending.is_workspace() {
                     self.ui.show_toast("Vault file moved".to_string());
                     return Ok(());
@@ -1274,7 +1289,7 @@ impl TuiApp {
             }
             Err(VaultMutationExecutionError::RecoveryRequired { operation_id }) => {
                 let recovery_status = format!(
-                    "Recovery required for operation {operation_id}; run @vault restore {operation_id}"
+                    "Recovery required for operation {operation_id}; restart TCUI to retry native recovery"
                 );
                 pending.state = VaultMutationConfirmationState::RecoveryRequired {
                     operation_id,
