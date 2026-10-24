@@ -100,6 +100,15 @@ Documents are encrypted only when chat protection is selected. Migration archive
 legacy SQL chat content to Trash, deletes migrated rows, and runs `VACUUM`;
 archives and prior backups may remain readable. The legacy `chat.key` remains
 for legacy content/reminders and cannot unlock new protection envelopes.
+New legacy shared-key files are created exclusively with mode 0600 before writing
+and keep the existing final 0400 mode. Existing key bytes and formats do not change.
+
+Reminder metadata remains in `$XDG_DATA_HOME/tcui/reminders.toml`. Its stable
+`.reminders.lock` serializes readers and complete read-modify-write operations
+across TCUI processes. Writers reload under the lock and replace only their
+record, so different-record changes merge; same-ID changes use lock order.
+Metadata uses private, no-follow, atomic durable replacement with checked rollback.
+systemd unit operations remain outside this metadata-only transaction.
 
 Native Memory lives independently in `$XDG_DATA_HOME/tcui/memories`, with chat
 and Memory Trash under each store's `.trash`. When protected, its serialized
@@ -137,6 +146,19 @@ names, logs, and general database metadata are not covered by content protection
 - `app_config.rs` — `AppConfig` (TOML serialized), default provider/model, vault path, tab configs. Stored at `~/.config/tcui/config.toml`.
 - `key_store.rs` — Explicit per-record SQLite credential storage, shared password lifecycle, API/OAuth records, and opt-in legacy import. Argon2id protects the random master secret; selected content uses domain-separated AES-GCM envelopes. Plaintext/encrypted provider and search records coexist; machine secrets always remain encrypted.
 - `soul.rs` — Soul/agent personality configuration loading
+
+Configuration load/save keeps its Result API and stable `.config.lock`.
+The existing writer uses no-follow directory capabilities, exclusively created
+0600 sibling stages, file sync, atomic rename, directory sync, and checked rollback.
+Backups are published complete without replacing an existing regular backup.
+Cleanup checks retained file identities and does not remove a replaced entry.
+New directories are 0700. Config, backup, lock, and parent symlinks are rejected;
+cooperating processes must keep the stable lock file in place. This is not an
+isolation boundary against another process that can replace the user's files.
+Configuration load resolves both configuration and data roots before writing.
+Missing or relative discovered roots return errors; config and reminder metadata
+do not fall back to CWD. This IO hardening does not change config serialization's
+separate unknown-field/comment preservation limits.
 
 ### 5. LLM (`src/llm/`)
 

@@ -8,6 +8,10 @@ use crate::config::{McpServerConfig, WebSearchConfig};
 
 mod persistence;
 
+pub(crate) use persistence::atomic_replace_in as replace_private_file;
+#[cfg(test)]
+pub(crate) use persistence::{inject_failure as inject_private_file_failure, TestFailurePoint};
+
 pub const LOCAL_PROVIDER_NAME: &str = "Local Inference";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
