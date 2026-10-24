@@ -185,16 +185,20 @@ fn sigint_cancels_codex_and_openrouter() -> Result<(), Box<dyn std::error::Error
     let mut codex = codex_environment.command();
     codex
         .args(["auth", "--plaintext", "logout", "codex", "--external"])
-        .stdout(Stdio::null());
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
     let codex_child = codex.spawn()?;
     let codex_guard = ProcessGuard::new(codex_child);
 
     let input_environment = CliEnvironment::new("sigint-headless-input")?;
     let mut input = input_environment.command();
+    // This case waits for input, but must still never construct a real provider URL.
+    configure_openrouter_url(&mut input, "http://127.0.0.1:9", "100");
     input
         .args(["auth", "--plaintext", "login", "openrouter", "--headless"])
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped());
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let input_child = input.spawn()?;
     let mut input_guard = ProcessGuard::new(input_child);
     let _input_stdin = input_guard.take_stdin()?;
@@ -212,11 +216,15 @@ fn sigint_cancels_codex_and_openrouter() -> Result<(), Box<dyn std::error::Error
     assert_process_group(&codex_process_ids)?;
 
     let input_stdout = input_guard.take_stdout().expect("input stdout piped");
-    let prompt = read_first_line(input_stdout, Duration::from_secs(5))?;
-    assert!(
-        prompt.contains("OpenRouter authorization URL:"),
-        "expected OpenRouter prompt, got: {prompt}"
-    );
+    // Keep the reader alive until the child exits: its second prompt still uses this pipe.
+    let (prompt, _input_stdout) = read_first_line(input_stdout, Duration::from_secs(5))?;
+    let authorization_url = reqwest::Url::parse(
+        prompt
+            .split_whitespace()
+            .last()
+            .ok_or("missing fixture authorization URL")?,
+    )?;
+    assert_eq!(authorization_url.host_str(), Some("127.0.0.1"));
 
     let codex_signal = signal(codex_guard.id())?;
     assert!(codex_signal.success());
@@ -224,12 +232,22 @@ fn sigint_cancels_codex_and_openrouter() -> Result<(), Box<dyn std::error::Error
 
     let input_signal = signal(input_guard.id())?;
     assert!(input_signal.success());
-    let input_status = input_guard.wait()?;
+    let input_output = input_guard.wait_with_output()?;
 
-    assert_eq!(codex_output.status.code(), Some(11));
+    assert_eq!(
+        codex_output.status.code(),
+        Some(11),
+        "{}",
+        String::from_utf8_lossy(&codex_output.stderr)
+    );
     assert!(!codex_environment.auth_path().exists());
     wait_for_processes_absent_or_zombie(&codex_process_ids, Duration::from_secs(3))?;
-    assert_eq!(input_status.code(), Some(11));
+    assert_eq!(
+        input_output.status.code(),
+        Some(11),
+        "{}",
+        String::from_utf8_lossy(&input_output.stderr)
+    );
     let input_status = input_environment
         .command()
         .args(["auth", "--plaintext", "status", "openrouter"])
@@ -394,14 +412,16 @@ fn read_until_markers(
 fn read_first_line(
     stdout: std::process::ChildStdout,
     timeout: Duration,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<(String, BufReader<std::process::ChildStdout>), Box<dyn std::error::Error>> {
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
         let mut line = String::new();
-        let _ = BufReader::new(stdout).read_line(&mut line);
-        let _ = sender.send(line);
+        let result = reader.read_line(&mut line).map(|_| (line, reader));
+        let _ = sender.send(result);
     });
     receiver
         .recv_timeout(timeout)
-        .map_err(|e| format!("timed out reading first stdout line: {e}").into())
+        .map_err(|error| format!("timed out reading first stdout line: {error}"))?
+        .map_err(Into::into)
 }

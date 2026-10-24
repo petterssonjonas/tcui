@@ -885,6 +885,14 @@ Tests use temporary HOME/XDG directories while preserving Rust's tool and cache 
 Environment-mutating tests retain the shared environment lock until cleanup.
 Run their async work with `Runtime::block_on` from a synchronous test, keeping
 lock acquisition outside the async runtime.
+
+The `auth_cli` integration suite clears the inherited environment and uses private
+HOME/XDG directories, temporary provider/browser stand-ins, and loopback HTTP
+fixtures. It checks credential storage, cancellation, and password-descriptor
+handling without live provider accounts. Run this suite in the default debug
+profile: its local-endpoint overrides are not available in release binaries.
+CI isolates test data; it does not currently enforce an outbound-network deny rule.
+
 Main adds the no-default-feature configuration, rustdoc, the glibc 2.34 release
 build and ABI gate, packaging, and native-payload/Arch-recipe/install smoke.
 Ubuntu 26.04 full CI/release jobs additionally run the packaged binary in a pinned
