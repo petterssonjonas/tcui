@@ -316,9 +316,17 @@ async fn import(
             {
                 return Ok("Adoption cancelled.".into());
             }
-            let Some(secret) = target_password(terminal, events).await? else {
-                return Ok("Adoption cancelled.".into());
-            };
+            let secret =
+                if crate::config::KeyStore::vault_status(&crate::config::AppConfig::default())?
+                    .unlocked
+                {
+                    None
+                } else {
+                    let Some(secret) = target_password(terminal, events).await? else {
+                        return Ok("Adoption cancelled.".into());
+                    };
+                    Some(secret)
+                };
             draw(
                 terminal,
                 " Adopting native data ",
@@ -326,7 +334,10 @@ async fn import(
                     "Applying authenticated protection and durable migration...",
                 )],
             )?;
-            let report = NativeTransferService::adopt_native(prepared, secret.as_str())?;
+            let report = match secret {
+                Some(secret) => NativeTransferService::adopt_native(prepared, secret.as_str())?,
+                None => NativeTransferService::adopt_native_unlocked(prepared)?,
+            };
             return Ok(format!(
                 "{} adopted. {} entries retained.",
                 name(domain),
@@ -354,10 +365,15 @@ async fn import(
                     "Import cancelled; encrypted data was not converted to plaintext.".into(),
                 );
             }
-            let Some(secret) = target_password(terminal, events).await? else {
-                return Ok("Import cancelled.".into());
-            };
-            NativeTransferService::enable_protection(domain, secret.as_str())?;
+            if crate::config::KeyStore::vault_status(&crate::config::AppConfig::default())?.unlocked
+            {
+                NativeTransferService::enable_protection_unlocked(domain)?;
+            } else {
+                let Some(secret) = target_password(terminal, events).await? else {
+                    return Ok("Import cancelled.".into());
+                };
+                NativeTransferService::enable_protection(domain, secret.as_str())?;
+            }
             continue;
         }
         if !confirm(
@@ -429,7 +445,7 @@ pub(crate) async fn run(
             terminal,
             &format!(" {} transfer ", name(domain)),
             vec![
-                Line::from("Imports copy data into TCUI. They do not add an external vault."),
+                Line::from("Imports copy files into this instance's Vault or Memories."),
                 Line::from(
                     "Encrypted imports remain encrypted. Provider credentials are not transferred.",
                 ),
@@ -542,7 +558,7 @@ pub(crate) async fn prepare_configuration_sources(
     terminal: &mut crate::TerminalType,
     events: &mut EventStream,
     desired: super::ProtectionPolicy,
-    destination_password: &str,
+    destination_password: Option<&str>,
 ) -> Result<Option<Vec<Domain>>> {
     let mut domains = Vec::new();
     for domain in [Domain::Vault, Domain::Memories] {
@@ -563,8 +579,20 @@ pub(crate) async fn prepare_configuration_sources(
                     if !needs_source && !needs_adoption {
                         return Err(error);
                     }
-                    if destination_password.is_empty() {
-                        return Err(eyre!("Enter a destination TCUI password before adopting copied encrypted files. This is required even if the final choices decrypt those files."));
+                    match destination_password {
+                        Some("") => {
+                            return Err(eyre!("Enter a destination TCUI password before adopting copied encrypted files. This is required even if the final choices decrypt those files."));
+                        }
+                        None if !crate::config::KeyStore::vault_status(
+                            &crate::config::AppConfig::default(),
+                        )?
+                        .unlocked =>
+                        {
+                            return Err(eyre!(
+                                "Unlock this TCUI instance before adopting copied encrypted files."
+                            ));
+                        }
+                        _ => {}
                     }
                     if needs_source {
                         if !unlock_native_sources(terminal, events, domain).await? {
@@ -605,7 +633,14 @@ pub(crate) async fn prepare_configuration_sources(
     for domain in &domains {
         let prepared =
             NativeTransferService::prepare(*domain, &native_root(*domain)?, TransferMode::Add)?;
-        NativeTransferService::adopt_native(prepared, destination_password)?;
+        match destination_password {
+            Some(password) => {
+                NativeTransferService::adopt_native(prepared, password)?;
+            }
+            None => {
+                NativeTransferService::adopt_native_unlocked(prepared)?;
+            }
+        }
     }
     Ok(Some(domains))
 }

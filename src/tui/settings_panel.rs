@@ -384,7 +384,7 @@ pub fn all_settings() -> Vec<Setting> {
         setting(
             "application_protection",
             "Application protection",
-            "Choose entry password and encryption independently for credentials, chats, memories and the internal vault. Unchecked data remains plaintext.",
+            "Unlock protection, change the shared password, or choose encryption independently for credentials, chats, memories and the internal vault. Unchecked data remains plaintext.",
             C::Commands,
             T::Command("open_security"),
             &["security", "privacy", "password", "encryption", "lock"],

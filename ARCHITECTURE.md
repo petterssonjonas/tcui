@@ -137,6 +137,16 @@ as active data. Pending replacement recovery blocks incompatible policy changes.
 Native snapshots use bounded streaming copies; protection conversion still
 buffers one file at a time. File, count, and depth limits remain explicit.
 
+Password changes reuse the protection journal and an atomic SQLite verifier/row
+transaction. The journal contains ciphertext-only credential replacements and
+staged portable wrappers, not the new password or its derived credential key.
+Managed retained-backup hashes change with their stored bodies; derived Memory
+indexes are retired and rebuilt. The old password authenticates before SQLite
+cutover, the new one after it. Recovery that completes cutover with the old
+password requires a subsequent new-password unlock. Policy and explicit
+plaintext credentials remain unchanged. The data master remains stable, so
+password changes do not revoke previously exported or extracted data keys.
+
 On Linux `$XDG_DATA_HOME` defaults to `~/.local/share`; the database is therefore
 normally `~/.local/share/tcui/tcui.db`. Filenames, paths, configuration, profile
 names, logs, and general database metadata are not covered by content protection.
@@ -222,7 +232,7 @@ Protected-to-plaintext chat insertion needs explicit consent.
 main (src/main.rs)
   → setup_terminal (crossterm raw mode, alternate screen)
   → create one EventStream shared by security screens and app restarts
-  → first-run protection selection; mandatory unlock gate when required
+  → first-run or configured protection manager; mandatory unlock gate when required
   → open config/stores and construct TuiApp
   → TuiApp::run
       → terminal.draw(|f| UI::render(f))
@@ -232,12 +242,14 @@ main (src/main.rs)
           └─ action_rx          → dispatch(action)
 ```
 
-The mandatory gate runs before config/stores when app-entry or chat protection
-is selected; cancelling exits. Optional-domain unlock cancellation keeps those
-domains locked without closing usable surfaces. `/security`, `/unlock`, and
-`/lock` use the outer restart loop rather than constructing competing terminal
-event readers. The old app/session is dropped and its frame cleared before the
-next security screen. Voluntary transitions confirm disposal of running
+The protection manager runs before app configuration/stores when setup,
+password management, or recovery is needed. Unlock keeps staged choices visible;
+authenticated saves reuse the shared vault session rather than a cached plaintext
+password. The mandatory gate applies to app-entry, chat protection, and pending
+recovery. Optional-only protection offers an explicit continue-locked action.
+`/security`, `/unlock`, and `/lock` use the outer restart loop rather than competing
+terminal event readers. The old app/session is dropped and its frame cleared
+before the next security screen. Voluntary transitions confirm disposal of running
 terminals, unsaved editors, and drafts, quiesce tracked producers, and persist
 state; cancellation preserves the session. Forced revocation fails closed.
 

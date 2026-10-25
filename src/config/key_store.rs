@@ -17,9 +17,9 @@ pub use credential::{
 };
 use oauth::StoredOAuthCredential;
 pub use oauth::{KeyStoreError, OAuthCredential, OAuthCredentialOwnership, OAuthCredentialSource};
-pub(crate) use vault::ProtectionWrapping;
 use vault::Vault;
 pub use vault::{CredentialStorage, SecretEntry, SecretKind, VaultStatus};
+pub(crate) use vault::{PasswordChange, ProtectionWrapping};
 
 const CURRENT_STORE_VERSION: u32 = 1;
 
@@ -105,6 +105,7 @@ impl KeyStore {
         let store = Vault::open()?;
         store.require_key(&keys)?;
         store.transaction(|| {
+            store.authenticate_unlocked(&keys)?;
             if let Some(payload) = store.read("app_data_key", "master", &keys)? {
                 let bytes: [u8; 32] = payload
                     .as_slice()
@@ -133,6 +134,27 @@ impl KeyStore {
     pub(crate) fn protection_wrapping() -> std::result::Result<ProtectionWrapping, KeyStoreError> {
         let keys = vault::session()?;
         Vault::open()?.protection_wrapping(&keys)
+    }
+
+    pub(crate) fn prepare_password_change(
+        new_password: &str,
+    ) -> std::result::Result<PasswordChange, KeyStoreError> {
+        let keys = vault::session()?;
+        Vault::open()?.prepare_password_change(new_password, &keys)
+    }
+
+    pub(crate) fn apply_password_change(
+        change: &PasswordChange,
+    ) -> std::result::Result<(), KeyStoreError> {
+        let mut keys = vault::session()?;
+        Vault::open()?.apply_password_change(change, &mut keys, true)
+    }
+
+    pub(crate) fn validate_password_change(
+        change: &PasswordChange,
+    ) -> std::result::Result<(), KeyStoreError> {
+        let mut keys = vault::session()?;
+        Vault::open()?.apply_password_change(change, &mut keys, false)
     }
 
     pub fn vault_status(config: &AppConfig) -> std::result::Result<VaultStatus, KeyStoreError> {

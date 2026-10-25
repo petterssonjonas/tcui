@@ -19,13 +19,38 @@ pub(crate) enum SecurityRestart {
     Transfer(super::Domain),
 }
 
+const MAX_PASSWORD_BYTES: usize = 4096;
+
 fn password_required(policy: ProtectionPolicy, initialized: bool) -> bool {
-    initialized
-        || policy.app_password
-        || policy.credentials
-        || policy.chats
-        || policy.memories
-        || policy.vault
+    initialized || policy.any()
+}
+
+fn append_secret(destination: &mut String, text: &str) {
+    for character in text.chars().filter(|character| !character.is_control()) {
+        if destination.len() + character.len_utf8() > MAX_PASSWORD_BYTES {
+            break;
+        }
+        destination.push(character);
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SaveAction {
+    Unlock,
+    ConfigureUnlocked,
+    ConfigureNew,
+}
+
+fn save_action(initialized: bool, unlocked: bool) -> SaveAction {
+    match (initialized, unlocked) {
+        (true, false) => SaveAction::Unlock,
+        (true, true) => SaveAction::ConfigureUnlocked,
+        (false, _) => SaveAction::ConfigureNew,
+    }
+}
+
+fn can_continue(configured: bool, requires_unlock: bool, unlocked: bool, app_ready: bool) -> bool {
+    configured && (!requires_unlock || unlocked) && app_ready
 }
 
 fn toggle(policy: &mut ProtectionPolicy, field: usize) {
@@ -99,19 +124,26 @@ pub(crate) async fn configure(
             }
         }
     }
-    let mut password = Zeroizing::new(String::new());
-    let mut confirmation = Zeroizing::new(String::new());
+    let mut password = Zeroizing::new(String::with_capacity(MAX_PASSWORD_BYTES));
+    let mut confirmation = Zeroizing::new(String::with_capacity(MAX_PASSWORD_BYTES));
     let mut cursor = 0;
-    let mut error = String::new();
+    let mut notice = String::new();
     loop {
+        let action = save_action(status.initialized, status.unlocked);
+        let requires_unlock = super::startup_requires_unlock()?;
         let mut lines = vec![
             Line::from("Choose protection independently for each app-owned data type."),
             Line::from(
                 "Unchecked data remains plaintext. An entry password alone does NOT encrypt it.",
             ),
-            Line::from(
-                "Vault and Memories are separate, app-owned stores. There are no external vaults.",
-            ),
+            Line::from(if !status.initialized {
+                "Status: no shared password. Choose options and a new password."
+            } else if status.unlocked {
+                "Status: unlocked. Save selections without entering the password again."
+            } else {
+                "Status: locked. Unlock with the existing password to change protection."
+            }),
+            Line::from("Selections are not applied until you save."),
             Line::from(""),
         ];
         for (index, (label, checked)) in [
@@ -134,156 +166,256 @@ pub(crate) async fn configure(
             )));
         }
         lines.push(Line::from(""));
-        lines.push(Line::from(if status.initialized {
-            "Use your EXISTING credential-vault password. It will not be replaced."
+        if status.initialized {
+            lines.push(Line::from(format!(
+                "{} {}",
+                if cursor == 5 { ">" } else { " " },
+                if status.unlocked {
+                    "Change shared password"
+                } else {
+                    "Unlock / recover with existing password"
+                }
+            )));
+            lines.push(Line::from(format!(
+                "{} {} (without saving staged selections)",
+                if cursor == 6 { ">" } else { " " },
+                if status.unlocked {
+                    "Continue to app"
+                } else if requires_unlock {
+                    "Continue to app (unlock / recovery required)"
+                } else {
+                    "Continue to app with protected sections locked"
+                }
+            )));
         } else {
-            "Choose one password for entry and every encrypted data type."
-        }));
-        lines.push(Line::from(format!(
-            "{} Password: {}",
-            if cursor == 5 { ">" } else { " " },
-            "•".repeat(password.chars().count())
-        )));
-        lines.push(Line::from(format!(
-            "{} Confirm:  {}",
-            if cursor == 6 { ">" } else { " " },
-            "•".repeat(confirmation.chars().count())
-        )));
+            lines.push(Line::from(format!(
+                "{} New password: {}",
+                if cursor == 5 { ">" } else { " " },
+                "•".repeat(password.chars().count())
+            )));
+            lines.push(Line::from(format!(
+                "{} Confirm:      {}",
+                if cursor == 6 { ">" } else { " " },
+                "•".repeat(confirmation.chars().count())
+            )));
+        }
         lines.push(Line::from(format!(
             "{} Save protection choices",
             if cursor == 7 { ">" } else { " " }
         )));
         lines.push(Line::from(
-            "Tab / arrows: move   Space: toggle   Enter: next / save   Esc: cancel",
+            "Tab / arrows: move   Space: toggle   Enter: select / save   Esc: cancel",
         ));
         lines.push(Line::from(
-            "Ctrl+U: unlock / recover the saved protection setup",
+            "Ctrl+U: unlock / recover   Ctrl+P: change password   Ctrl+O: continue to app",
         ));
         lines.push(Line::from(Span::styled(
-            error.as_str(),
-            Style::default().fg(Color::Red),
+            notice.as_str(),
+            Style::default().fg(Color::Yellow),
         )));
         draw(terminal, " Application protection ", lines)?;
         match read_event(events).await? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
+                let control = key.modifiers.contains(KeyModifiers::CONTROL);
                 match key.code {
                     KeyCode::Esc => return Ok(false),
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Ok(false)
+                    KeyCode::Char('c') if control => return Ok(false),
+                    KeyCode::Char('o') if control => {
+                        if can_continue(
+                            super::configured()? || status.initialized,
+                            super::startup_requires_unlock()?,
+                            super::is_unlocked()?,
+                            super::require_app().is_ok(),
+                        ) {
+                            return Ok(true);
+                        }
+                        notice = "Save first setup, or unlock / recover the saved setup before continuing.".into();
                     }
-                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    KeyCode::Char('u') if control => {
                         password.zeroize();
                         confirmation.zeroize();
-                        if super::configured()? {
+                        if status.initialized || super::configured()? {
                             if unlock(terminal, events).await? {
-                                return Ok(true);
+                                notice = "Unlocked. Staged selections are unchanged and are not yet saved.".into();
+                            }
+                            status = crate::config::KeyStore::vault_status(
+                                &crate::config::AppConfig::default(),
+                            )?;
+                        } else {
+                            notice =
+                                "Choose a new password and save the first protection setup.".into();
+                        }
+                    }
+                    KeyCode::Char('p') if control => {
+                        if status.unlocked && status.initialized {
+                            if change_password(terminal, events).await? {
+                                notice =
+                                    "Password changed. Staged protection selections are not saved."
+                                        .into();
                             }
                         } else {
-                            error = "No saved protection setup needs recovery; choose options and save.".into();
+                            notice = "Unlock the existing password before changing it.".into();
                         }
+                        status = crate::config::KeyStore::vault_status(
+                            &crate::config::AppConfig::default(),
+                        )?;
                     }
                     KeyCode::Tab | KeyCode::Down => cursor = (cursor + 1) % 8,
                     KeyCode::BackTab | KeyCode::Up => cursor = (cursor + 7) % 8,
                     KeyCode::Char(' ') if cursor < 5 => toggle(&mut policy, cursor),
+                    KeyCode::Enter if cursor < 5 => cursor += 1,
+                    KeyCode::Enter if status.initialized && cursor == 5 => {
+                        if status.unlocked {
+                            if change_password(terminal, events).await? {
+                                notice =
+                                    "Password changed. Staged protection selections are not saved."
+                                        .into();
+                            }
+                        } else if unlock(terminal, events).await? {
+                            notice =
+                                "Unlocked. Staged selections are unchanged and are not yet saved."
+                                    .into();
+                        }
+                        status = crate::config::KeyStore::vault_status(
+                            &crate::config::AppConfig::default(),
+                        )?;
+                    }
+                    KeyCode::Enter if status.initialized && cursor == 6 => {
+                        if can_continue(
+                            super::configured()? || status.initialized,
+                            super::startup_requires_unlock()?,
+                            super::is_unlocked()?,
+                            super::require_app().is_ok(),
+                        ) {
+                            return Ok(true);
+                        }
+                        notice = "Unlock / recover the saved setup before continuing.".into();
+                    }
                     KeyCode::Enter if cursor < 7 => cursor += 1,
                     KeyCode::Enter => {
-                        if password_required(policy, status.initialized) && password.is_empty() {
-                            error = "Enter the password before saving.".into();
-                            cursor = 5;
-                        } else if password.as_str() != confirmation.as_str() {
-                            error = "Password confirmation does not match.".into();
-                            confirmation.zeroize();
-                            cursor = 6;
-                        } else {
-                            let setup = match super::transfer_ui::prepare_configuration_sources(
-                                terminal,
-                                events,
-                                policy,
-                                password.as_str(),
-                            )
-                            .await
-                            {
-                                Ok(Some(_)) => super::configure(policy, password.as_str()),
-                                Ok(None) => {
-                                    error = "Source adoption cancelled. No new protection choices were applied.".into();
+                        let setup = match action {
+                            SaveAction::Unlock => {
+                                if unlock(terminal, events).await? {
+                                    notice =
+                                        "Unlocked. Review the staged selections, then save.".into();
+                                }
+                                status = crate::config::KeyStore::vault_status(
+                                    &crate::config::AppConfig::default(),
+                                )?;
+                                continue;
+                            }
+                            SaveAction::ConfigureUnlocked => {
+                                match super::transfer_ui::prepare_configuration_sources(
+                                    terminal, events, policy, None,
+                                )
+                                .await
+                                {
+                                    Ok(Some(_)) => super::configure_unlocked(policy),
+                                    Ok(None) => {
+                                        notice = "Source adoption cancelled. Protection selections were not saved.".into();
+                                        continue;
+                                    }
+                                    Err(failure) => Err(failure),
+                                }
+                            }
+                            SaveAction::ConfigureNew => {
+                                if password_required(policy, false) && password.is_empty() {
+                                    notice = "Enter a password before saving.".into();
+                                    cursor = 5;
                                     continue;
                                 }
-                                Err(failure) => Err(failure),
-                            };
-                            match setup {
-                                Ok(()) => return Ok(true),
-                                Err(failure) => {
-                                    status = crate::config::KeyStore::vault_status(
-                                        &crate::config::AppConfig::default(),
-                                    )?;
-                                    if let Some(domain) = failure.chain().find_map(|cause| {
-                                        cause
-                                            .downcast_ref::<super::PortableUnlockNeeded>()
-                                            .map(|needed| needed.domain)
-                                    }) {
-                                        let local_ready = !super::configured()?
-                                            || super::is_unlocked()?
-                                            || super::unlock(password.as_str()).is_ok();
-                                        if local_ready {
-                                            match super::transfer_ui::unlock_native_sources(
-                                                terminal, events, domain,
-                                            )
-                                            .await
-                                            {
-                                                Ok(true) => {
-                                                    error = "Source files unlocked. Save the selected protection choices to continue.".into();
-                                                    continue;
-                                                }
-                                                Ok(false) => {}
-                                                Err(source_error) => {
-                                                    error = format!("Source unlock did not complete: {source_error}");
-                                                    password.zeroize();
-                                                    confirmation.zeroize();
-                                                    cursor = 5;
-                                                    continue;
-                                                }
-                                            }
+                                if password.as_str() != confirmation.as_str() {
+                                    notice = "Password confirmation does not match.".into();
+                                    confirmation.zeroize();
+                                    cursor = 6;
+                                    continue;
+                                }
+                                match super::transfer_ui::prepare_configuration_sources(
+                                    terminal,
+                                    events,
+                                    policy,
+                                    Some(password.as_str()),
+                                )
+                                .await
+                                {
+                                    Ok(Some(_)) => super::configure(policy, password.as_str()),
+                                    Ok(None) => {
+                                        notice = "Source adoption cancelled. Protection selections were not saved.".into();
+                                        continue;
+                                    }
+                                    Err(failure) => Err(failure),
+                                }
+                            }
+                        };
+                        password.zeroize();
+                        confirmation.zeroize();
+                        status = crate::config::KeyStore::vault_status(
+                            &crate::config::AppConfig::default(),
+                        )?;
+                        match setup {
+                            Ok(()) => {
+                                notice =
+                                    "Protection choices saved. Ctrl+O: continue to app.".into();
+                                cursor = if status.initialized { 6 } else { 7 };
+                            }
+                            Err(failure) => {
+                                if let Some(domain) = failure.chain().find_map(|cause| {
+                                    cause
+                                        .downcast_ref::<super::PortableUnlockNeeded>()
+                                        .map(|needed| needed.domain)
+                                }) {
+                                    match super::transfer_ui::unlock_native_sources(
+                                        terminal, events, domain,
+                                    )
+                                    .await
+                                    {
+                                        Ok(true) => {
+                                            notice = "Source files unlocked. Save the staged selections to continue.".into();
+                                            continue;
+                                        }
+                                        Ok(false) => {}
+                                        Err(error) => {
+                                            notice =
+                                                format!("Source unlock did not complete: {error}");
+                                            continue;
                                         }
                                     }
-                                    error = format!("Protection setup did not complete; unlock to recover if prompted: {failure}");
-                                    password.zeroize();
-                                    confirmation.zeroize();
-                                    cursor = 5;
                                 }
+                                notice = format!("Protection changes were not completed; unlock to recover if needed: {failure}");
                             }
                         }
                     }
-                    KeyCode::Backspace if cursor == 5 => {
+                    KeyCode::Backspace if !status.initialized && cursor == 5 => {
                         password.pop();
                     }
-                    KeyCode::Backspace if cursor == 6 => {
+                    KeyCode::Backspace if !status.initialized && cursor == 6 => {
                         confirmation.pop();
                     }
                     KeyCode::Char(character)
-                        if !key
-                            .modifiers
-                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                        if !status.initialized
+                            && !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                     {
+                        let mut bytes = [0; 4];
+                        let text = character.encode_utf8(&mut bytes);
                         if cursor == 5 {
-                            password.push(character);
+                            append_secret(&mut password, text);
+                        } else if cursor == 6 {
+                            append_secret(&mut confirmation, text);
                         }
-                        if cursor == 6 {
-                            confirmation.push(character);
-                        }
+                        bytes.zeroize();
                     }
                     _ => {}
                 }
             }
             Event::Paste(mut text) => {
-                let destination = if cursor == 5 {
-                    Some(&mut password)
-                } else if cursor == 6 {
-                    Some(&mut confirmation)
-                } else {
-                    None
-                };
-                if let Some(destination) = destination {
-                    destination.extend(text.chars().filter(|character| !character.is_control()));
+                if !status.initialized {
+                    if cursor == 5 {
+                        append_secret(&mut password, &text);
+                    } else if cursor == 6 {
+                        append_secret(&mut confirmation, &text);
+                    }
                 }
                 text.zeroize();
             }
@@ -297,18 +429,51 @@ pub(crate) async fn initialize_password(
     terminal: &mut crate::TerminalType,
     events: &mut EventStream,
 ) -> Result<bool> {
-    let mut password = Zeroizing::new(String::new());
-    let mut confirmation = Zeroizing::new(String::new());
+    password_dialog(terminal, events, false).await
+}
+
+async fn change_password(
+    terminal: &mut crate::TerminalType,
+    events: &mut EventStream,
+) -> Result<bool> {
+    password_dialog(terminal, events, true).await
+}
+
+async fn password_dialog(
+    terminal: &mut crate::TerminalType,
+    events: &mut EventStream,
+    change: bool,
+) -> Result<bool> {
+    let mut password = Zeroizing::new(String::with_capacity(MAX_PASSWORD_BYTES));
+    let mut confirmation = Zeroizing::new(String::with_capacity(MAX_PASSWORD_BYTES));
     let mut cursor = 0;
     let mut error = String::new();
     loop {
         draw(
             terminal,
-            " Initialize application password ",
+            if change {
+                " Change shared password "
+            } else {
+                " Initialize application password "
+            },
             vec![
-                Line::from("Create the shared application / credential-vault password."),
+                Line::from(if change {
+                    "Choose a new shared password. The current session is already authenticated."
+                } else {
+                    "Create the shared application / credential-vault password."
+                }),
                 Line::from("Existing plaintext connections and data remain plaintext."),
                 Line::from("Protection choices and the new-connection default stay unchanged."),
+                Line::from(if change {
+                    "Previously exported copies keep their old password."
+                } else {
+                    ""
+                }),
+                Line::from(if change {
+                    "A password change cannot revoke a data key that was already copied or extracted."
+                } else {
+                    ""
+                }),
                 Line::from(""),
                 Line::from(format!(
                     "{} Password: {}",
@@ -321,10 +486,15 @@ pub(crate) async fn initialize_password(
                     "•".repeat(confirmation.chars().count())
                 )),
                 Line::from(format!(
-                    "{} Create password",
-                    if cursor == 2 { ">" } else { " " }
+                    "{} {}",
+                    if cursor == 2 { ">" } else { " " },
+                    if change {
+                        "Change password"
+                    } else {
+                        "Create password"
+                    }
                 )),
-                Line::from("Tab / arrows: move   Enter: next / create   Esc: cancel"),
+                Line::from("Tab / arrows: move   Enter: next / apply   Esc: cancel"),
                 Line::from(Span::styled(
                     error.as_str(),
                     Style::default().fg(Color::Red),
@@ -342,17 +512,22 @@ pub(crate) async fn initialize_password(
                 KeyCode::Enter if cursor < 2 => cursor += 1,
                 KeyCode::Enter => {
                     if password.is_empty() {
-                        error = "Enter a password before creating it.".into();
+                        error = "Enter a nonempty new password.".into();
                         cursor = 0;
                     } else if password.as_str() != confirmation.as_str() {
                         error = "Password confirmation does not match.".into();
                         confirmation.zeroize();
                         cursor = 1;
                     } else {
-                        match super::initialize_password(password.as_str()) {
+                        let result = if change {
+                            super::change_password(password.as_str())
+                        } else {
+                            super::initialize_password(password.as_str())
+                        };
+                        match result {
                             Ok(()) => return Ok(true),
                             Err(failure) => {
-                                error = format!("Password initialization failed: {failure}");
+                                error = format!("Password update failed: {failure}");
                                 password.zeroize();
                                 confirmation.zeroize();
                                 cursor = 0;
@@ -372,19 +547,22 @@ pub(crate) async fn initialize_password(
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
+                    let mut bytes = [0; 4];
+                    let text = character.encode_utf8(&mut bytes);
                     if cursor == 0 {
-                        password.push(character);
+                        append_secret(&mut password, text);
                     } else if cursor == 1 {
-                        confirmation.push(character);
+                        append_secret(&mut confirmation, text);
                     }
+                    bytes.zeroize();
                 }
                 _ => {}
             },
             Event::Paste(mut text) => {
                 if cursor == 0 {
-                    password.extend(text.chars().filter(|character| !character.is_control()));
+                    append_secret(&mut password, &text);
                 } else if cursor == 1 {
-                    confirmation.extend(text.chars().filter(|character| !character.is_control()));
+                    append_secret(&mut confirmation, &text);
                 }
                 text.zeroize();
             }
@@ -405,7 +583,7 @@ pub(crate) async fn unlock_with_notice(
     events: &mut EventStream,
     notice: Option<&str>,
 ) -> Result<bool> {
-    let mut password = Zeroizing::new(String::new());
+    let mut password = Zeroizing::new(String::with_capacity(MAX_PASSWORD_BYTES));
     let mut error = notice.unwrap_or_default().to_owned();
     loop {
         draw(
@@ -419,7 +597,7 @@ pub(crate) async fn unlock_with_notice(
                     "Password: {}",
                     "•".repeat(password.chars().count())
                 )),
-                Line::from("Enter: unlock   Esc: cancel (mandatory startup unlock exits the app)"),
+                Line::from("Enter: unlock   Esc: cancel and return"),
                 Line::from(Span::styled(
                     error.as_str(),
                     Style::default().fg(Color::Red),
@@ -435,7 +613,14 @@ pub(crate) async fn unlock_with_notice(
                 KeyCode::Enter => match super::unlock(password.as_str()) {
                     Ok(()) => return Ok(true),
                     Err(failure) => {
-                        error = format!("Unlock failed: {failure}");
+                        error = if failure
+                            .chain()
+                            .any(|cause| cause.is::<super::PasswordRotationUnlockNeeded>())
+                        {
+                            failure.to_string()
+                        } else {
+                            format!("Unlock failed: {failure}")
+                        };
                         password.zeroize();
                     }
                 },
@@ -447,12 +632,14 @@ pub(crate) async fn unlock_with_notice(
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
-                    password.push(character)
+                    let mut bytes = [0; 4];
+                    append_secret(&mut password, character.encode_utf8(&mut bytes));
+                    bytes.zeroize();
                 }
                 _ => {}
             },
             Event::Paste(mut text) => {
-                password.extend(text.chars().filter(|character| !character.is_control()));
+                append_secret(&mut password, &text);
                 text.zeroize();
             }
             _ => {}
@@ -492,5 +679,83 @@ mod tests {
     fn plaintext_setup_only_skips_password_when_no_existing_credential_password() {
         assert!(!password_required(ProtectionPolicy::default(), false));
         assert!(password_required(ProtectionPolicy::default(), true));
+    }
+
+    #[test]
+    fn secret_input_is_bounded_in_utf8_bytes_and_excludes_controls() {
+        let mut value = Zeroizing::new("a".repeat(MAX_PASSWORD_BYTES - 3));
+        append_secret(&mut value, "\n界x");
+        assert_eq!(value.len(), MAX_PASSWORD_BYTES);
+        assert!(value.ends_with('界'));
+        append_secret(&mut value, "more");
+        assert_eq!(value.len(), MAX_PASSWORD_BYTES);
+    }
+
+    #[test]
+    fn continue_keeps_independent_domains_locked_but_enforces_entry_and_recovery() {
+        assert!(can_continue(true, false, false, true));
+        assert!(!can_continue(true, true, false, true));
+        assert!(!can_continue(true, true, true, false));
+        assert!(!can_continue(false, false, false, true));
+        assert!(can_continue(true, true, true, true));
+    }
+
+    #[test]
+    fn unlock_preserves_staged_choices_until_authenticated_save() {
+        crate::app::tests::with_test_app("protection-manager-staged-save", |_app| {
+            let saved = ProtectionPolicy {
+                credentials: true,
+                ..ProtectionPolicy::default()
+            };
+            super::super::configure(saved, "manager-password").unwrap();
+            super::super::lock().unwrap();
+            let mut staged = saved;
+            toggle(&mut staged, 4);
+            let config = crate::config::AppConfig::default();
+            let status = crate::config::KeyStore::vault_status(&config).unwrap();
+            assert_eq!(
+                save_action(status.initialized, status.unlocked),
+                SaveAction::Unlock
+            );
+            assert!(super::super::unlock("incorrect").is_err());
+            assert!(super::super::policy().unwrap().unwrap() == saved);
+            super::super::unlock("manager-password").unwrap();
+            let status = crate::config::KeyStore::vault_status(&config).unwrap();
+            assert_eq!(
+                save_action(status.initialized, status.unlocked),
+                SaveAction::ConfigureUnlocked
+            );
+            assert!(super::super::policy().unwrap().unwrap() == saved);
+            super::super::configure_unlocked(staged).unwrap();
+            assert!(super::super::policy().unwrap().unwrap() == staged);
+        });
+    }
+
+    #[test]
+    fn initialized_legacy_vault_uses_unlock_then_password_free_save() {
+        crate::app::tests::with_test_app("protection-manager-legacy-save", |_app| {
+            let config = crate::config::AppConfig::default();
+            crate::config::KeyStore::initialize_vault(&config, "legacy-password").unwrap();
+            crate::config::KeyStore::lock_vault(&config).unwrap();
+            assert!(!super::super::configured().unwrap());
+            let status = crate::config::KeyStore::vault_status(&config).unwrap();
+            assert_eq!(
+                save_action(status.initialized, status.unlocked),
+                SaveAction::Unlock
+            );
+            super::super::unlock("legacy-password").unwrap();
+            let status = crate::config::KeyStore::vault_status(&config).unwrap();
+            assert_eq!(
+                save_action(status.initialized, status.unlocked),
+                SaveAction::ConfigureUnlocked
+            );
+            let staged = ProtectionPolicy {
+                credentials: true,
+                vault: true,
+                ..ProtectionPolicy::default()
+            };
+            super::super::configure_unlocked(staged).unwrap();
+            assert!(super::super::policy().unwrap().unwrap() == staged);
+        });
     }
 }
