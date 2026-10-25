@@ -62,6 +62,7 @@ impl TuiApp {
     fn settings_intent_action(intent: SettingsIntent) -> Option<Action> {
         match intent {
             SettingsIntent::Apply { id, value } => Some(Action::ApplySetting { id, value }),
+            SettingsIntent::Save => Some(Action::SaveSettings),
             SettingsIntent::Command(command) => crate::tui::settings_panel::command_action(command),
         }
     }
@@ -78,6 +79,25 @@ impl TuiApp {
             .settings_workspace
             .handle_mouse(event)
             .and_then(Self::settings_intent_action)
+    }
+
+    /// Save the authoritative configuration while excluding concurrent live changes.
+    pub(crate) fn save_settings(&mut self) {
+        let result = match self.config.try_read() {
+            Ok(config) => config
+                .save()
+                .map(|()| self.ui.settings_workspace.saved(&config)),
+            Err(_) => Err(eyre!("Configuration is busy; retry Save")),
+        };
+        match result {
+            Ok(()) => self.ui.show_toast("Settings saved".into()),
+            Err(error) => {
+                self.ui.settings_workspace.fail(format!(
+                    "Not saved: {error}. Retry Save; no values were changed."
+                ));
+                self.ui.show_toast(format!("Settings not saved: {error}"));
+            }
+        }
     }
 
     /// Persist before publishing a configuration, while holding the live write lock.
@@ -225,6 +245,193 @@ impl TuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::app_config::{inject_private_file_failure, TestFailurePoint};
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    #[test]
+    fn explicit_save_persists_live_configuration_instead_of_stale_workspace_values() {
+        crate::app::tests::with_test_app("settings-explicit-live-save", |app| {
+            app.config
+                .try_read()
+                .expect("config")
+                .save()
+                .expect("initial save");
+            app.open_settings_page(Some("collapse_thinking"));
+            let previous = app.config.try_read().expect("config").collapse_thinking;
+            app.config.try_write().expect("config").collapse_thinking = !previous;
+
+            let action = app
+                .handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+                .expect("save action");
+            tokio::runtime::Runtime::new()
+                .expect("runtime")
+                .block_on(app.dispatch(action))
+                .expect("dispatch save");
+
+            let saved = AppConfig::load().expect("saved config");
+            assert_eq!(saved.collapse_thinking, !previous);
+            assert_eq!(
+                serde_json::to_value(&saved).expect("saved values"),
+                serde_json::to_value(&*app.config.try_read().expect("live config"))
+                    .expect("live values")
+            );
+            assert!(!app.ui.settings_workspace.has_error);
+            let toggle = app
+                .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .expect("toggle refreshed setting");
+            tokio::runtime::Runtime::new()
+                .expect("runtime")
+                .block_on(app.dispatch(toggle))
+                .expect("apply refreshed setting");
+            assert_eq!(
+                AppConfig::load()
+                    .expect("saved toggled value")
+                    .collapse_thinking,
+                previous
+            );
+        });
+    }
+
+    #[test]
+    fn explicit_save_failure_preserves_disk_and_live_values_and_allows_retry() {
+        crate::app::tests::with_test_app("settings-explicit-save-failure", |app| {
+            app.config
+                .try_read()
+                .expect("config")
+                .save()
+                .expect("initial save");
+            let previous = AppConfig::load().expect("saved config");
+            app.open_settings_page(Some("collapse_thinking"));
+            app.config.try_write().expect("config").collapse_thinking = !previous.collapse_thinking;
+            inject_private_file_failure(TestFailurePoint::Rename);
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+
+            runtime
+                .block_on(app.dispatch(Action::SaveSettings))
+                .expect("dispatch failed save");
+
+            assert!(app.ui.settings_workspace.has_error);
+            assert_eq!(
+                serde_json::to_value(AppConfig::load().expect("unchanged saved config"))
+                    .expect("saved values"),
+                serde_json::to_value(&previous).expect("previous values")
+            );
+            assert_eq!(
+                app.config
+                    .try_read()
+                    .expect("live config")
+                    .collapse_thinking,
+                !previous.collapse_thinking
+            );
+
+            runtime
+                .block_on(app.dispatch(Action::SaveSettings))
+                .expect("retry save");
+            assert!(!app.ui.settings_workspace.has_error);
+            assert_eq!(
+                AppConfig::load().expect("saved config").collapse_thinking,
+                !previous.collapse_thinking
+            );
+        });
+    }
+
+    #[test]
+    fn explicit_save_when_busy_preserves_saved_values_instead_of_writing_defaults() {
+        crate::app::tests::with_test_app("settings-explicit-save-busy", |app| {
+            {
+                let mut config = app.config.try_write().expect("config");
+                config.theme = "nord".into();
+                config.save().expect("initial save");
+                config.theme = "dracula".into();
+            }
+            app.open_settings_page(Some("theme"));
+            let shared = app.config.clone();
+            let guard = shared.try_write().expect("lock fixture");
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+
+            runtime
+                .block_on(app.dispatch(Action::SaveSettings))
+                .expect("dispatch busy save");
+
+            assert!(app.ui.settings_workspace.has_error);
+            assert_eq!(guard.theme, "dracula");
+            assert_eq!(
+                AppConfig::load().expect("unchanged saved config").theme,
+                "nord"
+            );
+            drop(guard);
+
+            runtime
+                .block_on(app.dispatch(Action::SaveSettings))
+                .expect("retry save");
+            assert!(!app.ui.settings_workspace.has_error);
+            assert_eq!(AppConfig::load().expect("saved config").theme, "dracula");
+        });
+    }
+
+    #[test]
+    fn explicit_save_of_active_draft_retains_failed_value_for_retry() {
+        crate::app::tests::with_test_app("settings-explicit-draft-retry", |app| {
+            app.config
+                .try_read()
+                .expect("config")
+                .save()
+                .expect("initial save");
+            let previous = app.config.try_read().expect("config").tui.left_thin_width;
+            app.open_settings_page(Some("tui.left_thin_width"));
+            assert!(app
+                .settings_workspace_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .is_none());
+            assert!(app
+                .settings_workspace_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL))
+                .is_none());
+            app.ui.settings_workspace.paste("31");
+            let action = app
+                .handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+                .expect("draft save action");
+            inject_private_file_failure(TestFailurePoint::Rename);
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+
+            runtime
+                .block_on(app.dispatch(action))
+                .expect("dispatch failed draft save");
+
+            assert!(app.ui.settings_workspace.has_error);
+            assert_eq!(
+                app.config
+                    .try_read()
+                    .expect("live config")
+                    .tui
+                    .left_thin_width,
+                previous
+            );
+            assert_eq!(
+                AppConfig::load().expect("saved config").tui.left_thin_width,
+                previous
+            );
+            let retry = app
+                .handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+                .expect("retained draft save action");
+
+            runtime
+                .block_on(app.dispatch(retry))
+                .expect("retry draft save");
+
+            assert!(!app.ui.settings_workspace.has_error);
+            assert_eq!(
+                app.config
+                    .try_read()
+                    .expect("live config")
+                    .tui
+                    .left_thin_width,
+                31
+            );
+            assert_eq!(
+                AppConfig::load().expect("saved config").tui.left_thin_width,
+                31
+            );
+        });
+    }
 
     #[test]
     fn validated_changes_update_live_values_and_disk() {

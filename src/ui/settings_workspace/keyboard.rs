@@ -150,6 +150,17 @@ impl KeyboardSettings {
         self.capture.is_some()
     }
 
+    pub fn has_draft(&self) -> bool {
+        self.capture.is_some() || self.pending.is_some()
+    }
+
+    pub fn saved(&mut self) {
+        if !self.has_draft() {
+            self.feedback = "Settings saved.".into();
+            self.has_error = false;
+        }
+    }
+
     pub fn select_action(&mut self, id: &str) -> Option<usize> {
         self.query.clear();
         self.searching = false;
@@ -436,7 +447,7 @@ impl KeyboardSettings {
         );
         frame.render_widget(
             Paragraph::new(
-                "/ search · Enter capture · Backspace reset · Esc cancel · Tab categories",
+                "Ctrl+S save · / search · Enter capture · Backspace reset · Esc cancel · Tab categories",
             )
             .style(base),
             help,

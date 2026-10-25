@@ -110,6 +110,7 @@ pub enum Action {
     OpenCommandPalette,
     OpenSettingsPanel,
     OpenSettingsPage(String),
+    SaveSettings,
     ApplySetting {
         id: String,
         value: String,

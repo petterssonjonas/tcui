@@ -374,6 +374,12 @@ impl TuiApp {
             if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 return Some(Action::OpenCommandPalette);
             }
+            if self.ui.app_tabs.active_view() == crate::ui::app_tabs::AppView::Settings
+                && key.code == KeyCode::Char('s')
+                && key.modifiers == KeyModifiers::CONTROL
+            {
+                return self.settings_workspace_key(key);
+            }
             if let Some(action) =
                 crate::ui::settings_workspace::keybinding_action(key, &self.ui.keybinding_overrides)
             {

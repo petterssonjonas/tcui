@@ -33,8 +33,11 @@ Type any slash command in the message box:
 
 - Press `Ctrl+P` to search settings and actions. With no query, choose **Settings tab**.
   Search results navigate to the selected setting; the popup does not edit values.
-  Settings changes validate and persist individually without a global Save button.
+  Settings changes still validate and persist individually. Click **Save settings**
+  or press `Ctrl+S` to save the current configuration and any valid active draft.
+  A failed save keeps the draft and reports an error; success is confirmed after writing.
   In Keyboard settings, Enter captures a binding and Backspace resets it.
+  Finish or cancel capture before clicking Save; `Ctrl+S` remains capture input there.
 - Click the **provider** or **model** labels in the status bar to change
   selectors.
 - Settings groups include terminal defaults, appearance, layout, chat, web search,
@@ -143,8 +146,13 @@ must first be upgraded on their source instance with its original key metadata.
 - `@memory`, `@remember`, and the `@memorize` alias use the full request and
   conversation context to recall facts or save requested facts and configuration.
   Missing facts or uncertain machine identity require clarification; relevant
-  topic and machine tags describe saved records. `@recall` is always read-only.
-  Memory must be available and configured; completed actions require host results.
+  topic and machine tags describe saved records.
+- Use `@recall the saved details for my home server` or `/skill recall <query>`
+  to retrieve existing memories only. The host forbids save, delete, and reindex
+  actions, even when another memory skill is mentioned in the same prompt.
+  Enable **Settings → Memory → Enable memory** for these skills; this also enables
+  automatic memory recall. Memory encryption is a separate `/security` choice.
+  Completed memory actions require host results.
 - Explicit `@save` and requested memory saves can keep results after a chat closes.
   Automatic memory capture and automatic media saving are off.
 - Ask main to “Read the temp chat” or “Read the ephemeral chat” to copy visible

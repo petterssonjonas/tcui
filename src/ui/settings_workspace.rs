@@ -165,6 +165,7 @@ pub fn navigator_settings() -> impl Iterator<Item = Setting> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsIntent {
     Apply { id: String, value: String },
+    Save,
     Command(&'static str),
 }
 
@@ -187,6 +188,7 @@ pub struct SettingsWorkspaceState {
     pub has_error: bool,
     category_areas: Vec<(Rect, SettingCategory)>,
     row_areas: Vec<(Rect, usize)>,
+    save_area: Option<Rect>,
     list_height: usize,
 }
 
@@ -204,6 +206,7 @@ impl Default for SettingsWorkspaceState {
             has_error: false,
             category_areas: Vec::new(),
             row_areas: Vec::new(),
+            save_area: None,
             list_height: 1,
         }
     }
@@ -251,6 +254,47 @@ impl SettingsWorkspaceState {
         }
         self.feedback = "Applied and saved. Defaults affect subsequent operations; existing chats, terminal sessions and other drafts are preserved.".into();
         self.has_error = false;
+    }
+
+    pub fn saved(&mut self, config: &AppConfig) {
+        match serde_json::to_value(config) {
+            Ok(value) => self.config = value,
+            Err(error) => {
+                self.fail(format!("Cannot refresh saved settings: {error}"));
+                return;
+            }
+        }
+        if self.edit.is_none() && !self.keyboard.has_draft() {
+            self.feedback = "Settings saved.".into();
+            self.has_error = false;
+        }
+        self.keyboard.saved();
+    }
+
+    fn request_save(&mut self) -> Option<SettingsIntent> {
+        if self.keyboard.is_capturing() {
+            self.fail("Finish or cancel shortcut capture before saving settings.");
+            return None;
+        }
+        let intent = if let Some(edit) = &self.edit {
+            if let Err(error) = validate_edit(&self.config, edit.id, &edit.text) {
+                self.fail(error);
+                return None;
+            }
+            SettingsIntent::Apply {
+                id: edit.id.into(),
+                value: edit.text.clone(),
+            }
+        } else {
+            SettingsIntent::Save
+        };
+        self.feedback = "Saving settings...".into();
+        self.has_error = false;
+        if self.category == SettingCategory::Keybind && !self.keyboard.has_draft() {
+            self.keyboard.feedback.clone_from(&self.feedback);
+            self.keyboard.has_error = false;
+        }
+        Some(intent)
     }
 
     fn rows(&self) -> impl Iterator<Item = &'static WorkspaceSetting> + Clone + 'static {
@@ -384,7 +428,16 @@ impl SettingsWorkspaceState {
         if key.kind == KeyEventKind::Release {
             return None;
         }
-        if self.edit.is_none() && self.category == SettingCategory::Keybind && !self.rail_focused {
+        if key.code == KeyCode::Char('s')
+            && key.modifiers == KeyModifiers::CONTROL
+            && !self.keyboard.is_capturing()
+        {
+            return self.request_save();
+        }
+        if self.edit.is_none()
+            && self.category == SettingCategory::Keybind
+            && (!self.rail_focused || self.keyboard.is_capturing())
+        {
             let bindings = self.keyboard_bindings();
             if let Some(intent) = self.keyboard.handle_key(key, &mut self.selected, &bindings) {
                 return intent;
@@ -397,19 +450,7 @@ impl SettingsWorkspaceState {
                     self.feedback = "Draft cancelled; saved value unchanged.".into();
                     self.has_error = false;
                 }
-                KeyCode::Enter => {
-                    let id = edit.id;
-                    let text = edit.text.clone();
-                    match validate_edit(&self.config, id, &text) {
-                        Ok(_) => {
-                            return Some(SettingsIntent::Apply {
-                                id: id.into(),
-                                value: text,
-                            })
-                        }
-                        Err(error) => self.fail(error),
-                    }
-                }
+                KeyCode::Enter => return self.request_save(),
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     edit.text.clear();
                     edit.cursor = 0;
@@ -478,12 +519,17 @@ impl SettingsWorkspaceState {
     }
 
     pub fn handle_mouse(&mut self, event: MouseEvent) -> Option<SettingsIntent> {
+        let position = Position::new(event.column, event.row);
+        if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.save_area.is_some_and(|rect| rect.contains(position))
+        {
+            return self.request_save();
+        }
         if self.edit.is_some()
             || (self.category == SettingCategory::Keybind && self.keyboard.is_capturing())
         {
             return None;
         }
-        let position = Position::new(event.column, event.row);
         if self.category == SettingCategory::Keybind
             && matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
         {
@@ -522,14 +568,53 @@ impl SettingsWorkspaceState {
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         self.category_areas.clear();
         self.row_areas.clear();
+        self.save_area = None;
+        let area = area.intersection(frame.area());
         if area.is_empty() {
             return;
         }
         let theme = crate::theme::active_theme();
         let base = Style::default().fg(theme.foreground).bg(theme.background);
         frame.render_widget(Block::default().style(base), area);
-        let [title, body, description, feedback, help] = Layout::vertical([
-            Constraint::Length(1),
+        let save_label = if area.width >= 26 {
+            "[ Save settings · Ctrl+S ]"
+        } else if area.width >= 15 {
+            "[Save · Ctrl+S]"
+        } else if area.width >= 6 {
+            "[Save]"
+        } else {
+            ""
+        };
+        let save_width = unicode_width::UnicodeWidthStr::width(save_label) as u16;
+        let stacked = save_width > 0 && area.width < save_width + 10 && area.height > 1;
+        let [header, content] = Layout::vertical([
+            Constraint::Length(if stacked { 2 } else { 1 }),
+            Constraint::Min(0),
+        ])
+        .areas(area);
+        let (title, save) = if stacked {
+            (
+                Rect::new(header.x, header.y, header.width, 1),
+                Rect::new(header.right() - save_width, header.y + 1, save_width, 1),
+            )
+        } else {
+            let [title, save] =
+                Layout::horizontal([Constraint::Min(0), Constraint::Length(save_width)])
+                    .areas(header);
+            (title, save)
+        };
+        if !save.is_empty() {
+            frame.render_widget(
+                Paragraph::new(save_label).style(
+                    base.fg(theme.background)
+                        .bg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                save,
+            );
+            self.save_area = Some(save);
+        }
+        let [body, description, feedback, help] = Layout::vertical([
             Constraint::Min(1),
             Constraint::Length(if area.height >= 16 { 4 } else { 2 }),
             Constraint::Length(if self.has_error && area.height >= 16 {
@@ -539,7 +624,7 @@ impl SettingsWorkspaceState {
             }),
             Constraint::Length(1),
         ])
-        .areas(area);
+        .areas(content);
         frame.render_widget(
             Paragraph::new(" Settings · applied individually ")
                 .style(base.fg(theme.accent).add_modifier(Modifier::BOLD)),
@@ -733,7 +818,7 @@ impl SettingsWorkspaceState {
                 feedback,
             );
         }
-        frame.render_widget(Paragraph::new("Tab categories/list · ↑↓ move · ←→ choice · Enter edit/apply · Esc cancel · Ctrl+P search").style(base), help);
+        frame.render_widget(Paragraph::new("Ctrl+S save · Tab categories/list · ↑↓ move · ←→ choice · Enter edit/apply · Esc cancel · Ctrl+P search").style(base), help);
     }
 }
 
@@ -1039,6 +1124,37 @@ mod tests {
         serde_json::to_value(AppConfig::default()).expect("config")
     }
 
+    fn draft(id: &str, text: &str) -> SettingsWorkspaceState {
+        let mut state = SettingsWorkspaceState::default();
+        state.select_id(id);
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        state.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        state.paste(text);
+        state
+    }
+
+    fn render(
+        state: &mut SettingsWorkspaceState,
+        width: u16,
+        height: u16,
+    ) -> Terminal<TestBackend> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| state.render(frame, frame.area()))
+            .expect("render");
+        terminal
+    }
+
+    fn click_save(state: &mut SettingsWorkspaceState) -> Option<SettingsIntent> {
+        let rect = state.save_area.expect("visible Save button");
+        state.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
     #[test]
     fn every_serialized_knob_is_catalogued_or_deliberately_managed() {
         let config = config();
@@ -1229,6 +1345,269 @@ mod tests {
         .is_err());
         assert!(validate_edit(&config(), "local_inference.host", "host\nname").is_err());
         assert!(validate_edit(&config(), "tui.terminal_shell", "sh -c command").is_err());
+    }
+
+    #[test]
+    fn explicit_save_validates_drafts_and_waits_for_persistence_acknowledgement() {
+        for (id, text) in [
+            ("local_inference.host", "127.0.0.2"),
+            ("local_inference.port", "65535"),
+            ("tui.status_widgets", r#"[{"id":"model","row":1,"area":1}]"#),
+        ] {
+            for mouse in [false, true] {
+                let mut state = draft(id, text);
+                let before = state.config.clone();
+                render(&mut state, 100, 30);
+                let intent = if mouse {
+                    click_save(&mut state)
+                } else {
+                    state.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+                };
+                assert_eq!(
+                    intent,
+                    Some(SettingsIntent::Apply {
+                        id: id.into(),
+                        value: text.into(),
+                    })
+                );
+                assert_eq!(state.config, before, "must not publish before persistence");
+                assert_eq!(state.edit.as_ref().expect("pending draft").text, text);
+                assert!(!state.has_error);
+
+                let updated = validate_edit(&before, id, text).expect("valid draft");
+                state.applied(&updated, id);
+                assert!(state.edit.is_none());
+                assert_eq!(
+                    state.config,
+                    serde_json::to_value(updated).expect("updated")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_explicit_save_keeps_draft_editable_for_keyboard_and_mouse() {
+        for (id, invalid, valid) in [
+            ("local_inference.host", "invalid/host", "127.0.0.2"),
+            ("local_inference.port", "0", "12345"),
+            ("local_inference.port", "65536", "65535"),
+            ("tui.status_widgets", "{", "[]"),
+            (
+                "tui.status_widgets",
+                r#"[{"id":"model","row":3,"area":1}]"#,
+                "[]",
+            ),
+        ] {
+            for mouse in [false, true] {
+                let mut state = draft(id, invalid);
+                let before = state.config.clone();
+                render(&mut state, 42, 16);
+                let intent = if mouse {
+                    click_save(&mut state)
+                } else {
+                    state.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+                };
+                assert_eq!(intent, None, "{id}: {invalid}");
+                assert!(state.has_error, "{id}: {invalid}");
+                let edit = state.edit.as_ref().expect("invalid draft retained");
+                assert_eq!((&*edit.text, edit.cursor), (invalid, invalid.len()));
+                assert_eq!(state.config, before);
+
+                state.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+                state.paste(valid);
+                assert_eq!(
+                    state.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+                    Some(SettingsIntent::Apply {
+                        id: id.into(),
+                        value: valid.into(),
+                    })
+                );
+                assert!(!state.has_error);
+            }
+        }
+    }
+
+    #[test]
+    fn failed_explicit_save_retains_draft_and_retries_the_same_value() {
+        let mut state = draft("local_inference.port", "12345");
+        let before = state.config.clone();
+        let proposed = state.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        state.fail("disk full");
+        assert!(state.has_error);
+        assert_eq!(state.config, before);
+        assert_eq!(state.edit.as_ref().expect("retained draft").text, "12345");
+        assert_eq!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            proposed
+        );
+        assert!(matches!(proposed, Some(SettingsIntent::Apply { .. })));
+        let updated = validate_edit(&before, "local_inference.port", "12345").expect("valid");
+        state.applied(&updated, "local_inference.port");
+        assert!(state.edit.is_none());
+        assert!(!state.has_error);
+    }
+
+    #[test]
+    fn save_acknowledgement_refreshes_live_values_and_preserves_a_new_invalid_draft() {
+        let mut state = SettingsWorkspaceState {
+            rail_focused: true,
+            ..Default::default()
+        };
+        let before = state.config.clone();
+        assert_eq!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            Some(SettingsIntent::Save)
+        );
+        assert_eq!(state.config, before);
+        state.select_id("local_inference.port");
+        state.activate(1);
+        state.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        state.paste("invalid");
+        assert_eq!(state.request_save(), None);
+        let error = state.feedback.clone();
+        let live = validate_edit(&before, "local_inference.host", "127.0.0.2").expect("live");
+        state.saved(&live);
+        assert_eq!(
+            state.config,
+            serde_json::to_value(live).expect("live config")
+        );
+        assert_eq!(state.edit.as_ref().expect("new draft").text, "invalid");
+        assert!(state.has_error);
+        assert_eq!(state.feedback, error);
+    }
+
+    #[test]
+    fn save_works_while_searching_keyboard_actions_without_losing_the_search() {
+        let mut state = SettingsWorkspaceState::default();
+        state.select_id("keybind:new_chat");
+        state.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        for character in "new chat".chars() {
+            state.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        let count = state.keyboard.count();
+        assert!(count > 1);
+        assert_eq!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            Some(SettingsIntent::Save)
+        );
+        let live = validate_edit(&state.config, "local_inference.port", "12345").expect("live");
+        state.saved(&live);
+        assert!(!state.has_error);
+        assert!(!state.keyboard.has_error);
+        assert_eq!(state.keyboard.count(), count);
+        assert_eq!(
+            get_value(&state.config, "local_inference.port"),
+            Some(&Value::from(12345))
+        );
+        for character in "zzzz".chars() {
+            state.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        assert_eq!(
+            state.keyboard.count(),
+            1,
+            "search must still consume typing"
+        );
+    }
+
+    #[test]
+    fn capture_keeps_ctrl_s_semantics_and_mouse_save_requires_finishing_or_cancelling() {
+        let mut state = SettingsWorkspaceState::default();
+        state.select_id("keybind:new_chat");
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        render(&mut state, 100, 30);
+        let before = state.config.clone();
+        assert_eq!(click_save(&mut state), None);
+        assert!(state.has_error);
+        assert!(state.keyboard.has_error);
+        assert!(state.keyboard.is_capturing());
+        assert_eq!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            None,
+            "Ctrl+S conflicts with the existing Toggle Settings binding during capture"
+        );
+        assert!(state.keyboard.is_capturing());
+        assert_eq!(state.config, before);
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!state.keyboard.is_capturing());
+        assert_eq!(click_save(&mut state), Some(SettingsIntent::Save));
+        state.saved(&AppConfig::default());
+        assert!(!state.has_error);
+        assert!(!state.keyboard.has_error);
+    }
+
+    #[test]
+    fn save_acknowledgement_does_not_discard_a_failed_shortcut_draft() {
+        let mut state = SettingsWorkspaceState::default();
+        state.select_id("keybind:new_chat");
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let proposed = state.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT));
+        assert!(matches!(proposed, Some(SettingsIntent::Apply { .. })));
+        state.fail("disk full");
+        state.saved(&AppConfig::default());
+        assert!(state.keyboard.is_capturing());
+        assert!(state.keyboard.has_error);
+        assert!(state.has_error);
+        assert_eq!(
+            state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            proposed
+        );
+    }
+
+    #[test]
+    fn save_shortcut_ignores_key_release_and_does_not_swallow_other_chords() {
+        let mut state = draft("local_inference.port", "12345");
+        let mut release = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        release.kind = KeyEventKind::Release;
+        assert_eq!(state.handle_key(release), None);
+        assert_eq!(
+            state.handle_key(KeyEvent::new(
+                KeyCode::Char('s'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            )),
+            None
+        );
+        assert_eq!(state.edit.as_ref().expect("unchanged draft").text, "12345");
+        assert!(!state.has_error);
+    }
+
+    #[test]
+    fn save_hit_area_tracks_resizes_clipping_and_empty_frames() {
+        let mut state = SettingsWorkspaceState::default();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+        let screen = Rect::new(0, 0, 100, 30);
+        for requested in [
+            screen,
+            Rect::new(3, 2, 20, 8),
+            Rect::new(90, 25, 20, 10),
+            Rect::new(0, 0, 100, 1),
+            Rect::new(0, 0, 6, 2),
+        ] {
+            terminal
+                .draw(|frame| state.render(frame, requested))
+                .expect("render");
+            let button = state.save_area.expect("button fits");
+            let visible = screen.intersection(requested);
+            assert!(!button.is_empty());
+            assert_eq!(button.intersection(visible), button);
+            assert_eq!(click_save(&mut state), Some(SettingsIntent::Save));
+        }
+        let previous = state.save_area.expect("previous button");
+        for requested in [Rect::new(0, 0, 1, 1), Rect::default()] {
+            terminal
+                .draw(|frame| state.render(frame, requested))
+                .expect("render");
+            assert!(state.save_area.is_none());
+            assert_eq!(
+                state.handle_mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: previous.x,
+                    row: previous.y,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                None,
+                "old button must not remain clickable"
+            );
+        }
     }
 
     #[test]

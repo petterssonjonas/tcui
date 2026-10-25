@@ -134,13 +134,16 @@ conversations or execute hidden memory directives. Titles come from the first
 user message, with a five-word and 16-Unicode-character limit before an
 optional ellipsis.
 
-With Memory enabled, select a skill anywhere in your own prompt, or use
+Enable **Settings → Memory → Enable memory** to use memory skills. This also
+enables automatic recall for ordinary requests; memory encryption is a separate
+choice under `/security`. Select a skill anywhere in your own prompt, or use
 `/skill <name> <request>`. Memory uses its own native store, separate from Vault:
 
 ```text
 This machine is used for local CI @remember that, and the configuration we have set up this session.
 This machine runs Ubuntu, but I don't @remember what it is for.
 Recover @memory related to this machine.
+@recall the saved hardware details for my home server.
 /skill recall how this machine was configured
 ```
 
@@ -152,8 +155,9 @@ A plain reply can continue that clarification in the same conversation,
 including after restart. A copied question from another chat cannot authorize
 the operation.
 
-`@recall` and `/skill recall` are read-only. The host rejects save, removal,
-and reindex actions for those invocations, including mixed-skill prompts.
+`@recall <query>` and `/skill recall <query>` retrieve existing memories without
+changing them. The host rejects save, removal, and reindex actions for those
+invocations, including prompts that also mention another memory skill.
 Quoted examples, code, attached documents, and assistant text do not invoke
 memory actions. The host reports actual operation results. Normal answer
 text cannot execute a memory action.
@@ -206,18 +210,23 @@ category on the dedicated Settings tab. `/settings` and the launcher open that
 tab directly.
 
 Settings are grouped into Appearance, Terminal, Layout, Chat, Web search,
-Connections, Models, Local inference, Notifications, Files & vaults, Keyboard,
-MCP, Privacy, and Memory when that feature is enabled. Controls include previously
-hidden sidebar widths, status widgets, local probe timeouts, ntfy delivery, memory
-limits, and terminal defaults. Provider secrets and vault profiles stay in their
-dedicated managers. Inactive legacy fields are not presented as working settings.
+Connections, Models, Local inference, Notifications, Files, Keyboard, MCP,
+Privacy, and Memory when that feature is enabled. Controls include sidebar
+widths, status widgets, local probe timeouts, ntfy delivery, memory limits, and
+terminal defaults. Provider secrets stay in their dedicated manager. Inactive
+legacy fields are not presented as working settings.
 
 Use Tab to switch category/list focus and arrows to navigate. Toggle booleans or
 cycle choices directly; Enter edits text and numbers and commits valid values.
-Changes persist individually without a global Save button. Errors preserve the
-draft and previous saved value. Keyboard actions show current/default bindings:
-Enter captures a binding, Enter confirms it, and Backspace resets it. Advanced
-MCP and bulk keybinding editors accept validated JSON.
+Changes still persist individually. Click **Save settings** or press `Ctrl+S`
+to explicitly save the current live configuration. Save also validates and commits
+an active text, number, or JSON draft. Success is confirmed only after persistence;
+invalid input or a write failure keeps the draft and previous saved value for retry.
+
+Keyboard actions show current/default bindings: Enter captures a binding, Enter
+confirms it, and Backspace resets it. Finish or cancel shortcut capture before
+clicking Save; `Ctrl+S` remains captured shortcut input while capture is active.
+Advanced MCP and bulk keybinding editors accept validated JSON.
 
 Terminal placement updates the current split immediately. Shell/directory and
 provider/model defaults apply to new sessions or conversations; existing sessions

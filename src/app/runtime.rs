@@ -372,6 +372,10 @@ impl TuiApp {
                 self.open_settings_page(Some(&id));
                 Ok(())
             }
+            Action::SaveSettings => {
+                self.save_settings();
+                Ok(())
+            }
             Action::ApplySetting { id, value } => {
                 if let Err(error) = self.apply_settings_value(&id, &value).await {
                     self.ui
