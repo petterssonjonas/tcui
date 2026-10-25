@@ -773,6 +773,25 @@ pub(crate) fn stage_protection_migration(
     selected: Option<Domain>,
     target: protection::ProtectionPolicy,
     format_only: bool,
+    encode: impl FnMut(Domain, &[u8]) -> color_eyre::eyre::Result<Vec<u8>>,
+    stage: impl FnMut(Domain, &Path, &[u8], &[u8]) -> color_eyre::eyre::Result<()>,
+) -> color_eyre::eyre::Result<()> {
+    stage_protection_migration_impl(selected, target, format_only, false, encode, stage)
+}
+
+pub(crate) fn stage_password_rotation(
+    target: protection::ProtectionPolicy,
+    encode: impl FnMut(Domain, &[u8]) -> color_eyre::eyre::Result<Vec<u8>>,
+    stage: impl FnMut(Domain, &Path, &[u8], &[u8]) -> color_eyre::eyre::Result<()>,
+) -> color_eyre::eyre::Result<()> {
+    stage_protection_migration_impl(None, target, false, true, encode, stage)
+}
+
+fn stage_protection_migration_impl(
+    selected: Option<Domain>,
+    target: protection::ProtectionPolicy,
+    format_only: bool,
+    password_rotation: bool,
     mut encode: impl FnMut(Domain, &[u8]) -> color_eyre::eyre::Result<Vec<u8>>,
     mut stage: impl FnMut(Domain, &Path, &[u8], &[u8]) -> color_eyre::eyre::Result<()>,
 ) -> color_eyre::eyre::Result<()> {
@@ -818,7 +837,9 @@ pub(crate) fn stage_protection_migration(
         let decoded_descriptor = zeroize::Zeroizing::new(match descriptor_format {
             protection::StoredFormat::Plaintext => original_descriptor.to_vec(),
             protection::StoredFormat::Portable { domain } => {
-                if !should_migrate_backup(selected, target, format_only, domain)? {
+                if !password_rotation
+                    && !should_migrate_backup(selected, target, format_only, domain)?
+                {
                     continue;
                 }
                 protection::decode_for_explicit_decryption(domain, &original_descriptor)?
@@ -840,7 +861,9 @@ pub(crate) fn stage_protection_migration(
         {
             color_eyre::eyre::bail!("Invalid retained native backup descriptor");
         }
-        if !should_migrate_backup(selected, target, format_only, backup.domain)? {
+        if !password_rotation
+            && !should_migrate_backup(selected, target, format_only, backup.domain)?
+        {
             continue;
         }
         let mut listed = std::collections::HashSet::new();
@@ -878,6 +901,10 @@ pub(crate) fn stage_protection_migration(
                     "Retained native backup content does not match its recovery descriptor"
                 );
             }
+            if password_rotation && !backup.protected {
+                listed.remove(&file.relative);
+                continue;
+            }
             if format_only
                 && (!backup.protected
                     || matches!(
@@ -910,7 +937,13 @@ pub(crate) fn stage_protection_migration(
         if !listed.is_empty() {
             color_eyre::eyre::bail!("Retained native backup is missing a recorded body");
         }
-        backup.protected = if format_only {
+        if password_rotation
+            && !backup.protected
+            && descriptor_format == protection::StoredFormat::Plaintext
+        {
+            continue;
+        }
+        backup.protected = if format_only || password_rotation {
             backup.protected
         } else {
             match backup.domain {

@@ -32,6 +32,8 @@ struct Journal {
     recover_native_after: bool,
     #[serde(default = "clear_memory_indexes_by_default")]
     clear_memory_indexes: bool,
+    #[serde(default)]
+    password_change: Option<crate::config::key_store::PasswordChange>,
 }
 
 fn clear_memory_indexes_by_default() -> bool {
@@ -274,22 +276,142 @@ fn prepare_impl(
         clear_memory_indexes: migrate_memory,
         convert_credentials: old
             .is_none_or(|old| old.policy.credentials != target.policy.credentials),
+        password_change: None,
     };
-    let journal_bytes = Zeroizing::new(serde_json::to_vec(&journal)?);
+    publish_journal(&stage_name, &stage, &journal, key)?;
+    Ok(())
+}
+
+fn publish_journal(
+    stage_name: &str,
+    stage: &Path,
+    journal: &Journal,
+    key: Option<&[u8; 32]>,
+) -> Result<()> {
+    let journal_bytes = Zeroizing::new(serde_json::to_vec(journal)?);
     let journal_bytes = match key {
         Some(key) => super::seal(JOURNAL_CONTEXT, &journal_bytes, key)?,
         None => journal_bytes.to_vec(),
     };
     storage_io::atomic_write(&stage.join("journal"), &journal_bytes)?;
-    // No source replacement happens until the complete, durable recovery plan exists.
+    // Sources remain untouched until the complete authenticated plan is durable.
     storage_io::atomic_write(
         &pending_path()?,
         &serde_json::to_vec(&Pending {
-            target: target.clone(),
-            stage: stage_name,
+            target: journal.target.clone(),
+            stage: stage_name.to_owned(),
         })?,
     )?;
     Ok(())
+}
+
+pub(super) fn prepare_password_change(
+    old: Option<&Manifest>,
+    target: &Manifest,
+    key: &[u8; 32],
+    change: crate::config::key_store::PasswordChange,
+) -> Result<()> {
+    crate::storage::native_transfer::assert_no_pending_recovery()?;
+    let root = super::root()?;
+    // Password rotation cannot reinterpret a live native operation's captured
+    // file identities or stored-byte hashes.
+    crate::vault::move_journal::JournalStore::at_data_root(&root).ensure_mutation_allowed()?;
+    cleanup_orphans(&root)?;
+    let wrapping = change.wrapping()?;
+    // Rotation preserves any managed portable copy even in a plaintext domain.
+    let portable_policy = super::ProtectionPolicy {
+        vault: true,
+        memories: true,
+        ..target.policy
+    };
+    let stage_name = format!(".protection-migration-{:032x}", rand::random::<u128>());
+    let stage = root.join(&stage_name);
+    storage_io::atomic_write(&stage.join("owner"), b"tcui-protection-staging-v1")?;
+    let mut staging = Staging {
+        root: &root,
+        stage: &stage,
+        target: target.policy,
+        key: Some(key),
+        entries: Vec::new(),
+    };
+    let mut legacy_key = None;
+    for (path, domain) in sources(&root, |_| true)? {
+        let original = Zeroizing::new(storage_io::read_regular(&path)?);
+        let protected = old.is_some_and(|old| old.policy.protects(domain));
+        let portable = matches!(
+            super::inspect_bytes(&original)?,
+            super::StoredFormat::Portable { .. }
+        );
+        if !protected && !portable {
+            continue;
+        }
+        let plaintext = Zeroizing::new(
+            plaintext(
+                old,
+                None,
+                domain,
+                &path,
+                &original,
+                Some(key),
+                &mut legacy_key,
+            )
+            .wrap_err_with(|| {
+                format!(
+                    "Cannot rotate {}; original data is preserved",
+                    path.display()
+                )
+            })?,
+        );
+        // Chats use the unchanged application data master and have no portable
+        // password wrapper. Authenticate them, but do not rewrite their bytes.
+        if domain == Domain::Chats {
+            staging.push(domain, &path, &original, &original)?;
+            continue;
+        }
+        let stored = Zeroizing::new(encode_target(
+            portable_policy,
+            domain,
+            &plaintext,
+            Some(key),
+            Some(&wrapping),
+        )?);
+        staging.push(domain, &path, &original, &stored)?;
+    }
+    let retained_root = root.join(".native-transfer-backups");
+    crate::storage::native_transfer::stage_password_rotation(
+        target.policy,
+        |domain, plaintext| {
+            encode_target(
+                portable_policy,
+                domain,
+                plaintext,
+                Some(key),
+                Some(&wrapping),
+            )
+        },
+        |domain, path, original, stored| {
+            if !path.starts_with(&retained_root) {
+                bail!("Native transfer backup rotation escaped its retained-data root.");
+            }
+            staging.push(domain, path, original, stored)
+        },
+    )?;
+    publish_journal(
+        &stage_name,
+        &stage,
+        &Journal {
+            version: VERSION,
+            target: target.clone(),
+            entries: staging.entries,
+            convert_credentials: false,
+            recover_native_after: false,
+            // Derived caches can retain portable wrappers even when the current
+            // Memory policy is plaintext. Rebuild them after every rotation.
+            clear_memory_indexes: true,
+            password_change: Some(change),
+        },
+        Some(key),
+    )
 }
 
 fn encode_target(
@@ -514,18 +636,28 @@ pub(super) fn recover_locked(key: Option<&[u8; 32]>) -> Result<()> {
             bail!("A file changed during protection migration: {}. Both migration copies are retained.", entry.relative.display());
         }
     }
+    if let Some(change) = &journal.password_change {
+        KeyStore::validate_password_change(change)?;
+    }
     for (number, entry) in journal.entries.iter().enumerate() {
         install_entry(&root, &stage, number, entry, key)?;
     }
-    let storage = if pending.target.policy.credentials {
-        CredentialStorage::Encrypted
+    if let Some(change) = &journal.password_change {
+        // The pending marker blocks reads while wrappers and SQLite differ.
+        // This atomic SQLite commit is the old/new password boundary. The
+        // unchanged master authenticates the recovery plan on either side.
+        KeyStore::apply_password_change(change)?;
     } else {
-        CredentialStorage::Plaintext
-    };
-    if journal.convert_credentials {
-        KeyStore::set_storage_preference(&AppConfig::default(), storage)?;
-    } else {
-        KeyStore::set_storage_default(&AppConfig::default(), storage)?;
+        let storage = if pending.target.policy.credentials {
+            CredentialStorage::Encrypted
+        } else {
+            CredentialStorage::Plaintext
+        };
+        if journal.convert_credentials {
+            KeyStore::set_storage_preference(&AppConfig::default(), storage)?;
+        } else {
+            KeyStore::set_storage_default(&AppConfig::default(), storage)?;
+        }
     }
     if journal.clear_memory_indexes {
         clear_derived_memory_indexes()?;

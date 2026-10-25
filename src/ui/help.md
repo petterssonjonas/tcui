@@ -68,24 +68,33 @@ Type any slash command in the message box:
 
 ## Application protection
 
-First interactive launch asks which data to protect. Reopen this screen with
-`/security` or **Settings → Privacy → Application protection**. Credentials,
-chats, memories and the internal vault are independent choices. Unchecked data
-remains plaintext; an entry password alone does not encrypt it. There are no
-external Vault profiles. Existing encrypted credential connections remain
-available alongside explicitly plaintext connections.
+First interactive launch asks which data to protect. The startup screen also
+appears when a shared password or protection is configured. Unlock with the
+existing password, select additional sections, and save without entering that
+password again. Unlock stays on the selection screen; **Continue to app** opens
+the application. Reopen protection through `/security` or **Settings → Privacy →
+Application protection**.
 
+Credentials, chats, memories and the internal vault are independent choices.
+Unchecked data remains plaintext; an entry password alone does not encrypt it.
 Protected chats or an entry password require unlock before application stores
-or chat titles load. Cancelling this startup screen exits. Other protected
-domains stay unavailable until `/unlock`; unprotected parts remain usable.
-The existing credential-vault password is reused, never replaced. Changing
-protection or locking cancels and saves active requests, closes terminals and
-reconstructs the application without its old plaintext caches.
+or chat titles load. Other protected sections can stay locked while you continue
+to unprotected parts. Cancelling an unlock returns to protection options;
+cancelling the startup screen exits.
+
+After unlocking, **Change shared password** sets and confirms a new password
+without changing protection selections or explicit plaintext connections.
+Previously exported copies keep their old password. Changing the password
+rewraps the data master; it does not revoke a data key already copied or extracted.
+There is no forgotten-password recovery.
+
+Changing protection or locking cancels and saves active requests, closes
+terminals and reconstructs the application without its old plaintext caches.
 Inserted documents require discard confirmation before restarting; cancelling
 that confirmation preserves the current session and pending documents.
-If setup is interrupted, use Ctrl+U on the protection screen to unlock and
-recover the saved setup. Cancelling leaves recovery pending for the next launch;
-application data stays unavailable until recovery succeeds.
+If setup or a password change is interrupted, use **Unlock / recover** on the
+protection screen. Recovery can request the new password after the password
+change commits. Application data stays unavailable until recovery succeeds.
 
 Headless content commands require the same session unlock. Supply a password
 line through redirected `--unlock-password-stdin`, never through arguments or
@@ -211,8 +220,9 @@ must first be upgraded on their source instance with its original key metadata.
   plaintext application SQLite database. This choice converts all saved provider
   credentials. Machine passwords and SSH keys always remain encrypted.
   TCUI never loads provider keys from environment files.
-- An encrypted vault prompts for its password at launch. Press `Esc` to continue
-  without unlocking; reopen with `/vault`. Encrypted connections stay unavailable while locked.
+- Startup offers unlock before opening encrypted sections. If entry or chats are
+  protected, unlock is required to continue. Otherwise, you can continue with
+  protected sections locked and unlock them later through `/unlock`.
 - Secret fields are masked. Paste full SSH private keys into the vault's SSH-key
   value field; multiline terminal paste is supported. `Ctrl+U` clears a field.
 - Provider diagnostics are written to `tcui.log` in the app data directory,

@@ -130,6 +130,8 @@ pub enum KeyStoreError {
     VaultAlreadyInitialized,
     #[error("vault password is empty")]
     EmptyPassword,
+    #[error("choose a new password that differs from the current password")]
+    PasswordUnchanged,
     #[error("vault password is incorrect or vault data was modified")]
     VaultAuthentication,
     #[error("legacy credential conflicts with an existing credential")]

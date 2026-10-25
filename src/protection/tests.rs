@@ -7,6 +7,9 @@ use crate::storage::crypto::{decrypt_serialized, encrypt_serialized, SharedKey};
 use crate::storage::paths::TcuiDataPaths;
 use crate::storage::Storage;
 
+#[path = "password_tests.rs"]
+mod password_tests;
+
 struct Environment {
     root: PathBuf,
     previous: Vec<(&'static str, Option<OsString>)>,

@@ -208,7 +208,12 @@ async fn main() -> Result<()> {
     let mut terminal = setup_terminal()?;
     ui::components::terminal_capabilities::initialize_terminal_profile();
     let mut events = EventStream::new();
-    if !protection::configured()? && !protection::ui::configure(&mut terminal, &mut events).await? {
+    let vault_status = config::KeyStore::vault_status(&AppConfig::default())?;
+    let show_protection = !protection::configured()?
+        || vault_status.initialized
+        || protection::policy()?.is_some_and(|policy| policy.any())
+        || protection::startup_requires_unlock()?;
+    if show_protection && !protection::ui::configure(&mut terminal, &mut events).await? {
         return Ok(());
     }
     let mut restart = None;

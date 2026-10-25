@@ -10,7 +10,9 @@ mod filesystem;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use filesystem::{assert_no_pending_recovery, stage_protection_migration};
+pub(crate) use filesystem::{
+    assert_no_pending_recovery, stage_password_rotation, stage_protection_migration,
+};
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -340,6 +342,15 @@ impl NativeTransferService {
     /// Enable this domain while retaining every other selected security option.
     /// The supplied password is the target instance password, not the source's.
     pub(crate) fn enable_protection(domain: Domain, target_password: &str) -> Result<()> {
+        Self::enable_protection_impl(domain, Some(target_password))
+    }
+
+    /// Enables this domain using the authenticated shared vault.
+    pub(crate) fn enable_protection_unlocked(domain: Domain) -> Result<()> {
+        Self::enable_protection_impl(domain, None)
+    }
+
+    fn enable_protection_impl(domain: Domain, target_password: Option<&str>) -> Result<()> {
         require_domain(domain)?;
         let mut policy = protection::policy()?.unwrap_or_default();
         match domain {
@@ -347,7 +358,10 @@ impl NativeTransferService {
             Domain::Memories => policy.memories = true,
             Domain::Chats => return invalid("Chats are not a transfer domain"),
         }
-        protection::configure(policy, target_password)?;
+        match target_password {
+            Some(password) => protection::configure(policy, password)?,
+            None => protection::configure_unlocked(policy)?,
+        }
         Ok(())
     }
 
@@ -356,6 +370,18 @@ impl NativeTransferService {
     pub(crate) fn adopt_native(
         prepared: PreparedTransfer,
         target_password: &str,
+    ) -> Result<TransferReport> {
+        Self::adopt_native_impl(prepared, Some(target_password))
+    }
+
+    /// Adopts copied data with the authenticated shared vault and the same source checks.
+    pub(crate) fn adopt_native_unlocked(prepared: PreparedTransfer) -> Result<TransferReport> {
+        Self::adopt_native_impl(prepared, None)
+    }
+
+    fn adopt_native_impl(
+        prepared: PreparedTransfer,
+        target_password: Option<&str>,
     ) -> Result<TransferReport> {
         if !prepared.same_native_root {
             return invalid("adoption requires the selected native root");
@@ -383,7 +409,10 @@ impl NativeTransferService {
                 return Err(TransferError::Requirements(requirements));
             }
         }
-        protection::adopt_native_store(prepared.domain, target_password)?;
+        match target_password {
+            Some(password) => protection::adopt_native_store(prepared.domain, password)?,
+            None => protection::adopt_native_unlocked(prepared.domain)?,
+        }
         Ok(TransferReport {
             imported: prepared.files.len(),
             paths: prepared

@@ -93,7 +93,69 @@ impl ProtectionWrapping {
     }
 }
 
-type UnlockKeys = HashMap<PathBuf, Zeroizing<[u8; 32]>>;
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PasswordMetadata {
+    salt: Vec<u8>,
+    nonce: Vec<u8>,
+    verifier: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RekeyedRecord {
+    kind: String,
+    id: String,
+    label: String,
+    nonce: Vec<u8>,
+    payload: Vec<u8>,
+}
+
+/// Ciphertext-only SQLite cutover plan, sealed by the protection migration journal.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PasswordChange {
+    previous: PasswordMetadata,
+    replacement: PasswordMetadata,
+    original_records: [u8; 32],
+    replacement_records: [u8; 32],
+    records: Vec<RekeyedRecord>,
+}
+
+impl PasswordChange {
+    pub(crate) fn wrapping(&self) -> Result<ProtectionWrapping> {
+        let master = self
+            .records
+            .iter()
+            .find(|record| record.kind == "app_data_key" && record.id == "master")
+            .ok_or(KeyStoreError::InvalidCredentialPayload)?;
+        Ok(ProtectionWrapping {
+            salt: self
+                .replacement
+                .salt
+                .as_slice()
+                .try_into()
+                .map_err(|_| KeyStoreError::VaultAuthentication)?,
+            nonce: master
+                .nonce
+                .as_slice()
+                .try_into()
+                .map_err(|_| KeyStoreError::VaultAuthentication)?,
+            ciphertext: master
+                .payload
+                .as_slice()
+                .try_into()
+                .map_err(|_| KeyStoreError::VaultAuthentication)?,
+        })
+    }
+}
+
+pub(super) struct UnlockedKey {
+    key: Zeroizing<[u8; 32]>,
+    salt: [u8; 16],
+}
+
+type UnlockKeys = HashMap<PathBuf, UnlockedKey>;
 pub(super) fn session() -> Result<MutexGuard<'static, UnlockKeys>> {
     static KEYS: LazyLock<Mutex<UnlockKeys>> = LazyLock::new(|| Mutex::new(HashMap::new()));
     KEYS.lock().map_err(|_| KeyStoreError::KeyAccess)
@@ -282,7 +344,7 @@ impl Vault {
 
     pub fn require_key<'a>(&self, keys: &'a UnlockKeys) -> Result<&'a [u8; 32]> {
         keys.get(&self.path)
-            .map(|key| &**key)
+            .map(|key| &*key.key)
             .ok_or(KeyStoreError::VaultLocked)
     }
 
@@ -338,7 +400,7 @@ impl Vault {
         if changed != 1 {
             return Err(KeyStoreError::VaultAlreadyInitialized);
         }
-        keys.insert(self.path.clone(), key);
+        keys.insert(self.path.clone(), UnlockedKey { key, salt });
         Ok(())
     }
 
@@ -372,12 +434,188 @@ impl Vault {
         if plaintext.as_slice() != b"tcui-credentials" {
             return Err(KeyStoreError::VaultAuthentication);
         }
-        keys.insert(self.path.clone(), key);
+        keys.insert(
+            self.path.clone(),
+            UnlockedKey {
+                key,
+                salt: salt
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| KeyStoreError::VaultAuthentication)?,
+            },
+        );
         Ok(())
     }
 
     pub fn lock(&self, keys: &mut UnlockKeys) {
         keys.remove(&self.path);
+    }
+
+    fn password_metadata(&self) -> Result<PasswordMetadata> {
+        self.conn
+            .query_row(
+                "SELECT salt,verifier_nonce,verifier FROM tcui_credential_vault WHERE singleton=1",
+                [],
+                |row| {
+                    Ok(PasswordMetadata {
+                        salt: row.get(0)?,
+                        nonce: row.get(1)?,
+                        verifier: row.get(2)?,
+                    })
+                },
+            )
+            .map_err(|_| KeyStoreError::Read)
+    }
+
+    fn authenticate_password_metadata(
+        &self,
+        metadata: &PasswordMetadata,
+        keys: &UnlockKeys,
+    ) -> Result<()> {
+        let unlocked = keys.get(&self.path).ok_or(KeyStoreError::VaultLocked)?;
+        if metadata.salt.as_slice() != unlocked.salt.as_slice() {
+            return Err(KeyStoreError::VaultAuthentication);
+        }
+        let verifier = decrypt(
+            &unlocked.key,
+            b"tcui-credentials:v1:verifier",
+            &metadata.nonce,
+            &metadata.verifier,
+        )?;
+        if verifier.as_slice() != b"tcui-credentials" {
+            return Err(KeyStoreError::VaultAuthentication);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn authenticate_unlocked(&self, keys: &UnlockKeys) -> Result<()> {
+        self.authenticate_password_metadata(&self.password_metadata()?, keys)
+    }
+
+    pub(crate) fn prepare_password_change(
+        &self,
+        password: &str,
+        keys: &UnlockKeys,
+    ) -> Result<PasswordChange> {
+        self.require_key(keys)?;
+        if password.is_empty() || password.len() > 4096 {
+            return Err(KeyStoreError::InvalidCredentialPayload);
+        }
+        self.transaction(|| {
+            let previous = self.password_metadata()?;
+            self.authenticate_password_metadata(&previous, keys)?;
+            let candidate = derive_key(password, &previous.salt)?;
+            if decrypt(
+                &candidate,
+                b"tcui-credentials:v1:verifier",
+                &previous.nonce,
+                &previous.verifier,
+            )
+            .is_ok()
+            {
+                return Err(KeyStoreError::PasswordUnchanged);
+            }
+            let salt = rand::random::<[u8; 16]>();
+            let key = derive_key(password, &salt)?;
+            let (nonce, verifier) =
+                encrypt(&key, b"tcui-credentials:v1:verifier", b"tcui-credentials")?;
+            let replacement = PasswordMetadata {
+                salt: salt.to_vec(),
+                nonce,
+                verifier,
+            };
+            let mut records = self.records()?;
+            let original_records = records_hash(&records)?;
+            for record in &mut records {
+                if record.storage == CredentialStorage::Plaintext {
+                    validate_plaintext_record(record)?;
+                    continue;
+                }
+                let plaintext = self.decode(record, keys)?;
+                let (nonce, payload) = encrypt(
+                    &key,
+                    &metadata(&record.kind, &record.id, &record.label)?,
+                    &plaintext,
+                )?;
+                record.nonce = nonce;
+                record.payload = Zeroizing::new(payload);
+            }
+            let replacement_records = records_hash(&records)?;
+            let replacements = records
+                .into_iter()
+                .filter(|record| record.storage == CredentialStorage::Encrypted)
+                .map(|mut record| RekeyedRecord {
+                    kind: record.kind,
+                    id: record.id,
+                    label: record.label,
+                    nonce: record.nonce,
+                    payload: std::mem::take(&mut *record.payload),
+                })
+                .collect();
+            let change = PasswordChange {
+                previous,
+                replacement,
+                original_records,
+                replacement_records,
+                records: replacements,
+            };
+            change.wrapping()?;
+            Ok(change)
+        })
+    }
+
+    /// SQLite publishes every encrypted row and its verifier in one transaction.
+    /// An old-key recovery must authenticate again with the new password afterwards.
+    pub(crate) fn apply_password_change(
+        &self,
+        change: &PasswordChange,
+        keys: &mut UnlockKeys,
+        apply: bool,
+    ) -> Result<()> {
+        self.require_key(keys)?;
+        let changed = self.transaction(|| {
+            let metadata = self.password_metadata()?;
+            self.authenticate_password_metadata(&metadata, keys)?;
+            let records = self.records()?;
+            let current_hash = records_hash(&records)?;
+            let already_applied = metadata == change.replacement;
+            if (!already_applied && metadata != change.previous)
+                || current_hash != if already_applied { change.replacement_records } else { change.original_records }
+            {
+                return Err(KeyStoreError::VaultAuthentication);
+            }
+            for record in &records {
+                if record.storage == CredentialStorage::Plaintext {
+                    validate_plaintext_record(record)?;
+                } else {
+                    self.decode(record, keys)?;
+                }
+            }
+            if already_applied || !apply {
+                return Ok(false);
+            }
+            for record in &change.records {
+                let changed = self.conn.execute(
+                    "UPDATE tcui_credentials SET nonce=?1,payload=?2 WHERE kind=?3 AND id=?4 AND label=?5 AND encrypted=1",
+                    params![record.nonce, record.payload, record.kind, record.id, record.label],
+                ).map_err(|_| KeyStoreError::Write)?;
+                if changed != 1 {
+                    return Err(KeyStoreError::VaultAuthentication);
+                }
+            }
+            if records_hash(&self.records()?)? != change.replacement_records {
+                return Err(KeyStoreError::VaultAuthentication);
+            }
+            self.conn.execute(
+                "UPDATE tcui_credential_vault SET salt=?1,verifier_nonce=?2,verifier=?3 WHERE singleton=1",
+                params![change.replacement.salt, change.replacement.nonce, change.replacement.verifier],
+            ).map_err(|_| KeyStoreError::Write)?;
+            Ok(true)
+        })?;
+        if changed {
+            self.lock(keys);
+        }
+        Ok(())
     }
 
     pub fn transaction<T>(&self, action: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -549,6 +787,32 @@ impl Vault {
             .map(|count| count != 0)
             .map_err(|_| KeyStoreError::Write)
     }
+}
+
+fn validate_plaintext_record(record: &Record) -> Result<()> {
+    if is_machine_kind(&record.kind) || !record.nonce.is_empty() {
+        return Err(KeyStoreError::VaultAuthentication);
+    }
+    Ok(())
+}
+
+fn records_hash(records: &[Record]) -> Result<[u8; 32]> {
+    let mut hash = blake3::Hasher::new();
+    for record in records {
+        let bytes = Zeroizing::new(
+            serde_json::to_vec(&(
+                &record.kind,
+                &record.id,
+                &record.label,
+                record.storage,
+                &record.nonce,
+                record.payload.as_slice(),
+            ))
+            .map_err(|_| KeyStoreError::Serialize)?,
+        );
+        hash.update(blake3::hash(&bytes).as_bytes());
+    }
+    Ok(*hash.finalize().as_bytes())
 }
 
 fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Record> {

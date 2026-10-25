@@ -254,9 +254,8 @@ pub(crate) fn unlock(password: &str) -> Result<()> {
         {
             bail!("The password vault is missing; restore its database instead of creating a replacement.");
         }
-        if let Some(manifest) = manifest.filter(|manifest| manifest.authentication.is_some()) {
-            let key = KeyStore::protection_key(false)?;
-            manifest.authenticate(&key)?;
+        if status.initialized {
+            let key = unlocked_key(manifest.as_ref())?;
             SESSIONS
                 .lock()
                 .map_err(|_| eyre!("Protection session lock is unavailable."))?
@@ -265,11 +264,14 @@ pub(crate) fn unlock(password: &str) -> Result<()> {
                     Session {
                         key,
                         wrapping: KeyStore::protection_wrapping()?,
-                        manifest: Some(manifest),
+                        manifest,
                     },
                 );
         }
         migration::recover()?;
+        if status.initialized && !KeyStore::vault_status(&config)?.unlocked {
+            return Err(PasswordRotationUnlockNeeded.into());
+        }
         upgrade_local_format()
     })();
     if result.is_err() {
@@ -295,7 +297,76 @@ fn lock_local() -> Result<()> {
 }
 
 pub(crate) fn configure(target: ProtectionPolicy, password: &str) -> Result<()> {
-    configure_impl(target, password, None)
+    configure_impl(target, Some(password), None)
+}
+
+/// Applies policy changes using the authenticated shared vault, without retaining its password.
+pub(crate) fn configure_unlocked(target: ProtectionPolicy) -> Result<()> {
+    configure_impl(target, None, None)
+}
+
+/// Recovery completed a password change authenticated with the previous password.
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("Password rotation was recovered. Unlock with the new password to continue.")]
+pub(crate) struct PasswordRotationUnlockNeeded;
+
+fn unlocked_key(manifest: Option<&Manifest>) -> Result<Zeroizing<[u8; 32]>> {
+    let status = KeyStore::vault_status(&AppConfig::default())?;
+    if !status.initialized || !status.unlocked {
+        bail!("Unlock the existing shared password before changing protection.");
+    }
+    let authenticated = manifest.is_some_and(|manifest| manifest.authentication.is_some());
+    let key = KeyStore::protection_key(!authenticated)?;
+    if let Some(manifest) = manifest.filter(|_| authenticated) {
+        manifest.authenticate(&key)?;
+    }
+    Ok(key)
+}
+
+/// Rotates the password wrapping and encrypted credential rows, not the data master.
+/// Previously exported masters cannot be revoked by a password change.
+pub(crate) fn change_password(new_password: &str) -> Result<()> {
+    if new_password.is_empty() || new_password.len() > 4096 {
+        bail!("Choose a nonempty password of at most 4096 UTF-8 bytes.");
+    }
+    let migration_lock = io::migration_lock()?;
+    crate::storage::native_transfer::assert_no_pending_recovery()?;
+    if migration::pending()?.is_some() {
+        bail!("Recover the interrupted protection migration before changing the password.");
+    }
+    let old = load_manifest()?;
+    let key = unlocked_key(old.as_ref())?;
+    let target = Manifest::new(
+        old.as_ref()
+            .map_or_else(ProtectionPolicy::default, |old| old.policy),
+        Some(&key),
+    )?;
+    SESSIONS
+        .lock()
+        .map_err(|_| eyre!("Protection session lock is unavailable."))?
+        .insert(
+            root()?,
+            Session {
+                key: Zeroizing::new(*key),
+                wrapping: KeyStore::protection_wrapping()?,
+                manifest: old.clone(),
+            },
+        );
+    let change = KeyStore::prepare_password_change(new_password)?;
+    migration::prepare_password_change(old.as_ref(), &target, &key, change)?;
+    if let Some(session) = SESSIONS
+        .lock()
+        .map_err(|_| eyre!("Protection session lock is unavailable."))?
+        .get_mut(&root()?)
+    {
+        session.manifest = Some(target);
+    }
+    let result = migration::recover_locked(Some(&key));
+    // A partial cutover must not leave an old in-memory credential key usable.
+    lock()?;
+    drop(migration_lock);
+    result?;
+    unlock(new_password)
 }
 
 /// Preflights copied encrypted native data before first setup or policy changes.
@@ -324,12 +395,21 @@ pub(crate) fn adopt_native_store(domain: Domain, password: &str) -> Result<()> {
     if domain == Domain::Chats {
         bail!("Native portable adoption is for Vault and Memories only.");
     }
-    configure_impl(ProtectionPolicy::default(), password, Some(domain))
+    configure_impl(ProtectionPolicy::default(), Some(password), Some(domain))
+}
+
+/// Adopts authenticated copied native data without requesting the shared password again.
+pub(crate) fn adopt_native_unlocked(domain: Domain) -> Result<()> {
+    require_app()?;
+    if domain == Domain::Chats {
+        bail!("Native portable adoption is for Vault and Memories only.");
+    }
+    configure_impl(ProtectionPolicy::default(), None, Some(domain))
 }
 
 fn configure_impl(
     mut target: ProtectionPolicy,
-    password: &str,
+    password: Option<&str>,
     adoption: Option<Domain>,
 ) -> Result<()> {
     let _lock = io::migration_lock()?;
@@ -358,26 +438,26 @@ fn configure_impl(
     }
     let config = AppConfig::default();
     let status = KeyStore::vault_status(&config)?;
+    if password.is_none() && (!status.initialized || !status.unlocked) {
+        bail!("Unlock the existing shared password before changing protection.");
+    }
     if old.as_ref().is_some_and(|old| old.authentication.is_some()) && !status.initialized {
         bail!("The password vault is missing; restore its database before changing protection.");
     }
     let needs_key = target.any() || old.as_ref().is_some_and(|old| old.authentication.is_some());
     let key = if needs_key || status.initialized {
-        if password.is_empty() {
-            bail!("Enter the existing password, or choose a password for the protected stores.");
+        if let Some(password) = password {
+            if password.is_empty() || password.len() > 4096 {
+                bail!("Enter a nonempty password of at most 4096 UTF-8 bytes.");
+            }
+            lock_local()?;
+            if status.initialized {
+                KeyStore::unlock_vault(&config, password)?;
+            } else {
+                KeyStore::initialize_vault(&config, password)?;
+            }
         }
-        lock_local()?;
-        if status.initialized {
-            KeyStore::unlock_vault(&config, password)?;
-        } else {
-            KeyStore::initialize_vault(&config, password)?;
-        }
-        let key = KeyStore::protection_key(
-            old.is_none() || !old.as_ref().is_some_and(|m| m.authentication.is_some()),
-        )?;
-        if let Some(old) = old.as_ref().filter(|old| old.authentication.is_some()) {
-            old.authenticate(&key)?;
-        }
+        let key = unlocked_key(old.as_ref())?;
         Some(key)
     } else {
         None
@@ -399,9 +479,11 @@ fn configure_impl(
         preflight_configure_domains(old.as_ref())?;
     }
     if adoption.is_none()
-        && old
-            .as_ref()
-            .is_some_and(|old| old.policy == target && old.version == VERSION)
+        && old.as_ref().is_some_and(|old| {
+            old.policy == target
+                && old.version == VERSION
+                && old.authentication.is_some() == key.is_some()
+        })
     {
         let storage = if target.credentials {
             crate::config::key_store::CredentialStorage::Encrypted

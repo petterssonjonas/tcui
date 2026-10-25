@@ -646,9 +646,91 @@ fn security_transition_encrypts_retained_backup_and_rewrites_recovery_hashes_ato
 }
 
 #[test]
+fn password_rotation_rewraps_retained_native_history_and_preserves_restore_metadata() {
+    let environment = Environment::new();
+    environment.vault_protected("old history password");
+    let store = vault_store().unwrap();
+    let original = store
+        .create_item("old.bin", b"historical body", Some(31))
+        .unwrap();
+    let source = environment.source("replacement.bin", b"replacement");
+    let backup = NativeTransferService::prepare(Domain::Vault, &source, TransferMode::Replace)
+        .unwrap()
+        .commit()
+        .unwrap()
+        .backup
+        .unwrap();
+    protection::change_password("new history password").unwrap();
+    for relative in ["root/old.bin", "auxiliary", "recovery.json"] {
+        let stored = std::fs::read(backup.join(relative)).unwrap();
+        assert!(
+            protection::unlock_foreign_file(Domain::Vault, &stored, "old history password")
+                .is_err()
+        );
+        protection::unlock_foreign_file(Domain::Vault, &stored, "new history password").unwrap();
+    }
+    let descriptor: serde_json::Value = serde_json::from_slice(
+        &protection::read(Domain::Vault, &backup.join("recovery.json")).unwrap(),
+    )
+    .unwrap();
+    let body = std::fs::read(backup.join("root/old.bin")).unwrap();
+    assert_eq!(
+        descriptor["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["path"] == "root/old.bin")
+            .unwrap()["hash"],
+        serde_json::to_value(hash(&body)).unwrap()
+    );
+    protection::lock().unwrap();
+    assert!(protection::unlock("old history password").is_err());
+    protection::unlock("new history password").unwrap();
+    NativeTransferService::restore_backup(Domain::Vault, &backup).unwrap();
+    assert_eq!(store.read_item(original.id).unwrap(), b"historical body");
+    assert_eq!(
+        store.list_items().unwrap()[0].chat_links,
+        original.chat_links
+    );
+}
+
+#[test]
+fn password_rotation_keeps_plaintext_retained_history_byte_identical_and_restorable() {
+    let environment = Environment::new();
+    environment.plain();
+    let store = vault_store().unwrap();
+    let original = store
+        .create_item("old.bin", b"plaintext history", Some(47))
+        .unwrap();
+    let source = environment.source("replacement.bin", b"replacement");
+    let backup = NativeTransferService::prepare(Domain::Vault, &source, TransferMode::Replace)
+        .unwrap()
+        .commit()
+        .unwrap()
+        .backup
+        .unwrap();
+    let originals: Vec<_> = ["root/old.bin", "auxiliary", "recovery.json"]
+        .into_iter()
+        .map(|relative| (relative, std::fs::read(backup.join(relative)).unwrap()))
+        .collect();
+    protection::initialize_password("old plaintext history password").unwrap();
+    protection::change_password("new plaintext history password").unwrap();
+    for (relative, original) in originals {
+        assert_eq!(std::fs::read(backup.join(relative)).unwrap(), original);
+    }
+    NativeTransferService::restore_backup(Domain::Vault, &backup).unwrap();
+    assert_eq!(store.read_item(original.id).unwrap(), b"plaintext history");
+    assert_eq!(
+        store.list_items().unwrap()[0].chat_links,
+        original.chat_links
+    );
+}
+
+#[test]
 fn pending_native_replacement_refuses_policy_change_before_any_source_or_key_change() {
     let environment = Environment::new();
     environment.plain();
+    protection::initialize_password("new password").unwrap();
     let store = vault_store().unwrap();
     let item = store
         .create_item("unchanged.bin", b"unchanged", None)
@@ -657,6 +739,7 @@ fn pending_native_replacement_refuses_policy_change_before_any_source_or_key_cha
         let _exclusive = filesystem::exclusive().unwrap();
         filesystem::snapshot(Domain::Vault).unwrap();
     }
+    assert!(protection::change_password("replacement password").is_err());
     assert!(protection::configure(
         ProtectionPolicy {
             vault: true,
@@ -687,6 +770,7 @@ fn trash_only_adoption_lists_every_source_wrapper_and_keeps_trash_out_of_add() {
     );
     environment.select("trash-only-target");
     environment.plain();
+    protection::initialize_password("target password").unwrap();
     let native = native_root(Domain::Vault).unwrap();
     protection::write_new_plain(&native.join(".Trash/first.bin"), &first).unwrap();
     protection::write_new_plain(&native.join(".Trash/second.bin"), &second).unwrap();
@@ -716,7 +800,7 @@ fn trash_only_adoption_lists_every_source_wrapper_and_keeps_trash_out_of_add() {
     preview.unlock_source("second source password").unwrap();
     let preview =
         NativeTransferService::prepare(Domain::Vault, &native, TransferMode::Add).unwrap();
-    NativeTransferService::adopt_native(preview, "target password").unwrap();
+    NativeTransferService::adopt_native_unlocked(preview).unwrap();
     protection::lock().unwrap();
     protection::unlock("target password").unwrap();
     assert_eq!(

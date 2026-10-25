@@ -12,24 +12,35 @@ cargo run
 
 ## App protection
 
-On first launch, `/security` lets you independently select an app-entry password,
-credentials, chats, Memories, and the built-in Vault for protection. Reopen
-`/security` later to change the selection. One shared password unlocks selected
-domains with `/unlock`; `/lock` stops tracked work, persists state, and clears
-the app session. Running terminals, unsaved editors, and pending drafts require
-discard confirmation for a voluntary transition; cancelling preserves them.
-Forced revocation fails closed.
+On first launch, choose protection independently for an app-entry password,
+credentials, chats, Memories, and the built-in Vault. When a shared password or
+protection is already configured, the startup screen lets you unlock it before
+opening the app. Unlock stays on the selection screen. Select additional data
+types and save without entering the existing password again, then continue to
+the app.
 
-Protected chats or an app-entry password require a startup unlock before config
-and stores open; cancelling exits. With only optional domains protected, cancelling
-unlock leaves those domains locked and the other app surfaces usable. App-entry
-protection alone does not encrypt unchecked stores.
+Reopen this screen through `/security` or **Settings → Privacy → Application
+protection**. Protected chats or an app-entry password require authentication
+before config and stores open. With only optional sections protected, you can
+continue with those sections locked. Cancelling an unlock returns to protection
+options; cancelling the startup screen exits. Unchecked stores remain plaintext.
+
+Choose **Change shared password** after unlocking to set and confirm a new
+password. This preserves protection selections and explicit plaintext
+connections. `/lock` stops tracked work, persists state, and clears the app
+session. Running terminals, unsaved editors, and pending drafts require discard
+confirmation for a voluntary transition; cancelling preserves them. Forced
+revocation fails closed.
 
 Protection uses a random master secret wrapped by the password-based credential
-store, with domain-separated authenticated encryption. There is no password
-recovery or rotation feature. Configuration, profile names, paths, filenames,
+store, with domain-separated authenticated encryption. Password changes update
+encrypted credential rows and managed portable file wrappers, including retained
+backups. Interrupted changes require recovery before app data can reopen. There
+is no forgotten-password recovery. The data master is not rotated: previously
+exported copies keep their old password, and an extracted data key cannot be
+revoked by changing the password. Configuration, profile names, paths, filenames,
 and logs are not encrypted by these switches. External originals and user-kept
-archives or backups may remain readable; TCUI does not silently rewrite or delete them.
+archives or backups are not silently rewritten or deleted.
 Copies into chats, exports, or provider requests follow the destination's privacy
 rules, not the source's. Locking cannot recall provider-sent data or protect
 against the OS account, root, swap, snapshots, or forensic recovery of deleted bytes.
