@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use crate::config::{McpServerConfig, WebSearchConfig};
 
-mod persistence;
+pub(crate) mod persistence;
 
 pub(crate) use persistence::atomic_replace_in as replace_private_file;
 #[cfg(test)]

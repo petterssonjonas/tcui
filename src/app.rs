@@ -76,7 +76,6 @@ pub struct TuiApp {
     pub ui: crate::ui::UI,
     pub action_tx: tokio::sync::mpsc::UnboundedSender<Action>,
     pub action_rx: tokio::sync::mpsc::UnboundedReceiver<Action>,
-    pub system_prompt: String,
     pub ctrl_c_count: u32,
     pub last_ctrl_c: Option<std::time::Instant>,
     pub(crate) cancel_escape: Option<(submission::SubmissionId, std::time::Instant)>,
@@ -122,7 +121,6 @@ impl TuiApp {
         );
         let orphan_cleanup_error = chat_files.cleanup_orphans().err();
         let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
-        let system_prompt = Self::load_system_prompt();
         crate::theme::set_active_theme(&config_snapshot.theme);
 
         ui.user_alignment = config_snapshot.user_alignment;
@@ -207,7 +205,6 @@ impl TuiApp {
             ui,
             action_tx,
             action_rx,
-            system_prompt,
             ctrl_c_count: 0,
             last_ctrl_c: None,
             cancel_escape: None,
@@ -375,9 +372,16 @@ impl TuiApp {
         Ok(())
     }
 
-    pub(crate) fn load_system_prompt() -> String {
-        std::fs::read_to_string("assets/TCUI.md")
-            .unwrap_or_else(|_| include_str!("../assets/TCUI.md").to_owned())
+    pub(crate) fn load_system_prompt() -> color_eyre::Result<String> {
+        use color_eyre::eyre::WrapErr;
+        let system = match std::fs::read_to_string("assets/SYSTEM_PROMPT.md") {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                include_str!("../assets/SYSTEM_PROMPT.md").to_owned()
+            }
+            Err(error) => return Err(error).wrap_err("Cannot read assets/SYSTEM_PROMPT.md"),
+        };
+        crate::config::prompts::compose(&system)
     }
 
     pub(crate) fn refresh_visible_selectors(&mut self) {

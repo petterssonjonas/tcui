@@ -1,7 +1,10 @@
 use super::{get_value, value_text, Value, ValueKind, WorkspaceSetting};
 
 pub(super) fn multiline(setting: &WorkspaceSetting) -> bool {
-    matches!(setting.kind, ValueKind::Lines | ValueKind::Structured)
+    matches!(
+        setting.kind,
+        ValueKind::Lines | ValueKind::Structured | ValueKind::Prompt(_)
+    )
 }
 
 fn escape(text: &str) -> String {

@@ -3,7 +3,7 @@ use crossterm::event::{KeyEvent, MouseEvent};
 
 use super::{Action, TuiApp};
 use crate::{
-    config::AppConfig,
+    config::{prompts::PromptLayer, AppConfig},
     ui::settings_workspace::{validate_edit, SettingsIntent},
 };
 
@@ -101,6 +101,9 @@ impl TuiApp {
                 } else {
                     self.ui.settings_workspace.load(&config);
                 }
+                if self.ui.settings_workspace.prompt_read_error().is_some() {
+                    return Ok(());
+                }
                 self.ui.settings_workspace.feedback = "Saved all current settings.".into();
                 self.ui.settings_workspace.has_error = false;
                 self.ui.show_toast("Settings saved".into());
@@ -108,7 +111,7 @@ impl TuiApp {
             }
             Err(error) => {
                 self.ui.settings_workspace.fail(format!(
-                    "Not saved: {error}. Draft retained; Ctrl+S retries, Esc cancels."
+                    "Not saved: {error:#}. Draft retained; Ctrl+S retries, Esc cancels."
                 ));
                 Err(error)
             }
@@ -122,6 +125,15 @@ impl TuiApp {
             .config
             .try_write()
             .map_err(|_| eyre!("Configuration is busy; retry this change"))?;
+        if let Some(layer) = PromptLayer::from_id(id) {
+            let original = self
+                .ui
+                .settings_workspace
+                .prompt_original(id)
+                .map_err(|error| eyre!(error))?;
+            layer.save(value, original)?;
+            return Ok(live.clone());
+        }
         let serialized = serde_json::to_value(&*live)?;
         let candidate = validate_edit(&serialized, id, value).map_err(|error| eyre!(error))?;
         if id == "default_model" && !candidate.default_model.is_empty() {
@@ -214,7 +226,7 @@ impl TuiApp {
             }
             Err(error) => {
                 self.ui.settings_workspace.fail(format!(
-                    "Not applied: {error}. Draft retained; Enter retries, Esc cancels."
+                    "Not applied: {error:#}. Draft retained; Enter retries, Esc cancels."
                 ));
                 // The dedicated page owns the error, rather than closing the page or losing a draft.
                 self.ui.show_toast(format!("Setting not saved: {error}"));
@@ -260,6 +272,207 @@ impl TuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn prompt_draft(app: &mut TuiApp) -> (String, String) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        match app.settings_workspace_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)) {
+            Some(Action::SaveSettings { draft: Some(draft) }) => draft,
+            _ => panic!("expected an editable settings draft"),
+        }
+    }
+
+    fn write_prompt(layer: PromptLayer, text: &str) {
+        let original = layer.load_original().unwrap();
+        layer.save(text, original.as_deref()).unwrap();
+    }
+
+    #[test]
+    fn stale_prompt_drafts_preserve_external_changes_until_reopened() {
+        for (original, external) in [
+            (None, Some("")),
+            (Some(""), None),
+            (Some("original"), Some("external edit")),
+        ] {
+            crate::app::tests::with_test_app("settings-prompt-conflict", |app| {
+                use crossterm::event::{KeyCode, KeyModifiers};
+                let runtime = tokio::runtime::Runtime::new().unwrap();
+                let layer = PromptLayer::Soul;
+                if let Some(text) = original {
+                    write_prompt(layer, text);
+                }
+                app.open_settings_page(Some(layer.filename()));
+                app.settings_workspace_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                app.settings_workspace_key(KeyEvent::new(
+                    KeyCode::Char('u'),
+                    KeyModifiers::CONTROL,
+                ));
+                app.ui.settings_workspace.paste("retained local draft");
+                let draft = prompt_draft(app);
+                let path = dirs::config_dir()
+                    .unwrap()
+                    .join("tcui")
+                    .join(layer.filename());
+                if let Some(text) = external {
+                    std::fs::write(&path, text).unwrap();
+                } else {
+                    std::fs::remove_file(&path).unwrap();
+                }
+                assert!(runtime
+                    .block_on(app.save_settings(Some(draft.clone())))
+                    .is_err());
+                assert_eq!(layer.load_original().unwrap().as_deref(), external);
+                assert_eq!(prompt_draft(app), draft);
+                app.open_settings_page(None);
+                assert!(runtime
+                    .block_on(app.save_settings(Some(draft.clone())))
+                    .is_err());
+                assert_eq!(layer.load_original().unwrap().as_deref(), external);
+                assert_eq!(prompt_draft(app), draft);
+
+                app.settings_workspace_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+                app.settings_workspace_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                assert_eq!(
+                    prompt_draft(app).1,
+                    external.unwrap_or(layer.default_text())
+                );
+                app.settings_workspace_key(KeyEvent::new(
+                    KeyCode::Char('u'),
+                    KeyModifiers::CONTROL,
+                ));
+                app.ui.settings_workspace.paste("resolved local draft");
+                let draft = prompt_draft(app);
+                runtime.block_on(app.save_settings(Some(draft))).unwrap();
+                assert_eq!(layer.load().unwrap(), "resolved local draft");
+            });
+        }
+    }
+
+    #[test]
+    fn prompt_settings_save_reopen_and_apply_empty_without_normalization() {
+        crate::app::tests::with_test_app("settings-prompt-round-trip", |app| {
+            use crossterm::event::{KeyCode, KeyModifiers};
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            for layer in PromptLayer::ALL {
+                app.open_settings_page(Some(layer.filename()));
+                app.settings_workspace_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                assert_eq!(prompt_draft(app).1, layer.default_text());
+                app.settings_workspace_key(KeyEvent::new(
+                    KeyCode::Char('u'),
+                    KeyModifiers::CONTROL,
+                ));
+                let text = "  first line\n\n\tsecond line  \r\n";
+                app.ui.settings_workspace.paste(text);
+                let draft = prompt_draft(app);
+                assert_eq!(draft.1, text);
+                runtime.block_on(app.save_settings(Some(draft))).unwrap();
+                assert_eq!(layer.load().unwrap(), text);
+                app.open_settings_page(Some(layer.filename()));
+                app.settings_workspace_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                assert_eq!(prompt_draft(app).1, text);
+                app.settings_workspace_key(KeyEvent::new(
+                    KeyCode::Char('u'),
+                    KeyModifiers::CONTROL,
+                ));
+                let Some(Action::ApplySetting { id, value }) = app
+                    .settings_workspace_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))
+                else {
+                    panic!("expected apply");
+                };
+                assert!(value.is_empty());
+                runtime
+                    .block_on(app.apply_settings_value(&id, &value))
+                    .unwrap();
+                assert_eq!(layer.load().unwrap(), "");
+                app.open_settings_page(Some(layer.filename()));
+                app.settings_workspace_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                assert_eq!(prompt_draft(app).1, "");
+                app.settings_workspace_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            }
+        });
+    }
+
+    #[test]
+    fn prompt_draft_survives_failed_atomic_save_and_settings_reload() {
+        crate::app::tests::with_test_app("settings-prompt-save-failure", |app| {
+            use crate::config::app_config::{inject_private_file_failure, TestFailurePoint};
+            use crossterm::event::{KeyCode, KeyModifiers};
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            for point in [
+                TestFailurePoint::Sync,
+                TestFailurePoint::Rename,
+                TestFailurePoint::ParentSync,
+            ] {
+                write_prompt(PromptLayer::Soul, "saved persona");
+                app.open_settings_page(Some("SOUL.md"));
+                app.settings_workspace_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                app.settings_workspace_key(KeyEvent::new(
+                    KeyCode::Char('u'),
+                    KeyModifiers::CONTROL,
+                ));
+                app.ui.settings_workspace.paste("  retained draft\n\n");
+                let draft = prompt_draft(app);
+                inject_private_file_failure(point);
+                assert!(runtime
+                    .block_on(app.save_settings(Some(draft.clone())))
+                    .is_err());
+                assert!(app.ui.settings_workspace.has_error);
+                assert_eq!(PromptLayer::Soul.load().unwrap(), "saved persona");
+                app.open_settings_page(None);
+                assert_eq!(prompt_draft(app), draft);
+                runtime.block_on(app.save_settings(Some(draft))).unwrap();
+                assert_eq!(PromptLayer::Soul.load().unwrap(), "  retained draft\n\n");
+            }
+        });
+    }
+
+    #[test]
+    fn saving_other_settings_never_rewrites_external_prompt_edits() {
+        crate::app::tests::with_test_app("settings-prompt-live-files", |app| {
+            use crossterm::event::{KeyCode, KeyModifiers};
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            write_prompt(PromptLayer::Agent, "original preferences");
+            app.open_settings_page(None);
+            write_prompt(PromptLayer::Agent, "external preferences\n");
+            runtime.block_on(app.save_settings(None)).unwrap();
+            assert_eq!(PromptLayer::Agent.load().unwrap(), "external preferences\n");
+            app.persist_setting("collapse_thinking", "false").unwrap();
+            write_prompt(PromptLayer::Agent, "newer external preferences\n");
+            app.ui.settings_workspace.select_id("AGENTS.md");
+            app.settings_workspace_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            assert_eq!(prompt_draft(app).1, "newer external preferences\n");
+        });
+    }
+
+    #[test]
+    fn prompt_read_failure_blocks_edit_and_submission_without_discarding_input() {
+        crate::app::tests::with_test_app("settings-prompt-read-failure", |app| {
+            use crossterm::event::{KeyCode, KeyModifiers};
+            let path = dirs::config_dir().unwrap().join("tcui").join("SOUL.md");
+            std::fs::create_dir_all(&path).unwrap();
+            app.open_settings_page(Some("SOUL.md"));
+            assert!(app.ui.settings_workspace.has_error);
+            app.settings_workspace_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            assert!(app.ui.settings_workspace.has_error);
+            assert!(matches!(
+                app.settings_workspace_key(KeyEvent::new(
+                    KeyCode::Char('s'),
+                    KeyModifiers::CONTROL
+                )),
+                Some(Action::SaveSettings { draft: None })
+            ));
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            assert!(runtime
+                .block_on(app.send_message("preserved input\n".into()))
+                .is_err());
+            assert_eq!(
+                app.ui.tabs[app.ui.active_tab].input_content,
+                "preserved input\n"
+            );
+            assert!(app.requests.is_empty());
+            assert!(app.ui.tabs[app.ui.active_tab].messages.is_empty());
+            assert!(path.is_dir());
+        });
+    }
 
     #[test]
     fn retained_provider_drafts_validate_against_live_config_on_enter_and_save() {

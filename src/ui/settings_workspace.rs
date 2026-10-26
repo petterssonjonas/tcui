@@ -15,7 +15,7 @@ use ratatui::{
 use serde_json::Value;
 
 use crate::{
-    config::AppConfig,
+    config::{prompts::PromptLayer, AppConfig},
     tui::settings_panel::{DangerLevel, Setting, SettingCategory, SettingType},
 };
 
@@ -38,6 +38,7 @@ pub enum ValueKind {
     Decimal,
     Choice(&'static [&'static str]),
     Lines,
+    Prompt(PromptLayer),
     Structured,
     Manager(&'static str),
 }
@@ -112,6 +113,8 @@ pub fn catalog() -> &'static [WorkspaceSetting] {
         entry!("ai_alignment", "Assistant message alignment", "Horizontal alignment of assistant messages.", ChatBehavior, Choice(&["left", "middle", "right"])),
         entry!("markdown_mode", "Markdown rendering", "Off renders plain content; full renders rich Markdown; textual keeps terminal-oriented formatting.", ChatBehavior, Choice(&["off", "full", "textual"])),
         entry!("collapse_thinking", "Collapse thinking", "Fold assistant reasoning sections by default.", ChatBehavior, Bool),
+        entry!("SOUL.md", "SOUL.md", "Assistant personality and tone. Plain multiline text, saved to the TCUI configuration directory. Missing file uses the bundled default; an empty file disables this layer. Changes affect the next submission.", ChatBehavior, Prompt(PromptLayer::Soul)),
+        entry!("AGENTS.md", "AGENTS.md", "Assistant working preferences, not repository governance or tool permissions. Plain multiline text in the TCUI configuration directory. An empty file disables this layer. Changes affect the next submission.", ChatBehavior, Prompt(PromptLayer::Agent)),
         entry!("web_search.enabled", "Automatic web search", "Search before each chat message using the selected source. The query is sent to that service. Explicit @websearch, @research or service mentions work even when automatic search is off.", WebSearch, Bool),
         entry!("web_search.backend", "Web search source", "Local uses built-in keyless search or your SearXNG endpoint. Exa, Tavily and Firecrawl use their enabled MCP profiles and saved API keys. No silent fallback to another source.", WebSearch, Choice(&["local", "exa", "tavily", "firecrawl"])),
         entry!("web_search.max_results", "Search result limit", "Maximum requested search results, from 1 to 10. Tavily currently requires at least five. Service minimums never silently increase your limit.", WebSearch, Number { min: 1, max: 10 }),
@@ -191,11 +194,13 @@ struct EditValue {
     id: &'static str,
     text: String,
     cursor: usize,
+    original_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SettingsWorkspaceState {
     config: Value,
+    prompt_previews: BTreeMap<&'static str, Result<String, String>>,
     pub category: SettingCategory,
     pub selected: usize,
     rail_focused: bool,
@@ -213,6 +218,7 @@ impl Default for SettingsWorkspaceState {
     fn default() -> Self {
         Self {
             config: serde_json::to_value(AppConfig::default()).unwrap_or(Value::Null),
+            prompt_previews: BTreeMap::new(),
             category: SettingCategory::Theme,
             selected: 0,
             rail_focused: false,
@@ -234,6 +240,30 @@ impl SettingsWorkspaceState {
             Ok(value) => self.config = value,
             Err(error) => self.fail(format!("Cannot load settings: {error}")),
         }
+        for layer in PromptLayer::ALL {
+            let result = layer
+                .load()
+                .map(|text| prompt_preview(&text))
+                .map_err(|error| format!("{error:#}"));
+            if let Err(error) = &result {
+                self.fail(error.clone());
+            }
+            self.prompt_previews.insert(layer.filename(), result);
+        }
+    }
+
+    pub(crate) fn prompt_read_error(&self) -> Option<&str> {
+        self.prompt_previews
+            .values()
+            .find_map(|value| value.as_ref().err().map(String::as_str))
+    }
+
+    pub(crate) fn prompt_original(&self, id: &str) -> Result<Option<&str>, &'static str> {
+        self.edit
+            .as_ref()
+            .filter(|edit| edit.id == id)
+            .map(|edit| edit.original_prompt.as_deref())
+            .ok_or("Reopen the prompt field before saving")
     }
 
     pub fn select_id(&mut self, id: &str) {
@@ -267,6 +297,9 @@ impl SettingsWorkspaceState {
         }
         if id == "tui.keybinding_overrides" {
             self.keyboard.applied();
+        }
+        if self.prompt_read_error().is_some() {
+            return;
         }
         self.feedback = "Applied and saved. Defaults affect subsequent operations; existing chats, terminal sessions and other drafts are preserved.".into();
         self.has_error = false;
@@ -364,7 +397,31 @@ impl SettingsWorkspaceState {
                 })
             }
             _ => {
-                let text = match plaintext::display(&self.config, setting) {
+                let mut original_prompt = None;
+                let text = match setting.kind {
+                    ValueKind::Prompt(layer) => {
+                        let result = layer
+                            .load_original()
+                            .map(|saved| {
+                                let text = saved
+                                    .clone()
+                                    .unwrap_or_else(|| layer.default_text().to_owned());
+                                original_prompt = saved;
+                                text
+                            })
+                            .map_err(|error| format!("{error:#}"));
+                        self.prompt_previews.insert(
+                            layer.filename(),
+                            result
+                                .as_ref()
+                                .map(|text| prompt_preview(text))
+                                .map_err(Clone::clone),
+                        );
+                        result
+                    }
+                    _ => plaintext::display(&self.config, setting),
+                };
+                let text = match text {
                     Ok(text) => text,
                     Err(error) => {
                         self.fail(error);
@@ -375,6 +432,7 @@ impl SettingsWorkspaceState {
                     id: setting.id,
                     cursor: text.len(),
                     text,
+                    original_prompt,
                 });
                 self.feedback = "Draft: Ctrl+S or Save validates and saves; Esc cancels; Ctrl+U clears. Multiline: Enter adds a line; Ctrl+Enter applies.".into();
                 self.has_error = false;
@@ -386,11 +444,18 @@ impl SettingsWorkspaceState {
     pub fn paste(&mut self, text: &str) {
         if let Some(edit) = &mut self.edit {
             // Paste is data only, never a command or an apply gesture.
-            let text: String = text
-                .replace("\r\n", "\n")
-                .chars()
-                .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
-                .collect();
+            let text: String = if PromptLayer::from_id(edit.id).is_some() {
+                text.chars()
+                    .filter(|character| {
+                        !character.is_control() || matches!(character, '\n' | '\r' | '\t')
+                    })
+                    .collect()
+            } else {
+                text.replace("\r\n", "\n")
+                    .chars()
+                    .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+                    .collect()
+            };
             edit.text.insert_str(edit.cursor, &text);
             edit.cursor += text.len();
         }
@@ -751,6 +816,10 @@ impl SettingsWorkspaceState {
             let value = match setting.kind {
                 ValueKind::Manager(_) => "[Open manager]".into(),
                 ValueKind::Lines | ValueKind::Structured => "[Enter to edit entries]".into(),
+                ValueKind::Prompt(layer) => match self.prompt_previews.get(layer.filename()) {
+                    Some(Ok(text)) => text.clone(),
+                    _ => "[Cannot read; Enter for details]".into(),
+                },
                 _ => value_text(get_value(&self.config, setting.id)),
             };
             frame.render_widget(
@@ -828,6 +897,14 @@ impl SettingsWorkspaceState {
     }
 }
 
+fn prompt_preview(text: &str) -> String {
+    if text.is_empty() {
+        "[Empty; layer disabled]".into()
+    } else {
+        text.lines().next().unwrap_or_default().to_owned()
+    }
+}
+
 fn get_value<'a>(value: &'a Value, id: &str) -> Option<&'a Value> {
     id.split('.').try_fold(value, |value, key| value.get(key))
 }
@@ -854,6 +931,9 @@ pub fn validate_edit(config: &Value, id: &str, text: &str) -> Result<AppConfig, 
         })?;
     let value = match entry.kind {
         ValueKind::Manager(_) => return Err("Use the dedicated manager for this setting".into()),
+        ValueKind::Prompt(_) => {
+            return Err("Prompt files are saved separately from config.toml".into())
+        }
         ValueKind::Bool => Value::Bool(text.parse().map_err(|_| "Expected true or false")?),
         ValueKind::Number { min, max } => {
             let number: u64 = text

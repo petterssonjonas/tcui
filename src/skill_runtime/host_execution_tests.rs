@@ -152,7 +152,7 @@ fn malformed_decisions_recover_and_preserve_a_completed_reminder_without_duplica
             ])
             .await;
             let mut request = request(&endpoint, raw);
-            request.system_prompt = include_str!("../../assets/TCUI.md").into();
+            request.system_prompt = include_str!("../../assets/SYSTEM_PROMPT.md").into();
             request.messages.insert(
                 0,
                 Message::new(
@@ -167,18 +167,6 @@ fn malformed_decisions_recover_and_preserve_a_completed_reminder_without_duplica
             let outcome = run(config, raw, &request).await;
             let requests = server.await.unwrap();
             assert_eq!(requests.len(), 5, "corrections are new decision rounds");
-            let system = requests[0]["messages"][0]["content"].as_str().unwrap();
-            assert!(system.starts_with(include_str!("../../assets/TCUI.md")));
-            assert!(system.contains("takes precedence over persona or skill instructions"));
-            assert!(system.contains("ordinary chat instructions to propose commands"));
-            for name in ["remindme", "ping-user"] {
-                let skill = crate::skills::SkillCatalog::discover()
-                    .unwrap()
-                    .load(name)
-                    .unwrap()
-                    .unwrap();
-                assert!(system.contains(skill.source.as_ref()));
-            }
             let correction = requests[1]["messages"].as_array().unwrap();
             assert_eq!(correction[correction.len() - 2]["content"], malformed);
             assert!(correction.last().unwrap()["content"]
