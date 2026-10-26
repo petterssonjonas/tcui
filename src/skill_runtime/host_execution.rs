@@ -111,7 +111,7 @@ pub(super) async fn command(
     ).await?;
     let plan = parse_command_plan(&output)?;
     // Recheck policy immediately before launching; the planner cannot pick a program.
-    let result = crate::commands::run(config, program, &plan.arguments, &[]).await?;
+    let result = crate::commands::run(config, program, &plan.arguments).await?;
     let data = serde_json::json!({
         "success": result.success,
         "code": result.code,

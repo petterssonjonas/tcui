@@ -56,26 +56,76 @@ pub(super) fn remove(guard: &JobGuard) -> Result<()> {
     guard.remove()
 }
 
-pub(super) async fn dispatch(config: &AppConfig, id: &str) -> Result<()> {
+pub(super) async fn dispatch(id: &str) -> Result<()> {
     let guard = JobGuard::wait(id).await?;
-    let Some(job) = guard.read()? else {
+    let Some(record) = super::store::get(id)? else {
+        if guard.directory.try_exists(&guard.name)? {
+            ensure_one_shot_snapshot(&guard)?;
+            finish(&guard, id, &format!("tcui-reminder-{id}"))?;
+            return Err(eyre!("Pushover reminder is no longer registered"));
+        }
         return Ok(());
     };
-    if !super::store::get(id)?.is_some_and(|record| record.pushover) {
-        guard.remove()?;
-        return Err(eyre!("Pushover reminder is no longer registered"));
+    ensure!(record.pushover, "Pushover reminder is no longer registered");
+    let result = async {
+        let job = guard
+            .read()?
+            .ok_or_else(|| eyre!("Pushover reminder payload is missing"))?;
+        ensure!(
+            job.recurring == record.recurring,
+            "Pushover reminder cadence changed"
+        );
+        // Only this pre-authorized notification payload is read while the vault is locked.
+        let config = AppConfig::load().map_err(|_| eyre!("Cannot load reminder configuration"))?;
+        crate::notifications::notify_reminder_with_delivery(&config, &job.message, &job.delivery)
+            .await
     }
-    // The snapshot is the capability granted when the unlocked user scheduled
-    // this job. No other application content or locked vault is opened here.
-    let result =
-        crate::notifications::notify_reminder_with_delivery(config, &job.message, &job.delivery)
-            .await;
-    if !job.recurring {
-        guard.remove()?;
-        super::store::remove(id)?;
+    .await;
+    if !record.recurring {
+        finish(&guard, id, &record.unit)?;
     }
     result?;
     println!("Pushover reminder delivered: {id}");
+    Ok(())
+}
+
+pub(super) fn cleanup(id: &str) -> Result<()> {
+    let guard = JobGuard::open(id)?;
+    let record = super::store::get(id);
+    match &record {
+        Ok(Some(record)) if record.recurring => {
+            return Err(eyre!("Recurring reminders must be explicitly cancelled"));
+        }
+        Ok(Some(_)) => {}
+        Ok(None) if !guard.directory.try_exists(&guard.name)? => return Ok(()),
+        _ => ensure_one_shot_snapshot(&guard)?,
+    }
+    finish(&guard, id, &format!("tcui-reminder-{id}"))
+}
+
+fn ensure_one_shot_snapshot(guard: &JobGuard) -> Result<()> {
+    // Missing or unreadable metadata is not permission to delete an unknown
+    // recurring job. A valid private one-shot snapshot is required.
+    let job = guard
+        .read()?
+        .ok_or_else(|| eyre!("Cannot establish reminder cadence"))?;
+    ensure!(
+        !job.recurring,
+        "Recurring reminders must be explicitly cancelled"
+    );
+    Ok(())
+}
+
+pub(super) fn finish(guard: &JobGuard, id: &str, unit: &str) -> Result<()> {
+    // Try both privacy cleanup and timer disarming. Keep metadata discoverable
+    // if either fails, so cancellation can retry without resending the payload.
+    let payload = guard.remove();
+    let timer = super::systemd::complete(unit);
+    if payload.is_ok() && timer.is_ok() {
+        super::store::remove(id)?;
+    }
+    payload?;
+    timer?;
     Ok(())
 }
 

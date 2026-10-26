@@ -16,6 +16,16 @@ pub(super) fn schedule(
         .arg("--property=UMask=0077")
         .arg("--unit")
         .arg(&unit);
+    if !schedule.is_recurring() {
+        command
+            .arg("--timer-property=RemainAfterElapse=no")
+            .arg("--timer-property=CollectMode=inactive-or-failed")
+            .arg(cleanup_command(
+                &executable,
+                scheduler.toolbox.as_deref(),
+                id,
+            )?);
+    }
     set_notification_environment(&mut command, |key| std::env::var_os(key));
     match schedule {
         ReminderSchedule::After(duration) => {
@@ -73,6 +83,51 @@ pub(super) fn schedule(
     }
 }
 
+fn cleanup_command(
+    executable: &std::path::Path,
+    toolbox: Option<&str>,
+    id: &str,
+) -> Result<String, ReminderError> {
+    let mut command = String::from("--property=ExecStopPost=:");
+    if let Some(container) = toolbox {
+        for argument in ["toolbox", "run", "--container", container, "--"] {
+            push_unit_argument(&mut command, argument)?;
+        }
+    }
+    push_unit_argument(
+        &mut command,
+        executable.to_str().ok_or_else(|| {
+            ReminderError::Schedule("TCUI's executable path must be UTF-8 for timer cleanup".into())
+        })?,
+    )?;
+    for argument in ["reminder-cleanup", id] {
+        push_unit_argument(&mut command, argument)?;
+    }
+    Ok(command)
+}
+
+fn push_unit_argument(command: &mut String, argument: &str) -> Result<(), ReminderError> {
+    if argument.chars().any(char::is_control) {
+        return Err(ReminderError::Schedule(
+            "Invalid timer cleanup argument".into(),
+        ));
+    }
+    if !command.ends_with(':') {
+        command.push(' ');
+    }
+    command.push('"');
+    for character in argument.chars() {
+        match character {
+            '\\' | '"' => command.push('\\'),
+            '%' => command.push('%'),
+            _ => {}
+        }
+        command.push(character);
+    }
+    command.push('"');
+    Ok(())
+}
+
 fn set_notification_environment(
     command: &mut std::process::Command,
     get: impl Fn(&str) -> Option<std::ffi::OsString>,
@@ -104,6 +159,16 @@ fn set_notification_environment(
 }
 
 pub(super) fn cancel(unit: &str) -> Result<(), ReminderError> {
+    stop_units(unit, &["timer", "service"], true)
+}
+
+pub(super) fn complete(unit: &str) -> Result<(), ReminderError> {
+    // Stop ordering reverses timer Before=service. ExecStopPost must not wait
+    // for its own service to finish stopping before the timer can stop.
+    stop_units(unit, &["timer"], false)
+}
+
+fn stop_units(unit: &str, kinds: &[&str], wait: bool) -> Result<(), ReminderError> {
     let suffix = unit.strip_prefix("tcui-reminder-").filter(|suffix| {
         !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
     });
@@ -112,12 +177,14 @@ pub(super) fn cancel(unit: &str) -> Result<(), ReminderError> {
     }
     let controller = SchedulerContext::new("systemctl", "TCUI_REMINDER_SYSTEMCTL")?;
     let mut failure = None;
-    for kind in ["timer", "service"] {
+    for kind in kinds {
         let name = format!("{unit}.{kind}");
-        let output = controller
-            .command()
-            .args(["--user", "stop", "--", &name])
-            .output()?;
+        let mut command = controller.command();
+        command.arg("--user");
+        if !wait {
+            command.arg("--no-block");
+        }
+        let output = command.args(["stop", "--", &name]).output()?;
         if output.status.success() {
             continue;
         }

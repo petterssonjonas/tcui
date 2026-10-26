@@ -98,6 +98,10 @@ enum Command {
     ReminderPingDispatch {
         id: String,
     },
+    #[command(hide = true)]
+    ReminderCleanup {
+        id: String,
+    },
     #[cfg(feature = "memory")]
     MemoryMcp,
 }
@@ -194,8 +198,9 @@ async fn main() -> Result<()> {
             Command::ReminderPingDispatch { id } => {
                 // This path consumes only an explicitly prepared notification job.
                 // It cannot unlock or read protected application data.
-                return reminders::dispatch_ping(&AppConfig::load()?, &id).await;
+                return reminders::dispatch_ping(&id).await;
             }
+            Command::ReminderCleanup { id } => return reminders::cleanup(&id),
             #[cfg(feature = "memory")]
             Command::MemoryMcp => {
                 unlock_headless_options(cli.unlock_password_stdin, cli.unlock_password_fd, true)?;
@@ -228,16 +233,19 @@ async fn main() -> Result<()> {
     }
     let mut restart = None;
     let mut security_notice = None;
+    let mut pushover_credential = None;
     loop {
+        let mut unlock_completed = false;
         match restart.take() {
             Some(protection::ui::SecurityRestart::Configure) => {
                 protection::ui::configure(&mut terminal, &mut events).await?;
             }
             Some(protection::ui::SecurityRestart::Unlock) => {
-                protection::ui::unlock(&mut terminal, &mut events).await?;
+                unlock_completed = protection::ui::unlock(&mut terminal, &mut events).await?;
             }
             Some(protection::ui::SecurityRestart::InitializePassword) => {
-                protection::ui::initialize_password(&mut terminal, &mut events).await?;
+                unlock_completed =
+                    protection::ui::initialize_password(&mut terminal, &mut events).await?;
             }
             Some(protection::ui::SecurityRestart::Lock) => protection::lock()?,
             Some(protection::ui::SecurityRestart::Transfer(domain)) => {
@@ -247,14 +255,17 @@ async fn main() -> Result<()> {
         }
         if protection::startup_requires_unlock()?
             && (!protection::is_unlocked()? || protection::require_app().is_err())
-            && !protection::ui::unlock_with_notice(
+        {
+            if !protection::ui::unlock_with_notice(
                 &mut terminal,
                 &mut events,
                 security_notice.as_deref(),
             )
             .await?
-        {
-            return Ok(());
+            {
+                return Ok(());
+            }
+            unlock_completed = true;
         }
         // Recovery runs without store/session guards. A locked pending transfer
         // must be unlocked before partially replaced native data can be reopened.
@@ -299,6 +310,11 @@ async fn main() -> Result<()> {
         if let Some(notice) = security_notice.take() {
             app.ui.show_toast(notice);
         }
+        if let Some(target) = pushover_credential.take() {
+            if unlock_completed {
+                app.resume_pushover_credential(target);
+            }
+        }
         let result = loop {
             let result = app.run(&mut terminal, &mut events).await;
             if let Err(error) = &result {
@@ -308,6 +324,7 @@ async fn main() -> Result<()> {
             }
             break result;
         };
+        pushover_credential = app.take_pushover_credential_restart();
         restart = app.security_restart.take();
         security_notice = app.security_notice.take();
         let forced_lock =

@@ -43,8 +43,8 @@ pub(crate) fn prepare(config: &AppConfig) -> Result<Option<Delivery>> {
     if !config.notifications.pushover.enabled {
         return Ok(None);
     }
-    let program = commands::authorize(config, &config.notifications.pushover.command)
-        .map_err(|_| eyre!("Pushover helper is not available under the current command policy"))?;
+    let program = commands::authorize(config, "curl")
+        .map_err(|_| eyre!("Pushover curl is not available under the current command policy"))?;
     let (user_key, app_key) = credentials(
         config,
         |name| std::env::var(name).ok(),
@@ -75,30 +75,66 @@ impl Delivery {
         {
             return Err(eyre!("Pushover title or message exceeds service limits"));
         }
-        if !self.program.is_absolute() {
-            return Err(eyre!("Invalid Pushover helper snapshot"));
+        let current = commands::authorize(config, "curl").map_err(|_| {
+            eyre!("Pushover curl is not available under the current command policy")
+        })?;
+        if !self.program.is_absolute() || self.program != current {
+            return Err(eyre!("Invalid or obsolete Pushover transport snapshot"));
         }
-        let program = self
-            .program
-            .to_str()
-            .ok_or_else(|| eyre!("Invalid Pushover helper path"))?;
-        let arguments = ["--app", "tcui", "--title", title, "--", body].map(str::to_owned);
-        let output = commands::run(
-            config,
-            program,
-            &arguments,
-            &[
-                ("PUSHOVER_USER_KEY", self.user_key.as_str()),
-                ("PUSHOVER_TCUI_APP_TOKEN", self.app_key.as_str()),
-                // Prevent the helper from opening its ambient default credential file.
-                ("PUSHOVER_ENV_FILE", ""),
-            ],
-        )
-        .await
-        .map_err(|_| eyre!("Pushover helper could not complete delivery"))?;
+        #[derive(Serialize)]
+        struct Message<'a> {
+            token: &'a str,
+            user: &'a str,
+            title: &'a str,
+            message: &'a str,
+        }
+        let input = Zeroizing::new(
+            serde_json::to_vec(&Message {
+                token: &self.app_key,
+                user: &self.user_key,
+                title,
+                message: body,
+            })
+            .map_err(|_| eyre!("Cannot encode Pushover delivery"))?,
+        );
+        let arguments = [
+            "--disable",
+            "--silent",
+            "--fail",
+            "--proto",
+            "=https",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "25",
+            "--max-filesize",
+            "65536",
+            "--max-redirs",
+            "0",
+            "--request",
+            "POST",
+            "--header",
+            "Content-Type: application/json",
+            "--data-binary",
+            "@-",
+            "--url",
+            "https://api.pushover.net/1/messages.json",
+        ]
+        .map(str::to_owned);
+        let output = commands::run_with_input(config, "curl", &arguments, &input)
+            .await
+            .map_err(|_| eyre!("Pushover transport could not complete delivery"))?;
         if !output.success {
-            // A helper can echo credentials on either stream; never forward diagnostics.
-            return Err(eyre!("Pushover helper rejected delivery"));
+            return Err(eyre!("Pushover transport rejected delivery"));
+        }
+        #[derive(Deserialize)]
+        struct Response {
+            status: u8,
+        }
+        let response: Response = serde_json::from_str(&output.stdout)
+            .map_err(|_| eyre!("Invalid Pushover API response"))?;
+        if response.status != 1 {
+            return Err(eyre!("Pushover API rejected delivery"));
         }
         Ok(())
     }
@@ -113,12 +149,29 @@ pub(crate) fn validate_key(value: &str) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn application_key_id(application: &str) -> Result<String> {
+    if application.is_empty()
+        || application.len() > 64
+        || !application.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+    {
+        return Err(eyre!("Pushover application names require 1-64 lowercase ASCII letters, digits, hyphens or underscores"));
+    }
+    Ok(if application == "tcui" {
+        APP_KEY_ID.to_owned()
+    } else {
+        format!("{APP_KEY_ID}:{application}")
+    })
+}
+
 fn credentials(
     config: &AppConfig,
     get: impl Fn(&str) -> Option<String>,
     vault: impl Fn(&str) -> Result<Option<String>>,
 ) -> Result<(String, String)> {
     let settings = &config.notifications.pushover;
+    let selected = application_key_id(&settings.application)?;
     let (mut user, mut app) = if settings.use_vault {
         // This branch must never inspect environment or file credentials, even on failure.
         let user = Zeroizing::new(
@@ -126,7 +179,7 @@ fn credentials(
                 .ok_or_else(|| eyre!("Pushover user key is missing from the vault"))?,
         );
         let app = Zeroizing::new(
-            vault(APP_KEY_ID)?
+            vault(&selected)?
                 .ok_or_else(|| eyre!("Pushover application key is missing from the vault"))?,
         );
         (user, app)
@@ -143,12 +196,14 @@ fn credentials(
         let user = values
             .remove("PUSHOVER_USER_KEY")
             .ok_or_else(|| eyre!("Pushover user key is missing from the configured source"))?;
-        let app = values
-            .remove("PUSHOVER_TCUI_APP_TOKEN")
-            .or_else(|| values.remove("PUSHOVER_APP_TOKEN"))
-            .ok_or_else(|| {
-                eyre!("Pushover application key is missing from the configured source")
-            })?;
+        let app = if settings.application == "tcui" {
+            values
+                .remove("PUSHOVER_TCUI_APP_TOKEN")
+                .or_else(|| values.remove("PUSHOVER_APP_TOKEN"))
+        } else {
+            values.remove("PUSHOVER_APP_TOKEN")
+        }
+        .ok_or_else(|| eyre!("Pushover application key is missing from the configured source"))?;
         (user, app)
     };
     validate_key(&user)?;
@@ -306,6 +361,31 @@ mod tests {
     }
 
     #[test]
+    fn named_environment_application_never_uses_tcui_token() {
+        let mut config = AppConfig::default();
+        config.notifications.pushover.application = "work".into();
+        let source = |name: &str| match name {
+            "PUSHOVER_USER_KEY" => Some(USER.to_owned()),
+            "PUSHOVER_TCUI_APP_TOKEN" => Some(APP.to_owned()),
+            _ => None,
+        };
+        assert!(credentials(&config, source, |_| panic!("vault read")).is_err());
+        let (user, app) = credentials(
+            &config,
+            |name| {
+                if name == "PUSHOVER_APP_TOKEN" {
+                    Some(OTHER.to_owned())
+                } else {
+                    source(name)
+                }
+            },
+            |_| panic!("vault read"),
+        )
+        .expect("explicit selected application token");
+        assert_eq!((user.as_str(), app.as_str()), (USER, OTHER));
+    }
+
+    #[test]
     fn env_parser_accepts_literals_without_evaluating_shell() {
         let values = parse_env(&format!("# comment\nOTHER_APP_TOKEN=\"${{OTHER_TOKEN}}; unrelated value\"\nOTHER_APP_COMMAND=$(id)\nexport PUSHOVER_USER_KEY='{USER}'\nPUSHOVER_APP_TOKEN=\"{APP}\"\n")).expect("mixed application env file");
         assert_eq!(values["PUSHOVER_USER_KEY"].as_str(), USER);
@@ -366,45 +446,129 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn helper_failure_redacts_output_and_current_policy_can_revoke_snapshot() {
+    #[test]
+    fn curl_uses_private_json_checks_api_status_and_rechecks_policy() {
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!(
-            "tcui-pushover-send-{}-{:032x}",
-            std::process::id(),
-            rand::random::<u128>()
-        ));
-        std::fs::create_dir(&root).expect("fixture directory");
-        let program = root.join("notify-ping");
-        // Echo both trusted secrets to exercise the diagnostic suppression boundary.
-        std::fs::write(&program, "#!/bin/sh\nprintf 'ran' > \"$0.sentinel\"\nprintf '%s' \"$PUSHOVER_USER_KEY\"\nprintf '%s' \"$PUSHOVER_TCUI_APP_TOKEN\" >&2\nexit 1\n").expect("fake helper");
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
-            .expect("executable");
+        let _lock = crate::test_support::env_lock().lock().unwrap();
+        let root = std::env::temp_dir().join(format!("tcui-curl-{:032x}", rand::random::<u128>()));
+        std::fs::create_dir(&root).unwrap();
+        let program = root.join("curl");
+        struct RestorePath(Option<std::ffi::OsString>);
+        impl Drop for RestorePath {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(path) => std::env::set_var("PATH", path),
+                    None => std::env::remove_var("PATH"),
+                }
+            }
+        }
+        let _restore = RestorePath(std::env::var_os("PATH"));
+        std::env::set_var("PATH", &root);
+        let mut config = AppConfig::default();
+        config.notifications.pushover.enabled = true;
+        config.commands.whitelist = vec![program.to_string_lossy().into_owned()];
         let delivery = Delivery {
             program: program.clone(),
             user_key: USER.into(),
             app_key: APP.into(),
         };
-        let mut config = AppConfig::default();
-        config.notifications.pushover.enabled = true;
-        config.commands.whitelist = vec![program.to_string_lossy().into_owned()];
-        let error = delivery
-            .send(&config, "title", "body")
-            .await
-            .expect_err("helper failure");
-        let diagnostic = format!("{error:?}");
-        assert!(!diagnostic.contains(USER));
-        assert!(!diagnostic.contains(APP));
-        let sentinel = program.with_extension("sentinel");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for (response, accepted) in [
+            (r#"{"status":1}"#, true),
+            (r#"{"status":0,"errors":["private diagnostic"]}"#, false),
+            ("not JSON", false),
+            (r#"{"status":"1"}"#, false),
+            (USER, false),
+        ] {
+            std::fs::write(&program, format!(
+                "#!/bin/sh\n[ \"$1\" = --disable ] || exit 2\nprintf '%s\\n' \"$@\" > \"$0.argv\"\n/usr/bin/env > \"$0.env\"\n/bin/cat > \"$0.stdin\"\nprintf '%s' '{response}'\n"
+            )).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let result = runtime.block_on(delivery.send(&config, "literal title", "literal body"));
+            assert_eq!(result.is_ok(), accepted);
+            if let Err(error) = result {
+                let diagnostic = format!("{error:?}");
+                assert!(!diagnostic.contains(USER) && !diagnostic.contains(APP));
+                assert!(!diagnostic.contains("private diagnostic"));
+            }
+            for extension in ["argv", "env"] {
+                let text = std::fs::read_to_string(program.with_extension(extension)).unwrap();
+                assert!(!text.contains(USER) && !text.contains(APP));
+            }
+            let args = std::fs::read_to_string(program.with_extension("argv")).unwrap();
+            assert!(args.contains("https://api.pushover.net/1/messages.json"));
+            assert!(!args.contains("literal title") && !args.contains("literal body"));
+            let input: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(program.with_extension("stdin")).unwrap())
+                    .unwrap();
+            assert_eq!(
+                input,
+                serde_json::json!({"token":APP,"user":USER,"title":"literal title","message":"literal body"})
+            );
+        }
+        std::fs::remove_file(program.with_extension("stdin")).unwrap();
+        config.commands.blacklist = vec!["curl".into()];
+        assert!(runtime
+            .block_on(delivery.send(&config, "title", "body"))
+            .is_err());
+        assert!(!program.with_extension("stdin").exists());
+        config.commands.blacklist.clear();
+        let legacy = Delivery {
+            program: root.join("obsolete-helper"),
+            user_key: USER.into(),
+            app_key: APP.into(),
+        };
+        assert!(runtime
+            .block_on(legacy.send(&config, "title", "body"))
+            .is_err());
+        assert!(!program.with_extension("stdin").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn selected_vault_application_never_uses_another_token() {
+        assert_eq!(application_key_id("tcui").unwrap(), APP_KEY_ID);
         assert_eq!(
-            std::fs::read(&sentinel).expect("helper execution evidence"),
-            b"ran"
+            application_key_id("alerts_2").unwrap(),
+            format!("{APP_KEY_ID}:alerts_2")
         );
-        std::fs::remove_file(&sentinel).expect("reset execution evidence");
-        config.commands.blacklist = config.commands.whitelist.clone();
-        assert!(delivery.send(&config, "title", "body").await.is_err());
-        assert!(!sentinel.exists(), "blacklisted helper executed");
-        std::fs::remove_dir_all(root).expect("remove fixture");
+        for invalid in ["", "UPPER", "../key", "with space", "é"] {
+            assert!(application_key_id(invalid).is_err());
+        }
+        assert!(application_key_id(&"a".repeat(65)).is_err());
+        let mut config = AppConfig::default();
+        config.notifications.pushover.use_vault = true;
+        config.notifications.pushover.application = "alerts".into();
+        let selected = application_key_id("alerts").unwrap();
+        let load = |id: &str| {
+            Ok(match id {
+                USER_KEY_ID => Some(USER.to_owned()),
+                APP_KEY_ID => Some(OTHER.to_owned()),
+                id if id == selected => Some(APP.to_owned()),
+                _ => None,
+            })
+        };
+        assert_eq!(
+            credentials(&config, |_| panic!("environment read"), load)
+                .unwrap()
+                .1,
+            APP
+        );
+        assert!(credentials(
+            &config,
+            |_| panic!("environment read"),
+            |id| {
+                Ok(match id {
+                    USER_KEY_ID => Some(USER.to_owned()),
+                    APP_KEY_ID => Some(OTHER.to_owned()),
+                    _ => None,
+                })
+            }
+        )
+        .is_err());
     }
 
     #[tokio::test]

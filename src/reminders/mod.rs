@@ -123,23 +123,30 @@ pub(crate) fn maybe_handle_request(config: &AppConfig, request: &str) -> Option<
 }
 
 pub(crate) async fn dispatch(config: &AppConfig, id: &str) -> color_eyre::Result<()> {
-    let _guard = ping::JobGuard::wait(id).await?;
+    let guard = ping::JobGuard::wait(id).await?;
     let Some(record) = store::get(id)? else {
         return Ok(());
     };
-    let message = record.message_text()?;
-    // External delivery is best-effort; keep the in-app/journal notice and
-    // one-shot bookkeeping even when a configured notification backend fails.
-    let _ = crate::notifications::notify_reminder(config, &message).await;
-    println!("tcui reminder: {message}");
+    let result = match record.message_text() {
+        Ok(message) => {
+            let _ = crate::notifications::notify_reminder(config, &message).await;
+            println!("tcui reminder: {message}");
+            Ok(())
+        }
+        Err(error) => Err(color_eyre::Report::from(error)),
+    };
     if !record.recurring {
-        store::remove(id)?;
+        ping::finish(&guard, id, &record.unit)?;
     }
-    Ok(())
+    result
 }
 
-pub(crate) async fn dispatch_ping(config: &AppConfig, id: &str) -> color_eyre::Result<()> {
-    ping::dispatch(config, id).await
+pub(crate) async fn dispatch_ping(id: &str) -> color_eyre::Result<()> {
+    ping::dispatch(id).await
+}
+
+pub(crate) fn cleanup(id: &str) -> color_eyre::Result<()> {
+    ping::cleanup(id)
 }
 
 fn handle_request(

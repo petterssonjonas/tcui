@@ -23,6 +23,9 @@ impl Fixture {
             rand::random::<u128>()
         ));
         std::fs::create_dir_all(root.join("home")).unwrap();
+        let mut path = root.as_os_str().to_os_string();
+        path.push(":");
+        path.push(std::env::var_os("PATH").unwrap_or_default());
         let values = [
             ("HOME", root.join("home").into_os_string()),
             ("XDG_CONFIG_HOME", root.join("config").into_os_string()),
@@ -30,6 +33,7 @@ impl Fixture {
             ("XDG_CACHE_HOME", root.join("cache").into_os_string()),
             ("TCUI_REMINDER_SYSTEMD_RUN", OsString::from("/usr/bin/true")),
             ("TCUI_REMINDER_SYSTEMCTL", OsString::from("/usr/bin/true")),
+            ("PATH", path),
         ];
         let previous = values
             .iter()
@@ -38,17 +42,31 @@ impl Fixture {
         for (key, value) in values {
             std::env::set_var(key, value);
         }
-        let program = root.join("notify-ping");
-        std::fs::write(&program, format!(
-            "#!/bin/sh\n[ \"$PUSHOVER_USER_KEY\" = '{USER}' ] || exit 7\n[ \"$PUSHOVER_TCUI_APP_TOKEN\" = '{APP}' ] || exit 8\n[ -z \"$PUSHOVER_ENV_FILE\" ] || exit 9\n[ \"$1\" = --app ] && [ \"$2\" = tcui ] && [ \"$3\" = --title ] && [ \"$4\" = reminder ] && [ \"$5\" = -- ] || exit 10\nprintf 'delivered\\n' >> \"$HOME/delivery-events\"\n"
-        )).unwrap();
+        let program = root.join("curl");
+        std::fs::write(
+            &program,
+            format!(
+                r#"#!/usr/bin/python3
+import json, os, pathlib, sys
+assert sys.argv[1] == "--disable"
+assert not any(name.startswith("PUSHOVER_") for name in os.environ)
+payload = json.load(sys.stdin)
+assert payload["user"] == {USER:?} and payload["token"] == {APP:?}
+assert payload["title"] == "reminder" and payload["message"]
+assert payload["user"] not in repr(sys.argv) and payload["token"] not in repr(sys.argv)
+with (pathlib.Path.home() / "delivery-events").open("a") as output:
+    output.write("delivered\n")
+print('{{"status":1}}')
+"#
+            ),
+        )
+        .unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut config = AppConfig::default();
         config.notifications.desktop = false;
         config.notifications.pushover.enabled = true;
         config.notifications.pushover.use_vault = true;
-        config.notifications.pushover.command = program.to_string_lossy().into_owned();
-        config.commands.whitelist = vec![config.notifications.pushover.command.clone()];
+        config.commands.whitelist = vec![program.to_string_lossy().into_owned()];
         KeyStore::initialize_vault(&config, "fixture password").unwrap();
         KeyStore::set_secret(
             &config,
@@ -66,6 +84,7 @@ impl Fixture {
             APP,
         )
         .unwrap();
+        config.save().unwrap();
         Self {
             root,
             previous,
@@ -142,18 +161,14 @@ fn encrypted_credentials_deliver_after_lock_then_one_shot_snapshot_is_consumed()
     KeyStore::lock_vault(&fixture.config).unwrap();
     assert!(KeyStore::get_secret(&fixture.config, USER_KEY_ID).is_err());
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime
-        .block_on(ping::dispatch(&fixture.config, &record.id))
-        .unwrap();
+    runtime.block_on(ping::dispatch(&record.id)).unwrap();
     assert_eq!(
         std::fs::read_to_string(fixture.events()).unwrap(),
         "delivered\n"
     );
     assert!(!fixture.pending(&record.id).exists());
     assert!(store::get(&record.id).unwrap().is_none());
-    runtime
-        .block_on(ping::dispatch(&fixture.config, &record.id))
-        .unwrap();
+    runtime.block_on(ping::dispatch(&record.id)).unwrap();
     assert_eq!(
         std::fs::read_to_string(fixture.events()).unwrap(),
         "delivered\n"
@@ -166,11 +181,10 @@ fn policy_revocation_blocks_and_consumes_a_one_shot_without_launching_the_helper
     let mut fixture = Fixture::new();
     let record = fixture.schedule();
     fixture.config.commands.blacklist = fixture.config.commands.whitelist.clone();
+    fixture.config.save().unwrap();
     KeyStore::lock_vault(&fixture.config).unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    assert!(runtime
-        .block_on(ping::dispatch(&fixture.config, &record.id))
-        .is_err());
+    assert!(runtime.block_on(ping::dispatch(&record.id)).is_err());
     assert!(!fixture.events().exists());
     assert!(!fixture.pending(&record.id).exists());
     assert!(store::get(&record.id).unwrap().is_none());
@@ -263,7 +277,7 @@ fn registration_serializes_dispatch_and_rejects_premature_cancellation() {
         .build()
         .unwrap();
     runtime.block_on(async {
-        let delivery = ping::dispatch(&fixture.config, &record.id);
+        let delivery = ping::dispatch(&record.id);
         tokio::pin!(delivery);
         assert!(futures::poll!(delivery.as_mut()).is_pending());
         stream.write_all(b"x").unwrap();
@@ -355,5 +369,146 @@ fn lost_reminder_keys_are_not_replaced_with_missing_or_incompatible_chat_keys() 
     assert_eq!(
         store::get(&record.id).unwrap().unwrap().message,
         record.message
+    );
+}
+
+#[test]
+fn malformed_payload_is_consumed_after_the_failed_one_shot_attempt() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    let record = fixture.schedule();
+    std::fs::write(fixture.pending(&record.id), b"invalid-json").unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    assert!(runtime.block_on(ping::dispatch(&record.id)).is_err());
+    assert!(!fixture.pending(&record.id).exists());
+    assert!(store::get(&record.id).unwrap().is_none());
+    assert!(!fixture.events().exists());
+}
+
+#[test]
+fn invalid_configuration_does_not_leave_one_shot_keys_on_disk() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    let record = fixture.schedule();
+    std::fs::write(fixture.root.join("config/tcui/config.toml"), b"[").unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    assert!(runtime.block_on(ping::dispatch(&record.id)).is_err());
+    assert!(!fixture.pending(&record.id).exists());
+    assert!(store::get(&record.id).unwrap().is_none());
+    assert!(!fixture.events().exists());
+}
+
+#[test]
+fn rejected_delivery_still_consumes_one_shot_keys_and_registration() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    let record = fixture.schedule();
+    std::fs::write(
+        fixture.root.join("curl"),
+        "#!/bin/sh\nprintf '{\"status\":0}'\n",
+    )
+    .unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    assert!(runtime.block_on(ping::dispatch(&record.id)).is_err());
+    assert!(!fixture.pending(&record.id).exists());
+    assert!(store::get(&record.id).unwrap().is_none());
+    assert!(!fixture.events().exists());
+}
+
+#[test]
+fn post_stop_cleanup_needs_neither_configuration_nor_vault_unlock() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    let record = fixture.schedule();
+    KeyStore::lock_vault(&fixture.config).unwrap();
+    std::fs::write(fixture.root.join("config/tcui/config.toml"), b"[").unwrap();
+    super::cleanup(&record.id).unwrap();
+    assert!(!fixture.pending(&record.id).exists());
+    assert!(store::get(&record.id).unwrap().is_none());
+    assert!(!fixture.events().exists());
+}
+
+#[test]
+fn recurring_jobs_keep_their_snapshot_until_explicit_cancellation() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    handle_request(&fixture.config, "daily 09:00 | Recurring fixture", false).unwrap();
+    let record = store::list().unwrap().pop().unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(ping::dispatch(&record.id)).unwrap();
+    assert!(super::cleanup(&record.id).is_err());
+    assert!(fixture.pending(&record.id).exists());
+    assert!(store::get(&record.id).unwrap().is_some());
+    handle_request(&fixture.config, &format!("cancel {}", record.id), false).unwrap();
+    assert!(!fixture.pending(&record.id).exists());
+    assert!(store::get(&record.id).unwrap().is_none());
+}
+
+#[test]
+fn timer_cleanup_failure_removes_keys_but_keeps_retryable_registration() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    let record = fixture.schedule();
+    std::env::set_var("TCUI_REMINDER_SYSTEMCTL", "/usr/bin/false");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    assert!(runtime.block_on(ping::dispatch(&record.id)).is_err());
+    assert!(!fixture.pending(&record.id).exists());
+    assert!(store::get(&record.id).unwrap().is_some());
+    std::env::set_var("TCUI_REMINDER_SYSTEMCTL", "/usr/bin/true");
+    super::cleanup(&record.id).unwrap();
+    assert!(store::get(&record.id).unwrap().is_none());
+    assert_eq!(
+        std::fs::read_to_string(fixture.events()).unwrap(),
+        "delivered\n"
+    );
+}
+
+#[test]
+fn corrupt_or_missing_metadata_never_authorizes_deleting_recurring_payloads() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    handle_request(
+        &fixture.config,
+        "daily 09:00 | Retain recurring keys",
+        false,
+    )
+    .unwrap();
+    let record = store::list().unwrap().pop().unwrap();
+    let metadata = fixture.root.join("data/tcui/reminders.toml");
+    let original_metadata = std::fs::read(&metadata).unwrap();
+    let original_payload =
+        zeroize::Zeroizing::new(std::fs::read(fixture.pending(&record.id)).unwrap());
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    std::fs::write(&metadata, b"[").unwrap();
+    assert!(super::cleanup(&record.id).is_err());
+    assert!(runtime.block_on(ping::dispatch(&record.id)).is_err());
+    assert_eq!(
+        std::fs::read(fixture.pending(&record.id)).unwrap(),
+        *original_payload
+    );
+    std::fs::remove_file(&metadata).unwrap();
+    assert!(super::cleanup(&record.id).is_err());
+    assert!(runtime.block_on(ping::dispatch(&record.id)).is_err());
+    assert_eq!(
+        std::fs::read(fixture.pending(&record.id)).unwrap(),
+        *original_payload
+    );
+    std::fs::write(&metadata, original_metadata).unwrap();
+    handle_request(&fixture.config, &format!("cancel {}", record.id), false).unwrap();
+}
+
+#[test]
+fn malformed_orphan_payload_requires_cadence_recovery_before_cleanup() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    let record = fixture.schedule();
+    store::remove(&record.id).unwrap();
+    std::fs::write(fixture.pending(&record.id), b"unknown cadence").unwrap();
+    assert!(super::cleanup(&record.id).is_err());
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    assert!(runtime.block_on(ping::dispatch(&record.id)).is_err());
+    assert_eq!(
+        std::fs::read(fixture.pending(&record.id)).unwrap(),
+        b"unknown cadence"
     );
 }

@@ -77,23 +77,23 @@ async fn denied_and_invalid_launches_never_start_the_executable() {
         "bin/tool",
         &format!("printf started > '{}'", marker.display()),
     );
-    assert!(run(&AppConfig::default(), &program, &[], &[])
-        .await
-        .is_err());
+    assert!(run(&AppConfig::default(), &program, &[]).await.is_err());
     let mut config = fixture.approved(&program);
     config.commands.blacklist = vec![program.clone()];
-    assert!(run(&config, &program, &[], &[]).await.is_err());
+    assert!(run(&config, &program, &[]).await.is_err());
     config.commands.blacklist.clear();
     for arguments in [
         vec!["bad\0argument".to_owned()],
         vec!["x".repeat(MAX_ARGUMENT_BYTES + 1)],
         vec![String::new(); 129],
     ] {
-        assert!(run(&config, &program, &arguments, &[]).await.is_err());
+        assert!(run(&config, &program, &arguments).await.is_err());
     }
-    assert!(run(&config, &program, &[], &[("BAD=NAME", "value")])
-        .await
-        .is_err());
+    assert!(
+        run_with_input(&config, &program, &[], &vec![0; MAX_ARGUMENT_BYTES + 1])
+            .await
+            .is_err()
+    );
     assert!(!marker.exists());
 }
 
@@ -180,7 +180,7 @@ async fn direct_argv_does_not_interpret_shell_syntax_and_reports_status() {
         "a;b | echo bad > nope".to_owned(),
         "two words".to_owned(),
     ];
-    let output = run(&fixture.approved(&program), &program, &arguments, &[])
+    let output = run(&fixture.approved(&program), &program, &arguments)
         .await
         .unwrap();
     assert_eq!(output.stdout, format!("{}\n", arguments.join("\n")));
@@ -191,25 +191,22 @@ async fn direct_argv_does_not_interpret_shell_syntax_and_reports_status() {
 }
 
 #[tokio::test]
-async fn child_environment_omits_ambient_credentials_but_accepts_trusted_values() {
+async fn child_environment_omits_ambient_credentials_and_private_input_uses_stdin() {
     let _lock = crate::test_support::env_lock().lock().unwrap();
     let fixture = Fixture::new();
     let name = "TCUI_COMMAND_TEST_PRIVATE_TOKEN";
     let previous = std::env::var_os(name);
     std::env::set_var(name, "must-not-leak");
-    let program = fixture.script("bin/environment", "printf '%s|%s' \"${TCUI_COMMAND_TEST_PRIVATE_TOKEN-unset}\" \"${TCUI_COMMAND_TEST_TRUSTED-unset}\"");
-    let result = run(
-        &fixture.approved(&program),
-        &program,
-        &[],
-        &[("TCUI_COMMAND_TEST_TRUSTED", "provided")],
-    )
-    .await;
+    let program = fixture.script(
+        "bin/environment",
+        "printf '%s|' \"${TCUI_COMMAND_TEST_PRIVATE_TOKEN-unset}\"; /bin/cat",
+    );
+    let result = run_with_input(&fixture.approved(&program), &program, &[], b"private stdin").await;
     match previous {
         Some(value) => std::env::set_var(name, value),
         None => std::env::remove_var(name),
     }
-    assert_eq!(result.unwrap().stdout, "unset|provided");
+    assert_eq!(result.unwrap().stdout, "unset|private stdin");
 }
 
 #[tokio::test]
@@ -225,12 +222,29 @@ async fn output_is_bounded_on_both_streams() {
             &fixture.approved(&program),
             &program,
             &[],
-            &[],
+            None,
             Duration::from_secs(5),
         )
         .await;
         assert!(result.unwrap_err().to_string().contains("output limit"));
     }
+}
+
+#[tokio::test]
+async fn stalled_stdin_write_obeys_process_timeout() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    let program = fixture.script("bin/ignore-input", "exec /bin/sleep 30");
+    let input = vec![b'x'; MAX_ARGUMENT_BYTES];
+    let result = run_with_timeout(
+        &fixture.approved(&program),
+        &program,
+        &[],
+        Some(&input),
+        Duration::from_millis(30),
+    )
+    .await;
+    assert!(result.unwrap_err().to_string().contains("timed out"));
 }
 
 #[tokio::test]
@@ -246,7 +260,7 @@ async fn timeout_kills_and_reaps_the_direct_child() {
         ),
     );
     let config = fixture.approved(&program);
-    let task = tokio::spawn(async move { run(&config, &program, &[], &[]).await });
+    let task = tokio::spawn(async move { run(&config, &program, &[]).await });
     let pid = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Ok(text) = std::fs::read_to_string(&pids) {
@@ -281,7 +295,7 @@ async fn cancellation_kills_process_group_and_reaps_leader() {
         ),
     );
     let config = fixture.approved(&program);
-    let task = tokio::spawn(async move { run(&config, &program, &[], &[]).await });
+    let task = tokio::spawn(async move { run(&config, &program, &[]).await });
     let pids = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Ok(text) = std::fs::read_to_string(&pids) {
@@ -323,7 +337,7 @@ async fn exited_leader_remains_waitable_until_descendant_cleanup() {
         ),
     );
     let config = fixture.approved(&program);
-    let task = tokio::spawn(async move { run(&config, &program, &[], &[]).await });
+    let task = tokio::spawn(async move { run(&config, &program, &[]).await });
     let pids = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Ok(text) = std::fs::read_to_string(&path) {

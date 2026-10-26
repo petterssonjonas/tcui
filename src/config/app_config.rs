@@ -220,15 +220,6 @@ pub struct LocalInferenceConfig {
     pub api_token_env: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct NtfyConfig {
-    pub enabled: bool,
-    pub host: String,
-    pub port: u16,
-    pub topic: String,
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CommandConfig {
@@ -240,7 +231,7 @@ pub struct CommandConfig {
 #[serde(default)]
 pub struct PushoverConfig {
     pub enabled: bool,
-    pub command: String,
+    pub application: String,
     pub use_vault: bool,
     pub env_file: Option<String>,
 }
@@ -249,7 +240,7 @@ impl Default for PushoverConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            command: "notify-ping".to_owned(),
+            application: "tcui".to_owned(),
             use_vault: false,
             env_file: None,
         }
@@ -261,7 +252,6 @@ impl Default for PushoverConfig {
 pub struct NotificationConfig {
     /// Allow automatic delivery through Herdr, a supported terminal, or local DBus.
     pub desktop: bool,
-    pub ntfy: NtfyConfig,
     pub pushover: PushoverConfig,
 }
 
@@ -436,22 +426,10 @@ impl Default for LocalInferenceConfig {
     }
 }
 
-impl Default for NtfyConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            host: String::new(),
-            port: 80,
-            topic: "tcui".to_string(),
-        }
-    }
-}
-
 impl Default for NotificationConfig {
     fn default() -> Self {
         Self {
             desktop: true,
-            ntfy: NtfyConfig::default(),
             pushover: PushoverConfig::default(),
         }
     }

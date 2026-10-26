@@ -244,6 +244,10 @@ impl TuiApp {
                 self.open_search_credentials();
                 Ok(())
             }
+            Action::OpenPushoverCredential { application } => {
+                self.open_pushover_credential(application);
+                Ok(())
+            }
             Action::SetManualModel(model) => {
                 self.open_manual_model(&model);
                 Ok(())

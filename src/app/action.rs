@@ -95,6 +95,9 @@ pub enum Action {
     UnlockApplication,
     LockApplication,
     OpenSearchCredentials,
+    OpenPushoverCredential {
+        application: bool,
+    },
     SetManualModel(String),
     MouseClick(MouseClickAction),
     SaveGeneratedFile,

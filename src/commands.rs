@@ -4,7 +4,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use color_eyre::eyre::{eyre, Result};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 
 use crate::config::AppConfig;
@@ -100,35 +100,44 @@ pub(crate) async fn run(
     config: &AppConfig,
     program: &str,
     arguments: &[String],
-    environment: &[(&str, &str)],
 ) -> Result<CommandOutput> {
-    run_with_timeout(config, program, arguments, environment, TIMEOUT).await
+    run_with_timeout(config, program, arguments, None, TIMEOUT).await
+}
+
+/// Send bounded private input without placing it in arguments or the child environment.
+pub(crate) async fn run_with_input(
+    config: &AppConfig,
+    program: &str,
+    arguments: &[String],
+    input: &[u8],
+) -> Result<CommandOutput> {
+    run_with_timeout(config, program, arguments, Some(input), TIMEOUT).await
 }
 
 async fn run_with_timeout(
     config: &AppConfig,
     program: &str,
     arguments: &[String],
-    environment: &[(&str, &str)],
+    input: Option<&[u8]>,
     timeout: Duration,
 ) -> Result<CommandOutput> {
     let program = authorize(config, program)?;
     if arguments.len() > 128
         || arguments.iter().map(String::len).sum::<usize>() > MAX_ARGUMENT_BYTES
         || arguments.iter().any(|argument| argument.contains('\0'))
-        || environment
-            .iter()
-            .any(|(key, value)| key.is_empty() || key.contains(['=', '\0']) || value.contains('\0'))
+        || input.is_some_and(|input| input.len() > MAX_ARGUMENT_BYTES)
     {
-        return Err(eyre!(
-            "invalid or excessive command arguments or environment"
-        ));
+        return Err(eyre!("invalid or excessive command arguments or input"));
     }
     let mut command = Command::new(program);
     command
         .args(arguments)
         .env_clear()
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -156,7 +165,6 @@ async fn run_with_timeout(
             command.env(name, value);
         }
     }
-    command.envs(environment.iter().copied());
     #[cfg(unix)]
     command.process_group(0);
     let mut process = ProcessGuard::new(command.spawn()?)?;
@@ -170,9 +178,17 @@ async fn run_with_timeout(
         .stderr
         .take()
         .ok_or_else(|| eyre!("missing command stderr"))?;
+    let stdin = process.child.stdin.take();
     let completion = async {
-        let ((), stdout, stderr) = tokio::try_join!(
+        let ((), (), stdout, stderr) = tokio::try_join!(
             process.wait_for_exit(),
+            async {
+                if let (Some(mut stdin), Some(input)) = (stdin, input) {
+                    stdin.write_all(input).await?;
+                    stdin.shutdown().await?;
+                }
+                Ok::<_, color_eyre::Report>(())
+            },
             read_bounded(stdout),
             read_bounded(stderr),
         )?;
