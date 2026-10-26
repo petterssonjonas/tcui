@@ -26,6 +26,7 @@ pub(super) fn save(
     delivery: Delivery,
     message: &str,
     recurring: bool,
+    cancellation: &super::execution::Cancellation,
 ) -> Result<()> {
     ensure!(
         !message.is_empty() && message.chars().count() <= 1024 && !message.contains('\0'),
@@ -45,6 +46,7 @@ pub(super) fn save(
         !guard.directory.try_exists(&guard.name)?,
         "reminder job already exists"
     );
+    cancellation.check()?;
     crate::config::app_config::replace_private_file(
         &guard.directory,
         OsStr::new(&guard.name),

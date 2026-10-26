@@ -217,21 +217,32 @@ must first be upgraded on their source instance with its original key metadata.
 
 ## Approved commands and reminders
 
-- Start with `@command <executable> <argument instructions>` for one direct launch.
+- Mention `@command` to let the agent choose approved programs and literal arguments.
+  It reads the conversation and invoked skills, executes tools, and observes results.
   Configure JSON whitelist/blacklist arrays in Settings → Terminal; blacklist wins.
-  The model chooses arguments, not the executable. No shell is used. Command output
-  becomes chat/model context. Trust approved scripts and their contents: this is
-  not a sandbox, and it does not restrict your manually approved terminal commands.
+  No shell is used. Command output becomes untrusted chat/model context. Trust
+  approved programs and their contents: this is not a sandbox, and does not
+  restrict manually approved terminal commands. Quoted examples and history alone
+  cannot authorize a command.
 - Commands have a 30-second timeout and 64-KiB output limit per stream.
   Cancel the request to terminate its Unix process group.
-- `@ping-user Tell me the backup is ready` sends an immediate Pushover notification.
-  Settings → Pushover opens masked encrypted user-key and selected app-token entry.
+- `@ping-user Tell me the backup is ready` asks for immediate Pushover delivery.
+  Settings → Pushover opens masked user-key and selected app-token entry.
+  New/replacement keys are encrypted by default; plaintext storage is an explicit
+  choice. Replacing an encrypted key requires unlock. Other saved keys are unchanged.
   One application token is required; additional named tokens are optional.
-  Curl must also be whitelisted; keys are supplied through standard input.
-- `@remindme to review subject X tomorrow at noon` creates a one-shot local-time
-  reminder. `@ping-user @remindme in 10m | Review subject X` explicitly requires
-  Pushover. Put both directives before the message. `@schedule` is equivalent.
-  Use `@remindme list` and `@remindme cancel <id>` to manage timers.
+  Curl must be whitelisted; keys are supplied through standard input.
+- The agent can explicitly read Pushover keys from the selected TCUI-keystore or
+  environment/file source. **Raw key reads disclose those keys to your AI provider.**
+  Encrypted records require unlock; plaintext Pushover records can be read while
+  locked. A locked/missing keystore key never falls back to an environment file.
+  Other credentials are not exposed through this tool.
+- Ask `@remindme via @ping-user in 20 min to review those companies` or
+  `Please @ping-user tomorrow at noon to review the backup`. Skills can appear
+  anywhere in the current request; no fixed grammar, directive order, or separator
+  is required. The agent uses conversation context and actual scheduling results.
+  `@schedule` also supports scheduling; ask naturally to list or cancel reminders.
+  Completed-action receipts survive a later model failure.
 - Scheduling requires the host's user systemd manager. Toolbox timers re-enter the
   originating container. Keep that container, TCUI binary, and curl available.
   Timers can outlive TCUI, but do not promise delivery after logout or reboot.

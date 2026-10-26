@@ -397,7 +397,7 @@ impl KeyStore {
                 "ssh_key" => SecretKind::SshKey,
                 _ => continue,
             };
-            // Authenticate labels before displaying potentially modified metadata.
+            // Validate before display; plaintext Pushover labels are not authenticated.
             store.read(&record.kind, &record.id, &keys)?;
             entries.push(SecretEntry {
                 id: record.id,
@@ -435,6 +435,61 @@ impl KeyStore {
                 CredentialStorage::Encrypted,
                 &keys,
             )
+        })
+    }
+
+    /// Pushover-only access: plaintext records remain readable while the vault is locked.
+    /// General machine-secret access deliberately retains its unconditional vault gate.
+    pub(crate) fn get_pushover_secret(
+        _config: &AppConfig,
+        id: &str,
+    ) -> std::result::Result<Option<Zeroizing<String>>, KeyStoreError> {
+        if !crate::notifications::pushover::is_credential_id(id) {
+            return Err(KeyStoreError::InvalidCredentialPayload);
+        }
+        let keys = vault::session()?;
+        let Some(payload) = Vault::open()?.read(SecretKind::Password.record_kind(), id, &keys)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Zeroizing::new(
+            std::str::from_utf8(&payload)
+                .map_err(|_| KeyStoreError::InvalidCredentialPayload)?
+                .to_owned(),
+        )))
+    }
+
+    pub(crate) fn pushover_storage(
+        _config: &AppConfig,
+        id: &str,
+    ) -> std::result::Result<Option<CredentialStorage>, KeyStoreError> {
+        if !crate::notifications::pushover::is_credential_id(id) {
+            return Err(KeyStoreError::InvalidCredentialPayload);
+        }
+        Vault::open()?.record_storage(SecretKind::Password.record_kind(), id)
+    }
+
+    /// Replaces exactly one Pushover key, authenticating any encrypted predecessor first.
+    /// Storage is explicit and independent of provider defaults or sibling key profiles.
+    pub(crate) fn set_pushover_secret(
+        _config: &AppConfig,
+        id: &str,
+        label: &str,
+        secret: &str,
+        storage: CredentialStorage,
+    ) -> std::result::Result<(), KeyStoreError> {
+        if !crate::notifications::pushover::is_credential_id(id)
+            || label.trim().is_empty()
+            || crate::notifications::pushover::validate_key(secret).is_err()
+        {
+            return Err(KeyStoreError::InvalidCredentialPayload);
+        }
+        let keys = vault::session()?;
+        let store = Vault::open()?;
+        store.transaction(|| {
+            let kind = SecretKind::Password.record_kind();
+            store.read(kind, id, &keys)?;
+            store.write(kind, id, label, secret.as_bytes(), storage, &keys)
         })
     }
 

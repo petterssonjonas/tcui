@@ -1091,31 +1091,6 @@ fn generate_title_truncates_unicode_only_at_character_boundaries() {
 }
 
 #[test]
-fn slash_remindme_is_handled_without_model_streaming() {
-    with_test_app("slash-remindme", |app| {
-        std::env::set_var("TCUI_REMINDER_SYSTEMD_RUN", "true");
-        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
-
-        runtime
-            .block_on(async {
-                app.send_message("/remindme in 10m | Stretch".to_string())
-                    .await
-            })
-            .expect("schedule reminder");
-
-        let tab = &app.ui.tabs[0];
-        assert_eq!(tab.messages.len(), 2);
-        assert_eq!(tab.messages[0].role, "user");
-        assert_eq!(tab.messages[1].role, "assistant");
-        assert!(tab.messages[1]
-            .content
-            .contains("Scheduled one-shot reminder"));
-
-        std::env::remove_var("TCUI_REMINDER_SYSTEMD_RUN");
-    });
-}
-
-#[test]
 fn apply_theme_selection_updates_popup_and_saved_config() {
     with_test_app("theme-selection", |app| {
         // When

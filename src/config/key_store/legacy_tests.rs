@@ -2,6 +2,164 @@ use super::test_support::{env_lock, TestEnv};
 use super::*;
 
 #[test]
+fn pushover_storage_is_explicit_scoped_and_preserves_encrypted_siblings() {
+    use crate::notifications::pushover::{application_key_id, APP_KEY_ID, USER_KEY_ID};
+    let _guard = env_lock().lock().unwrap();
+    let env = TestEnv::new("pushover-storage");
+    let config = env.config();
+    let plain = "p".repeat(30);
+    let encrypted = "e".repeat(30);
+    let replacement = "r".repeat(30);
+    KeyStore::set_pushover_secret(
+        &config,
+        USER_KEY_ID,
+        "User",
+        &plain,
+        CredentialStorage::Plaintext,
+    )
+    .unwrap();
+    assert_eq!(
+        KeyStore::get_pushover_secret(&config, USER_KEY_ID)
+            .unwrap()
+            .unwrap()
+            .as_str(),
+        plain,
+    );
+    assert!(KeyStore::set_pushover_secret(
+        &config,
+        "machine",
+        "Not Pushover",
+        &plain,
+        CredentialStorage::Plaintext,
+    )
+    .is_err());
+    assert!(KeyStore::set_pushover_secret(
+        &config,
+        APP_KEY_ID,
+        "App",
+        "invalid",
+        CredentialStorage::Plaintext,
+    )
+    .is_err());
+    KeyStore::initialize_vault(&config, "test-password").unwrap();
+    let sibling = application_key_id("sibling").unwrap();
+    for id in [APP_KEY_ID, sibling.as_str()] {
+        KeyStore::set_secret(&config, id, "App", SecretKind::Password, &encrypted).unwrap();
+    }
+    KeyStore::set_with_storage(
+        &config,
+        "Provider",
+        "provider-canary",
+        CredentialStorage::Plaintext,
+    )
+    .unwrap();
+    KeyStore::set_storage_default(&config, CredentialStorage::Plaintext).unwrap();
+    KeyStore::lock_vault(&config).unwrap();
+    assert!(KeyStore::set_pushover_secret(
+        &config,
+        APP_KEY_ID,
+        "App",
+        &replacement,
+        CredentialStorage::Plaintext,
+    )
+    .is_err());
+    assert_eq!(
+        KeyStore::pushover_storage(&config, APP_KEY_ID).unwrap(),
+        Some(CredentialStorage::Encrypted)
+    );
+    KeyStore::set_pushover_secret(
+        &config,
+        USER_KEY_ID,
+        "User",
+        &replacement,
+        CredentialStorage::Plaintext,
+    )
+    .unwrap();
+    KeyStore::unlock_vault(&config, "test-password").unwrap();
+    let connection = rusqlite::Connection::open(env.database_path()).unwrap();
+    let sibling_before: (Vec<u8>, Vec<u8>) = connection
+        .query_row(
+            "SELECT nonce,payload FROM tcui_credentials WHERE kind='machine_password' AND id=?1",
+            [&sibling],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    KeyStore::set_pushover_secret(
+        &config,
+        APP_KEY_ID,
+        "App",
+        &replacement,
+        CredentialStorage::Plaintext,
+    )
+    .unwrap();
+    let sibling_after: (Vec<u8>, Vec<u8>) = connection
+        .query_row(
+            "SELECT nonce,payload FROM tcui_credentials WHERE kind='machine_password' AND id=?1",
+            [&sibling],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        sibling_before, sibling_after,
+        "replacement must not rewrite sibling ciphertext"
+    );
+    assert_eq!(
+        KeyStore::get(&config, "Provider").unwrap().as_deref(),
+        Some("provider-canary")
+    );
+    KeyStore::lock_vault(&config).unwrap();
+    assert_eq!(
+        KeyStore::get_pushover_secret(&config, APP_KEY_ID)
+            .unwrap()
+            .unwrap()
+            .as_str(),
+        replacement
+    );
+    assert!(KeyStore::get_pushover_secret(&config, &sibling).is_err());
+    assert!(
+        KeyStore::get_secret(&config, USER_KEY_ID).is_err(),
+        "generic machine-secret gate stays locked"
+    );
+}
+
+#[test]
+fn pushover_plaintext_exception_never_allows_other_machine_secret_types() {
+    use crate::notifications::pushover::USER_KEY_ID;
+    let _guard = env_lock().lock().unwrap();
+    let env = TestEnv::new("pushover-plaintext-type-scope");
+    let config = env.initialized_config();
+    KeyStore::set_secret(
+        &config,
+        "machine",
+        "Host",
+        SecretKind::Password,
+        "machine-canary",
+    )
+    .unwrap();
+    KeyStore::set_secret(
+        &config,
+        USER_KEY_ID,
+        "SSH",
+        SecretKind::SshKey,
+        "ssh-canary",
+    )
+    .unwrap();
+    let conn = rusqlite::Connection::open(env.database_path()).unwrap();
+    conn.execute("UPDATE tcui_credentials SET encrypted=0,nonce=x''", [])
+        .unwrap();
+    assert!(KeyStore::get_secret(&config, "machine").is_err());
+    assert!(KeyStore::get_secret(&config, USER_KEY_ID).is_err());
+    assert!(KeyStore::set_pushover_secret(
+        &config,
+        "tcui.pushover.app-key:../machine",
+        "Bad ID",
+        &"p".repeat(30),
+        CredentialStorage::Plaintext,
+    )
+    .is_err());
+}
+
+#[test]
 fn encrypted_vault_reopens_only_with_correct_password() {
     let _guard = env_lock().lock().expect("env lock");
     let env = TestEnv::new("vault-reopen");

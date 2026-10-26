@@ -23,6 +23,45 @@ const CREDENTIAL_NAMES: [&str; 3] = [
     "PUSHOVER_APP_TOKEN",
 ];
 
+/// Only explicitly requested Pushover keys may be exposed to the model provider.
+pub(crate) struct AgentCredentials {
+    pub(crate) user_key: Zeroizing<String>,
+    pub(crate) app_key: Zeroizing<String>,
+    pub(crate) application: String,
+}
+
+pub(crate) fn credentials_for_agent(
+    config: &AppConfig,
+    application: Option<&str>,
+) -> Result<AgentCredentials> {
+    if !config.notifications.pushover.enabled {
+        return Err(eyre!("Pushover is disabled"));
+    }
+    let application = application.unwrap_or(&config.notifications.pushover.application);
+    let (user_key, app_key) = credentials(
+        config,
+        application,
+        |name| std::env::var(name).ok(),
+        |id| {
+            KeyStore::get_pushover_secret(config, id)
+                .map_err(|_| eyre!("Cannot read Pushover TCUI-keystore key; encrypted keys require an unlocked vault"))
+        },
+    )?;
+    Ok(AgentCredentials {
+        user_key,
+        app_key,
+        application: application.to_owned(),
+    })
+}
+
+pub(crate) fn is_credential_id(id: &str) -> bool {
+    id == USER_KEY_ID
+        || id == APP_KEY_ID
+        || id
+            .strip_prefix("tcui.pushover.app-key:")
+            .is_some_and(|name| name != "tcui" && application_key_id(name).is_ok())
+}
+
 /// Contains credentials: serialize only into the private, short-lived reminder job file.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,18 +84,11 @@ pub(crate) fn prepare(config: &AppConfig) -> Result<Option<Delivery>> {
     }
     let program = commands::authorize(config, "curl")
         .map_err(|_| eyre!("Pushover curl is not available under the current command policy"))?;
-    let (user_key, app_key) = credentials(
-        config,
-        |name| std::env::var(name).ok(),
-        |id| {
-            KeyStore::get_secret(config, id)
-                .map_err(|_| eyre!("Pushover requires an unlocked credential vault"))
-        },
-    )?;
+    let mut credentials = credentials_for_agent(config, None)?;
     Ok(Some(Delivery {
         program,
-        user_key,
-        app_key,
+        user_key: std::mem::take(&mut *credentials.user_key),
+        app_key: std::mem::take(&mut *credentials.app_key),
     }))
 }
 
@@ -167,21 +199,18 @@ pub(crate) fn application_key_id(application: &str) -> Result<String> {
 
 fn credentials(
     config: &AppConfig,
+    application: &str,
     get: impl Fn(&str) -> Option<String>,
-    vault: impl Fn(&str) -> Result<Option<String>>,
-) -> Result<(String, String)> {
+    vault: impl Fn(&str) -> Result<Option<Zeroizing<String>>>,
+) -> Result<(Zeroizing<String>, Zeroizing<String>)> {
     let settings = &config.notifications.pushover;
-    let selected = application_key_id(&settings.application)?;
-    let (mut user, mut app) = if settings.use_vault {
-        // This branch must never inspect environment or file credentials, even on failure.
-        let user = Zeroizing::new(
-            vault(USER_KEY_ID)?
-                .ok_or_else(|| eyre!("Pushover user key is missing from the vault"))?,
-        );
-        let app = Zeroizing::new(
-            vault(&selected)?
-                .ok_or_else(|| eyre!("Pushover application key is missing from the vault"))?,
-        );
+    let selected = application_key_id(application)?;
+    let (user, app) = if settings.use_vault {
+        // Never inspect environment or file credentials, including after a keystore failure.
+        let user = vault(USER_KEY_ID)?
+            .ok_or_else(|| eyre!("Pushover user key is missing from the TCUI keystore"))?;
+        let app = vault(&selected)?
+            .ok_or_else(|| eyre!("Pushover application key is missing from the TCUI keystore"))?;
         (user, app)
     } else {
         let mut values = match &settings.env_file {
@@ -196,7 +225,7 @@ fn credentials(
         let user = values
             .remove("PUSHOVER_USER_KEY")
             .ok_or_else(|| eyre!("Pushover user key is missing from the configured source"))?;
-        let app = if settings.application == "tcui" {
+        let app = if application == "tcui" {
             values
                 .remove("PUSHOVER_TCUI_APP_TOKEN")
                 .or_else(|| values.remove("PUSHOVER_APP_TOKEN"))
@@ -208,7 +237,7 @@ fn credentials(
     };
     validate_key(&user)?;
     validate_key(&app)?;
-    Ok((std::mem::take(&mut *user), std::mem::take(&mut *app)))
+    Ok((user, app))
 }
 
 fn read_env_file(path: &Path) -> Result<HashMap<String, Zeroizing<String>>> {
@@ -319,6 +348,7 @@ mod tests {
         config.notifications.pushover.env_file = Some("/not/read".into());
         let result = credentials(
             &config,
+            &config.notifications.pushover.application,
             |_| panic!("vault mode read environment"),
             |_| Err(eyre!("locked")),
         );
@@ -331,8 +361,9 @@ mod tests {
         config.notifications.pushover.use_vault = true;
         assert!(credentials(
             &config,
+            &config.notifications.pushover.application,
             |_| panic!("vault mode read environment"),
-            |id| { Ok((id == USER_KEY_ID).then(|| USER.to_string())) }
+            |id| { Ok((id == USER_KEY_ID).then(|| Zeroizing::new(USER.to_string()))) }
         )
         .is_err());
     }
@@ -342,6 +373,7 @@ mod tests {
         let config = AppConfig::default();
         let (user, app) = credentials(
             &config,
+            &config.notifications.pushover.application,
             |name| {
                 Some(
                     match name {
@@ -369,9 +401,10 @@ mod tests {
             "PUSHOVER_TCUI_APP_TOKEN" => Some(APP.to_owned()),
             _ => None,
         };
-        assert!(credentials(&config, source, |_| panic!("vault read")).is_err());
+        assert!(credentials(&config, "work", source, |_| panic!("vault read")).is_err());
         let (user, app) = credentials(
             &config,
+            "work",
             |name| {
                 if name == "PUSHOVER_APP_TOKEN" {
                     Some(OTHER.to_owned())
@@ -427,11 +460,12 @@ mod tests {
         config.notifications.pushover.env_file = Some(path.to_string_lossy().into_owned());
         let (_, app) = credentials(
             &config,
+            &config.notifications.pushover.application,
             |name| (name == "PUSHOVER_APP_TOKEN").then(|| OTHER.into()),
             |_| panic!("vault read"),
         )
         .expect("file with environment override");
-        assert_eq!(app, OTHER);
+        assert_eq!(app.as_str(), OTHER);
         let link = root.join("link");
         symlink(&path, &link).expect("symlink");
         assert!(read_env_file(&link).is_err());
@@ -549,26 +583,126 @@ mod tests {
                 APP_KEY_ID => Some(OTHER.to_owned()),
                 id if id == selected => Some(APP.to_owned()),
                 _ => None,
-            })
+            }
+            .map(Zeroizing::new))
         };
         assert_eq!(
-            credentials(&config, |_| panic!("environment read"), load)
+            credentials(&config, "alerts", |_| panic!("environment read"), load)
                 .unwrap()
-                .1,
+                .1
+                .as_str(),
             APP
         );
         assert!(credentials(
             &config,
+            "alerts",
             |_| panic!("environment read"),
             |id| {
                 Ok(match id {
                     USER_KEY_ID => Some(USER.to_owned()),
                     APP_KEY_ID => Some(OTHER.to_owned()),
                     _ => None,
-                })
+                }
+                .map(Zeroizing::new))
             }
         )
         .is_err());
+    }
+
+    #[test]
+    fn agent_keys_select_exact_profiles_and_keep_encrypted_failures_closed() {
+        use crate::config::key_store::{test_support::TestEnv, CredentialStorage};
+        let _lock = crate::test_support::env_lock().lock().unwrap();
+        let env = TestEnv::new("pushover-agent-key-sources");
+        let mut config = env.config();
+        config.notifications.pushover.enabled = true;
+        config.notifications.pushover.use_vault = true;
+        config.notifications.pushover.env_file = Some("/must/not/read".into());
+        KeyStore::initialize_vault(&config, "test-only-vault-password").unwrap();
+        for (id, key, storage) in [
+            (USER_KEY_ID.to_owned(), USER, CredentialStorage::Plaintext),
+            (APP_KEY_ID.to_owned(), APP, CredentialStorage::Plaintext),
+            (
+                application_key_id("secure").unwrap(),
+                OTHER,
+                CredentialStorage::Encrypted,
+            ),
+        ] {
+            KeyStore::set_pushover_secret(&config, &id, "Fixture", key, storage).unwrap();
+        }
+        KeyStore::set_secret(
+            &config,
+            "unrelated-machine",
+            "Unrelated",
+            crate::config::key_store::SecretKind::Password,
+            "unrelated-canary",
+        )
+        .unwrap();
+        KeyStore::lock_vault(&config).unwrap();
+        let keys = credentials_for_agent(&config, None).unwrap();
+        assert_eq!(keys.application, "tcui");
+        assert_eq!((keys.user_key.as_str(), keys.app_key.as_str()), (USER, APP));
+        assert!(credentials_for_agent(&config, Some("secure")).is_err());
+        assert!(credentials_for_agent(&config, Some("missing")).is_err());
+        assert!(credentials_for_agent(&config, Some("../unrelated-machine")).is_err());
+        assert!(KeyStore::get_pushover_secret(&config, "unrelated-machine").is_err());
+        assert!(KeyStore::get_secret(&config, "unrelated-machine").is_err());
+        assert!(KeyStore::get_secret(&config, USER_KEY_ID).is_err());
+        config.notifications.pushover.application = "secure".into();
+        assert!(credentials_for_agent(&config, None).is_err());
+        assert_eq!(
+            credentials_for_agent(&config, Some("tcui"))
+                .unwrap()
+                .app_key
+                .as_str(),
+            APP
+        );
+        KeyStore::unlock_vault(&config, "test-only-vault-password").unwrap();
+        let keys = credentials_for_agent(&config, None).unwrap();
+        assert_eq!(keys.application, "secure");
+        assert_eq!(keys.app_key.as_str(), OTHER);
+        config.notifications.pushover.enabled = false;
+        assert!(credentials_for_agent(&config, Some("tcui")).is_err());
+    }
+
+    #[test]
+    fn agent_environment_override_uses_only_explicit_pushover_sources() {
+        let _lock = crate::test_support::env_lock().lock().unwrap();
+        let previous = CREDENTIAL_NAMES.map(|name| (name, std::env::var_os(name)));
+        struct Restore([(&'static str, Option<std::ffi::OsString>); 3]);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (name, value) in &self.0 {
+                    if let Some(value) = value {
+                        std::env::set_var(name, value);
+                    } else {
+                        std::env::remove_var(name);
+                    }
+                }
+            }
+        }
+        let _restore = Restore(previous);
+        std::env::set_var("PUSHOVER_USER_KEY", USER);
+        std::env::set_var("PUSHOVER_TCUI_APP_TOKEN", APP);
+        std::env::set_var("PUSHOVER_APP_TOKEN", OTHER);
+        let mut config = AppConfig::default();
+        config.notifications.pushover.enabled = true;
+        let keys = credentials_for_agent(&config, None).unwrap();
+        assert_eq!(keys.app_key.as_str(), APP);
+        let keys = credentials_for_agent(&config, Some("work")).unwrap();
+        assert_eq!(keys.application, "work");
+        assert_eq!(
+            (keys.user_key.as_str(), keys.app_key.as_str()),
+            (USER, OTHER)
+        );
+        std::env::remove_var("PUSHOVER_APP_TOKEN");
+        assert!(credentials_for_agent(&config, Some("work")).is_err());
+        std::env::set_var("PUSHOVER_TCUI_APP_TOKEN", "invalid");
+        std::env::set_var("PUSHOVER_APP_TOKEN", OTHER);
+        assert!(
+            credentials_for_agent(&config, None).is_err(),
+            "invalid preferred token must not downgrade"
+        );
     }
 
     #[tokio::test]

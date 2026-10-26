@@ -32,7 +32,8 @@ fn cancelling_host_request_during_planning_prevents_later_execution() {
             .build()
             .unwrap()
             .block_on(async {
-                let planner = planner_fixture(vec![marker.to_str().unwrap().to_owned()]).await;
+                let planner =
+                    planner_fixture(&program, vec![marker.to_str().unwrap().to_owned()]).await;
                 configure_app(app, &program, &planner.endpoint).await;
 
                 tokio::time::timeout(
@@ -56,7 +57,8 @@ fn cancelling_host_request_during_planning_prevents_later_execution() {
                     .await
                     .expect("root cancellation remains responsive during planning")
                     .unwrap();
-                assert_request_cleared(app, id);
+                assert!(!app.request_accepts_events(id));
+                assert!(!app.ui.tabs[app.ui.active_tab].streaming);
                 observe_worker_stop(app, id).await;
                 planner.release.send(()).expect("release stalled planner");
                 tokio::time::timeout(DEADLINE, planner.finished)
@@ -107,7 +109,7 @@ fn cancelling_executing_host_request_terminates_group_without_final_side_effect(
                 let arguments = [&started_path, &release_path, &marker]
                     .map(|path| path.to_str().unwrap().to_owned())
                     .to_vec();
-                let planner = planner_fixture(arguments).await;
+                let planner = planner_fixture(&program, arguments).await;
                 configure_app(app, &program, &planner.endpoint).await;
                 tokio::time::timeout(
                     DEADLINE,
@@ -150,7 +152,8 @@ fn cancelling_executing_host_request_terminates_group_without_final_side_effect(
                     .await
                     .expect("root cancellation remains responsive during execution")
                     .unwrap();
-                assert_request_cleared(app, id);
+                assert!(!app.request_accepts_events(id));
+                assert!(!app.ui.tabs[app.ui.active_tab].streaming);
                 observe_worker_stop(app, id).await;
                 for exit in &exits {
                     let _ready = tokio::time::timeout(DEADLINE, exit.readable())
@@ -219,7 +222,8 @@ struct PlannerFixture {
     finished: tokio::task::JoinHandle<()>,
 }
 
-async fn planner_fixture(arguments: Vec<String>) -> PlannerFixture {
+async fn planner_fixture(program: &Path, arguments: Vec<String>) -> PlannerFixture {
+    let program = program.to_string_lossy().into_owned();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let (request_tx, request) = oneshot::channel();
@@ -228,7 +232,8 @@ async fn planner_fixture(arguments: Vec<String>) -> PlannerFixture {
         let (mut stream, _) = listener.accept().await.unwrap();
         request_tx.send(read_http_json(&mut stream).await).unwrap();
         release_rx.await.expect("explicit planner release");
-        let plan = json!({"arguments": arguments}).to_string();
+        let plan = json!({"tool":"command","arguments":{"program":program,"arguments":arguments}})
+            .to_string();
         let event = json!({"choices": [{"delta": {"content": plan}}]});
         let body = format!("data: {event}\n\ndata: [DONE]\n\n");
         let response = format!(
