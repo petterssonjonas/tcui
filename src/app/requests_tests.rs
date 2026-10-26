@@ -418,3 +418,88 @@ fn missing_destination_is_recovered_without_selecting_it_or_using_the_active_app
         );
     });
 }
+
+#[cfg(unix)]
+#[test]
+fn cancellation_waits_for_concurrently_committed_host_receipt_before_removing_request() {
+    use std::os::unix::fs::PermissionsExt;
+    with_test_app("late-host-receipt", |app| {
+        let conversation = app.ui.tabs[0].active_conversation;
+        let id = register(app, conversation, conversation);
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        let program = home.join("committed-action");
+        let effect = home.join("actual-effect");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nprintf 'completed' > \"$HOME/actual-effect\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut config = app.config.blocking_read().clone();
+        config.commands.whitelist = vec![program.to_string_lossy().into_owned()];
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let receipts = app.requests[&id].host_receipts.clone();
+            let sender = app.action_tx.clone();
+            let completion = StreamCompletion {
+                request_id: id,
+                sender: sender.clone(),
+            };
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let worker = tokio::spawn(crate::skill_runtime::host_receipts::capture(
+                receipts,
+                id,
+                sender,
+                async move {
+                    let _completion = completion;
+                    let output = crate::commands::run(&config, program.to_str().unwrap(), &[])
+                        .await
+                        .unwrap();
+                    assert!(output.success);
+                    entered_tx.send(()).unwrap();
+                    // Hold a currently executing poll, not a pending future: abort cannot
+                    // preempt it, reproducing the multithreaded publication race.
+                    release_rx
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                    crate::skill_runtime::host_receipts::record(
+                        "Confirmed host command completed".into(),
+                    );
+                    std::future::pending::<()>().await;
+                },
+            ));
+            app.requests.get_mut(&id).unwrap().abort = Some(worker.abort_handle());
+            entered_rx.await.unwrap();
+            assert_eq!(std::fs::read(&effect).unwrap(), b"completed");
+            app.cancel_request(id).unwrap();
+            app.cancel_request(id).unwrap();
+            assert!(
+                app.requests.contains_key(&id),
+                "retain destination until producer stops"
+            );
+            release_tx.send(()).unwrap();
+            assert!(worker.await.unwrap_err().is_cancelled());
+            while let Ok(action) = app.action_rx.try_recv() {
+                app.dispatch(action).await.unwrap();
+            }
+        });
+        assert!(!app.requests.contains_key(&id));
+        let persisted = app.storage.get_messages(conversation).unwrap();
+        assert!(persisted
+            .iter()
+            .any(
+                |message| message.tool_source.as_deref() == Some("Host action receipt")
+                    && message.content == "Confirmed host command completed"
+            ));
+        assert!(persisted
+            .last()
+            .unwrap()
+            .content
+            .contains("[Response cancelled]"));
+    });
+}

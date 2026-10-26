@@ -308,6 +308,25 @@ impl Vault {
         }))
     }
 
+    pub fn record_storage(&self, kind: &str, id: &str) -> Result<Option<CredentialStorage>> {
+        let encrypted: Option<bool> = self
+            .conn
+            .query_row(
+                "SELECT encrypted FROM tcui_credentials WHERE kind=?1 AND id=?2",
+                params![kind, id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| KeyStoreError::Read)?;
+        Ok(encrypted.map(|encrypted| {
+            if encrypted {
+                CredentialStorage::Encrypted
+            } else {
+                CredentialStorage::Plaintext
+            }
+        }))
+    }
+
     pub fn selected_storage(
         &self,
         id: &str,
@@ -716,9 +735,7 @@ impl Vault {
 
     fn decode(&self, record: &Record, keys: &UnlockKeys) -> Result<Zeroizing<Vec<u8>>> {
         if record.storage == CredentialStorage::Plaintext {
-            if is_machine_kind(&record.kind) || !record.nonce.is_empty() {
-                return Err(KeyStoreError::VaultAuthentication);
-            }
+            validate_plaintext_record(record)?;
             return Ok(Zeroizing::new(record.payload.to_vec()));
         }
         decrypt(
@@ -765,7 +782,7 @@ impl Vault {
             )?;
             encrypted.as_slice()
         } else {
-            if is_machine_kind(kind) {
+            if !permits_plaintext(kind, id) {
                 return Err(KeyStoreError::InvalidCredentialPayload);
             }
             nonce = Vec::new();
@@ -790,10 +807,16 @@ impl Vault {
 }
 
 fn validate_plaintext_record(record: &Record) -> Result<()> {
-    if is_machine_kind(&record.kind) || !record.nonce.is_empty() {
+    if !permits_plaintext(&record.kind, &record.id) || !record.nonce.is_empty() {
         return Err(KeyStoreError::VaultAuthentication);
     }
     Ok(())
+}
+
+fn permits_plaintext(kind: &str, id: &str) -> bool {
+    !is_machine_kind(kind)
+        || (kind == SecretKind::Password.record_kind()
+            && crate::notifications::pushover::is_credential_id(id))
 }
 
 fn records_hash(records: &[Record]) -> Result<[u8; 32]> {

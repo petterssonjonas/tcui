@@ -16,11 +16,7 @@ const PUSHOVER_PRESETS: [(&str, &str); 2] = [
 ];
 
 fn is_pushover_secret(id: &str) -> bool {
-    id == USER_KEY_ID
-        || id == APP_KEY_ID
-        || id
-            .strip_prefix("tcui.pushover.app-key:")
-            .is_some_and(|name| pushover::application_key_id(name).is_ok())
+    pushover::is_credential_id(id)
 }
 
 /// Nonsecret editor intent; safe to carry across application teardown.
@@ -240,7 +236,7 @@ impl CredentialManager {
         let popup = crate::tui::components::centered_rect(86, 82, area);
         frame.render_widget(Clear, popup);
         let title = if self.pushover_edit {
-            " Pushover encrypted keys "
+            " Pushover TCUI-keystore keys "
         } else if self.search_service.is_some()
             || matches!(self.screen, Screen::SearchKeys | Screen::RemoveSearchKey)
         {
@@ -313,7 +309,7 @@ impl CredentialManager {
             }
             Screen::Vault => {
                 lines.push(Line::from(self.notice.as_str()));
-                lines.push(Line::from("Defaults apply only to new credentials. Existing connections keep their storage; machine secrets always stay encrypted."));
+                lines.push(Line::from("Defaults affect new provider credentials only. Pushover has its own storage setting; other machine secrets always stay encrypted."));
                 rows.extend(
                     [
                         "Unlock / initialize vault",
@@ -421,17 +417,36 @@ impl CredentialManager {
                     "Secret for {} (masked):",
                     self.secret_label
                 )));
-                lines.push(Line::from(if is_pushover_secret(&self.secret_id) {
-                    "Enter the 30-character Pushover key. Stored encrypted in the credential vault. Scheduled jobs copy keys into private plaintext payload files; see Pushover settings for lifetime and cancellation."
+                if is_pushover_secret(&self.secret_id) {
+                    lines.push(Line::from("Enter the 30-character Pushover key."));
+                    lines.push(Line::from(
+                        if self.storage == CredentialStorage::Encrypted {
+                            "Storage: password-encrypted TCUI keystore."
+                        } else {
+                            "WARNING: storage is PLAINTEXT SQLite; readable while locked."
+                        },
+                    ));
+                    lines.push(Line::from(self.notice.as_str()));
+                    lines.push(Line::from(
+                        "Model key reads disclose keys to the configured AI provider.",
+                    ));
+                    lines.push(Line::from(
+                        "Scheduled jobs keep private plaintext copies; see settings.",
+                    ));
                 } else {
-                    "Paste a complete multiline SSH private key. Existing value can be replaced with Ctrl+U."
-                }));
+                    lines.push(Line::from("Paste a complete multiline SSH private key. Existing value can be replaced with Ctrl+U."));
+                }
                 "Enter save · Shift+Enter newline · Ctrl+U clear · Esc cancel"
             }
             Screen::PushoverSaved => {
                 lines.push(Line::from(format!(
-                    "Saved {} in the encrypted vault.",
-                    self.secret_label
+                    "Saved {} in the {} TCUI keystore.",
+                    self.secret_label,
+                    if self.storage == CredentialStorage::Encrypted {
+                        "encrypted"
+                    } else {
+                        "PLAINTEXT"
+                    }
                 )));
                 lines.push(Line::from(
                     "Other application tokens are unchanged. No key is stored in settings.",
@@ -619,6 +634,17 @@ impl TuiApp {
     fn show_pushover_credential(&mut self, config: &AppConfig, target: PushoverCredentialTarget) {
         let mut manager = CredentialManager::new(config, true);
         manager.pushover_edit = true;
+        manager.storage = if config.notifications.pushover.encrypt_credentials {
+            CredentialStorage::Encrypted
+        } else {
+            CredentialStorage::Plaintext
+        };
+        manager.notice = if config.notifications.pushover.use_vault {
+            "Delivery source: TCUI keystore."
+        } else {
+            "Delivery source: environment/file; keystore keys are not selected."
+        }
+        .into();
         let result = (|| {
             let (id, label) = match &target {
                 PushoverCredentialTarget::User => (USER_KEY_ID.into(), "Pushover user key".into()),
@@ -631,15 +657,7 @@ impl TuiApp {
             manager.secret_label = label;
             manager.secret_kind = SecretKind::Password;
             manager.pushover_target = Some(target);
-            if KeyStore::vault_status(config)
-                .map_err(|error| error.to_string())?
-                .unlocked
-            {
-                manager.go(Screen::SecretValue);
-                Ok(())
-            } else {
-                self.request_vault_unlock(config, &mut manager, AfterUnlock::Pushover)
-            }
+            self.begin_pushover_input(config, &mut manager)
         })();
         if let Err(error) = result {
             manager.error = Some(error);
@@ -647,6 +665,33 @@ impl TuiApp {
         self.ui.palette = None;
         self.ui.settings_v2 = None;
         self.ui.credential_manager = Some(manager);
+    }
+
+    fn begin_pushover_input(
+        &mut self,
+        config: &AppConfig,
+        manager: &mut CredentialManager,
+    ) -> Result<(), String> {
+        manager.notice = if config.notifications.pushover.use_vault {
+            "Delivery source: TCUI keystore."
+        } else {
+            "Delivery source: environment/file; keystore keys are not selected."
+        }
+        .into();
+        let existing = KeyStore::pushover_storage(config, &manager.secret_id)
+            .map_err(|error| error.to_string())?;
+        let needs_unlock = manager.storage == CredentialStorage::Encrypted
+            || existing == Some(CredentialStorage::Encrypted);
+        if needs_unlock
+            && !KeyStore::vault_status(config)
+                .map_err(|error| error.to_string())?
+                .unlocked
+        {
+            self.request_vault_unlock(config, manager, AfterUnlock::Pushover)
+        } else {
+            manager.go(Screen::SecretValue);
+            Ok(())
+        }
     }
 
     pub(crate) fn take_pushover_credential_restart(&mut self) -> Option<PushoverCredentialTarget> {
@@ -1326,19 +1371,18 @@ impl TuiApp {
                         .push_str(&format!(" · imported {count} credential(s)"));
                 }
                 index if index >= 7 + manager.secrets.len() => {
-                    if !KeyStore::vault_status(config)
-                        .map_err(|e| e.to_string())?
-                        .unlocked
-                    {
-                        return Err("Unlock or initialize the vault first.".into());
-                    }
+                    manager.storage = if config.notifications.pushover.encrypt_credentials {
+                        CredentialStorage::Encrypted
+                    } else {
+                        CredentialStorage::Plaintext
+                    };
                     let (id, label) = PUSHOVER_PRESETS[index - 7 - manager.secrets.len()];
                     manager.secret_id = id.into();
                     manager.secret_label = label.into();
                     manager.secret_kind = SecretKind::Password;
                     manager.secret_value.zeroize();
                     // Replacement starts blank: never reveal the saved key, even temporarily.
-                    manager.go(Screen::SecretValue);
+                    self.begin_pushover_input(config, manager)?;
                 }
                 index => {
                     let secret = manager
@@ -1350,7 +1394,12 @@ impl TuiApp {
                     manager.secret_kind = secret.kind;
                     if is_pushover_secret(&manager.secret_id) {
                         manager.secret_value.zeroize();
-                        manager.go(Screen::SecretValue);
+                        manager.storage = if config.notifications.pushover.encrypt_credentials {
+                            CredentialStorage::Encrypted
+                        } else {
+                            CredentialStorage::Plaintext
+                        };
+                        self.begin_pushover_input(config, manager)?;
                         return Ok(());
                     }
                     manager.secret_value = KeyStore::get_secret(config, &secret.id)
@@ -1513,16 +1562,24 @@ impl TuiApp {
                     return Err("Enter a secret value.".into());
                 }
                 if is_pushover_secret(&manager.secret_id) {
-                    pushover::validate_key(&manager.input).map_err(|error| error.to_string())?;
+                    KeyStore::set_pushover_secret(
+                        config,
+                        &manager.secret_id,
+                        &manager.secret_label,
+                        &manager.input,
+                        manager.storage,
+                    )
+                    .map_err(|error| error.to_string())?;
+                } else {
+                    KeyStore::set_secret(
+                        config,
+                        &manager.secret_id,
+                        &manager.secret_label,
+                        manager.secret_kind,
+                        &manager.input,
+                    )
+                    .map_err(|error| error.to_string())?;
                 }
-                KeyStore::set_secret(
-                    config,
-                    &manager.secret_id,
-                    &manager.secret_label,
-                    manager.secret_kind,
-                    &manager.input,
-                )
-                .map_err(|e| e.to_string())?;
                 if manager.pushover_edit {
                     manager.go(Screen::PushoverSaved);
                 } else {
@@ -2154,6 +2211,149 @@ mod tests {
                 }
             },
         );
+    }
+
+    #[test]
+    fn pushover_settings_save_plaintext_while_locked_and_gate_encrypted_replacements() {
+        fn toggle_storage(app: &mut TuiApp, runtime: &tokio::runtime::Runtime) {
+            app.open_settings_page(Some("notifications.pushover.encrypt_credentials"));
+            let action = app
+                .settings_workspace_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .expect("storage toggle");
+            runtime
+                .block_on(app.dispatch(action))
+                .expect("save storage selection");
+        }
+        let mut initial = AppConfig::default();
+        initial.notifications.pushover.enabled = true;
+        initial.notifications.pushover.use_vault = true;
+        super::super::tests::with_test_app_config("pushover-plaintext-editor", initial, |app| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            assert!(
+                app.config
+                    .blocking_read()
+                    .notifications
+                    .pushover
+                    .encrypt_credentials
+            );
+            toggle_storage(app, &runtime);
+            let config = app.config.blocking_read().clone();
+            assert!(!config.notifications.pushover.encrypt_credentials);
+            assert!(!KeyStore::vault_status(&config).unwrap().initialized);
+            for (application, key) in [(false, "u".repeat(30)), (true, "a".repeat(30))] {
+                app.open_pushover_credential(application);
+                let manager = app.ui.credential_manager.as_ref().unwrap();
+                assert!(manager.screen == Screen::SecretValue && manager.masked());
+                assert!(manager.input.is_empty());
+                assert_eq!(manager.storage, CredentialStorage::Plaintext);
+                paste(app, &key);
+                let mut terminal =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        app.ui
+                            .credential_manager
+                            .as_ref()
+                            .unwrap()
+                            .render(frame, frame.area())
+                    })
+                    .unwrap();
+                assert!(!terminal.backend().to_string().contains(&key));
+                press(app, KeyCode::Enter);
+                assert!(
+                    app.ui.credential_manager.as_ref().unwrap().screen == Screen::PushoverSaved
+                );
+                press(app, KeyCode::Esc);
+            }
+            let keys = pushover::credentials_for_agent(&config, None).unwrap();
+            assert_eq!(
+                (keys.user_key.as_str(), keys.app_key.as_str()),
+                ("u".repeat(30).as_str(), "a".repeat(30).as_str())
+            );
+            KeyStore::initialize_vault(&config, "pushover-storage-password").unwrap();
+            let sibling = pushover::application_key_id("encrypted_sibling").unwrap();
+            KeyStore::set_secret(
+                &config,
+                &sibling,
+                "Sibling",
+                SecretKind::Password,
+                &"s".repeat(30),
+            )
+            .unwrap();
+            KeyStore::lock_vault(&config).unwrap();
+            app.open_pushover_credential(false);
+            assert!(app.ui.credential_manager.as_ref().unwrap().screen == Screen::SecretValue);
+            paste(app, &"r".repeat(30));
+            press(app, KeyCode::Enter);
+            assert_eq!(
+                pushover::credentials_for_agent(&config, None)
+                    .unwrap()
+                    .user_key
+                    .as_str(),
+                "r".repeat(30)
+            );
+            press(app, KeyCode::Esc);
+            app.config
+                .blocking_write()
+                .notifications
+                .pushover
+                .application = "encrypted_sibling".into();
+            app.open_pushover_credential(true);
+            assert!(app.ui.credential_manager.as_ref().unwrap().screen == Screen::Unlock);
+            press(app, KeyCode::Esc);
+            assert_eq!(
+                KeyStore::pushover_storage(&config, &sibling).unwrap(),
+                Some(CredentialStorage::Encrypted)
+            );
+            KeyStore::unlock_vault(&config, "pushover-storage-password").unwrap();
+            app.open_pushover_credential(true);
+            assert!(app.ui.credential_manager.as_ref().unwrap().screen == Screen::SecretValue);
+            paste(app, &"p".repeat(30));
+            press(app, KeyCode::Enter);
+            press(app, KeyCode::Esc);
+            assert_eq!(
+                KeyStore::pushover_storage(&config, &sibling).unwrap(),
+                Some(CredentialStorage::Plaintext)
+            );
+            assert_eq!(
+                KeyStore::get_pushover_secret(&config, APP_KEY_ID)
+                    .unwrap()
+                    .unwrap()
+                    .as_str(),
+                "a".repeat(30)
+            );
+            toggle_storage(app, &runtime);
+            assert!(
+                app.config
+                    .blocking_read()
+                    .notifications
+                    .pushover
+                    .encrypt_credentials
+            );
+            app.open_pushover_credential(false);
+            assert_eq!(
+                app.ui.credential_manager.as_ref().unwrap().storage,
+                CredentialStorage::Encrypted
+            );
+            paste(app, &"e".repeat(30));
+            press(app, KeyCode::Enter);
+            KeyStore::lock_vault(&config).unwrap();
+            assert_eq!(
+                KeyStore::pushover_storage(&config, USER_KEY_ID).unwrap(),
+                Some(CredentialStorage::Encrypted)
+            );
+            assert!(KeyStore::get_pushover_secret(&config, USER_KEY_ID).is_err());
+            assert_eq!(
+                KeyStore::get_pushover_secret(&config, APP_KEY_ID)
+                    .unwrap()
+                    .unwrap()
+                    .as_str(),
+                "a".repeat(30)
+            );
+        });
     }
 
     #[test]

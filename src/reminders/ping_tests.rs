@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
-use super::{handle_request, ping, store};
+use super::{agent_tool, ping, store};
 use crate::config::key_store::SecretKind;
 use crate::config::{AppConfig, KeyStore};
 use crate::notifications::pushover::{APP_KEY_ID, USER_KEY_ID};
@@ -33,6 +33,10 @@ impl Fixture {
             ("XDG_CACHE_HOME", root.join("cache").into_os_string()),
             ("TCUI_REMINDER_SYSTEMD_RUN", OsString::from("/usr/bin/true")),
             ("TCUI_REMINDER_SYSTEMCTL", OsString::from("/usr/bin/true")),
+            (
+                "TCUI_REMINDER_SYSTEMD_ANALYZE",
+                OsString::from("/usr/bin/false"),
+            ),
             ("PATH", path),
         ];
         let previous = values
@@ -103,10 +107,14 @@ print('{{"status":1}}')
     }
 
     fn schedule(&self) -> super::ReminderRecord {
-        handle_request(
+        agent_tool(
             &self.config,
-            "to look into subject X tomorrow at noon",
-            false,
+            &serde_json::json!({
+                "action": "create",
+                "after_seconds": 1200,
+                "message": "look into subject X",
+                "pushover": true,
+            }),
         )
         .unwrap();
         let records = store::list().unwrap();
@@ -195,7 +203,11 @@ fn cancellation_removes_a_pending_plaintext_snapshot_before_delivery() {
     let _lock = crate::test_support::env_lock().lock().unwrap();
     let fixture = Fixture::new();
     let record = fixture.schedule();
-    handle_request(&fixture.config, &format!("cancel {}", record.id), false).unwrap();
+    agent_tool(
+        &fixture.config,
+        &serde_json::json!({"action": "cancel", "id": record.id}),
+    )
+    .unwrap();
     assert!(!fixture.pending(&record.id).exists());
     assert!(store::get(&record.id).unwrap().is_none());
     assert!(!fixture.events().exists());
@@ -206,7 +218,13 @@ fn scheduler_registration_failure_rolls_back_record_and_credential_snapshot() {
     let _lock = crate::test_support::env_lock().lock().unwrap();
     let fixture = Fixture::new();
     std::env::set_var("TCUI_REMINDER_SYSTEMD_RUN", "/usr/bin/false");
-    assert!(handle_request(&fixture.config, "in 1h | Will not register", false).is_err());
+    assert!(agent_tool(
+        &fixture.config,
+        &serde_json::json!({
+            "action": "create", "after_seconds": 3600, "message": "Will not register",
+        }),
+    )
+    .is_err());
     assert!(store::list().unwrap().is_empty());
     let directory = fixture.root.join("data/tcui/reminder-notifications");
     assert!(std::fs::read_dir(directory).unwrap().all(|entry| entry
@@ -222,7 +240,13 @@ fn locked_vault_cannot_schedule_a_new_job_or_downgrade_to_environment_credential
     let _lock = crate::test_support::env_lock().lock().unwrap();
     let fixture = Fixture::new();
     KeyStore::lock_vault(&fixture.config).unwrap();
-    assert!(handle_request(&fixture.config, "in 1h | Must unlock", false).is_err());
+    assert!(agent_tool(
+        &fixture.config,
+        &serde_json::json!({
+            "action": "create", "after_seconds": 3600, "message": "Must unlock",
+        }),
+    )
+    .is_err());
     assert!(store::list().unwrap().is_empty());
     assert!(!fixture
         .root
@@ -250,8 +274,14 @@ fn registration_serializes_dispatch_and_rejects_premature_cancellation() {
     std::fs::set_permissions(&scheduler, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::env::set_var("TCUI_REMINDER_SYSTEMD_RUN", scheduler);
     let config = fixture.config.clone();
-    let worker =
-        std::thread::spawn(move || handle_request(&config, "in 1h | Registration race", false));
+    let worker = std::thread::spawn(move || {
+        agent_tool(
+            &config,
+            &serde_json::json!({
+                "action": "create", "after_seconds": 3600, "message": "Registration race",
+            }),
+        )
+    });
     let mut descriptor = libc::pollfd {
         fd: listener.as_raw_fd(),
         events: libc::POLLIN,
@@ -271,7 +301,10 @@ fn registration_serializes_dispatch_and_rejects_premature_cancellation() {
     stream.read_exact(&mut ready).unwrap();
     assert_eq!(&ready, b"ready");
     let record = store::list().unwrap().pop().unwrap();
-    let cancelled = handle_request(&fixture.config, &format!("cancel {}", record.id), false);
+    let cancelled = agent_tool(
+        &fixture.config,
+        &serde_json::json!({"action": "cancel", "id": record.id}),
+    );
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -305,12 +338,20 @@ fn missing_timer_does_not_mask_a_service_stop_failure_or_delete_the_snapshot() {
     std::fs::write(&controller, "#!/bin/sh\nfor unit do :; done\ncase \"$unit\" in\n *.timer) if [ \"$2\" = show ]; then printf 'not-found\\n'; exit 0; fi; printf 'Unit not loaded\\n' >&2; exit 1;;\n *.service) if [ \"$2\" = show ]; then printf 'loaded\\n'; exit 0; fi; printf 'Access denied\\n' >&2; exit 1;;\nesac\nexit 2\n").unwrap();
     std::fs::set_permissions(&controller, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::env::set_var("TCUI_REMINDER_SYSTEMCTL", controller);
-    assert!(handle_request(&fixture.config, &format!("cancel {}", record.id), false).is_err());
+    assert!(agent_tool(
+        &fixture.config,
+        &serde_json::json!({"action": "cancel", "id": record.id}),
+    )
+    .is_err());
     assert!(fixture.pending(&record.id).exists());
     assert!(store::get(&record.id).unwrap().is_some());
     assert!(!fixture.events().exists());
     std::env::set_var("TCUI_REMINDER_SYSTEMCTL", "/usr/bin/true");
-    handle_request(&fixture.config, &format!("cancel {}", record.id), false).unwrap();
+    agent_tool(
+        &fixture.config,
+        &serde_json::json!({"action": "cancel", "id": record.id}),
+    )
+    .unwrap();
     assert!(!fixture.pending(&record.id).exists());
 }
 
@@ -319,11 +360,16 @@ fn explicitly_requested_pushover_never_degrades_to_a_local_only_timer() {
     let _lock = crate::test_support::env_lock().lock().unwrap();
     let mut fixture = Fixture::new();
     fixture.config.notifications.pushover.enabled = false;
-    super::maybe_handle_request(
+    assert!(agent_tool(
         &fixture.config,
-        "@ping-user @remindme in 1h | Requires Pushover",
+        &serde_json::json!({
+            "action": "create",
+            "after_seconds": 3600,
+            "message": "Requires Pushover",
+            "pushover": true,
+        }),
     )
-    .expect("recognized reminder invocation");
+    .is_err());
     assert!(store::list().unwrap().is_empty());
     assert!(!fixture
         .root
@@ -432,14 +478,24 @@ fn post_stop_cleanup_needs_neither_configuration_nor_vault_unlock() {
 fn recurring_jobs_keep_their_snapshot_until_explicit_cancellation() {
     let _lock = crate::test_support::env_lock().lock().unwrap();
     let fixture = Fixture::new();
-    handle_request(&fixture.config, "daily 09:00 | Recurring fixture", false).unwrap();
+    agent_tool(
+        &fixture.config,
+        &serde_json::json!({
+            "action": "create", "daily": "09:00", "message": "Recurring fixture",
+        }),
+    )
+    .unwrap();
     let record = store::list().unwrap().pop().unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(ping::dispatch(&record.id)).unwrap();
     assert!(super::cleanup(&record.id).is_err());
     assert!(fixture.pending(&record.id).exists());
     assert!(store::get(&record.id).unwrap().is_some());
-    handle_request(&fixture.config, &format!("cancel {}", record.id), false).unwrap();
+    agent_tool(
+        &fixture.config,
+        &serde_json::json!({"action": "cancel", "id": record.id}),
+    )
+    .unwrap();
     assert!(!fixture.pending(&record.id).exists());
     assert!(store::get(&record.id).unwrap().is_none());
 }
@@ -467,10 +523,11 @@ fn timer_cleanup_failure_removes_keys_but_keeps_retryable_registration() {
 fn corrupt_or_missing_metadata_never_authorizes_deleting_recurring_payloads() {
     let _lock = crate::test_support::env_lock().lock().unwrap();
     let fixture = Fixture::new();
-    handle_request(
+    agent_tool(
         &fixture.config,
-        "daily 09:00 | Retain recurring keys",
-        false,
+        &serde_json::json!({
+            "action": "create", "daily": "09:00", "message": "Retain recurring keys",
+        }),
     )
     .unwrap();
     let record = store::list().unwrap().pop().unwrap();
@@ -494,7 +551,11 @@ fn corrupt_or_missing_metadata_never_authorizes_deleting_recurring_payloads() {
         *original_payload
     );
     std::fs::write(&metadata, original_metadata).unwrap();
-    handle_request(&fixture.config, &format!("cancel {}", record.id), false).unwrap();
+    agent_tool(
+        &fixture.config,
+        &serde_json::json!({"action": "cancel", "id": record.id}),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -511,4 +572,549 @@ fn malformed_orphan_payload_requires_cadence_recovery_before_cleanup() {
         std::fs::read(fixture.pending(&record.id)).unwrap(),
         b"unknown cadence"
     );
+}
+
+#[test]
+fn typed_timing_choices_register_the_selected_backend_schedule() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    let registrations = fixture.root.join("registrations.jsonl");
+    let scheduler = fixture.root.join("record-scheduler");
+    std::fs::write(
+        &scheduler,
+        format!(
+            "#!/usr/bin/python3\nimport json, pathlib, sys\nwith pathlib.Path({:?}).open('a') as out:\n    out.write(json.dumps(sys.argv[1:]) + '\\n')\n",
+            registrations.to_str().unwrap(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&scheduler, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::env::set_var("TCUI_REMINDER_SYSTEMD_RUN", scheduler);
+    let analyzer = fixture.root.join("calendar-analyzer");
+    std::fs::write(
+        &analyzer,
+        "#!/bin/sh\n[ \"$LC_ALL\" = C ] || exit 1\n[ \"$1\" = calendar ] || exit 1\n[ \"$2\" = --iterations=1 ] || exit 1\n[ \"$3\" = -- ] || exit 1\nprintf '  Next elapse: Thu 2099-01-01 00:00:00 UTC\\n'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&analyzer, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::env::set_var("TCUI_REMINDER_SYSTEMD_ANALYZE", analyzer);
+    let at = chrono::Local::now() + chrono::Duration::hours(2);
+    let choices = [
+        (
+            serde_json::json!({"after_seconds": 1200}),
+            "--on-active",
+            "1200s".to_owned(),
+            false,
+        ),
+        (
+            serde_json::json!({"at": at.to_rfc3339()}),
+            "--on-calendar",
+            at.with_timezone(&chrono::Utc)
+                .format("%Y-%m-%d %H:%M:%S UTC")
+                .to_string(),
+            false,
+        ),
+        (
+            serde_json::json!({"daily": "09:00"}),
+            "--on-calendar",
+            "*-*-* 09:00:00".to_owned(),
+            true,
+        ),
+        (
+            serde_json::json!({"weekly": {"day": "mon", "time": "09:30:15"}}),
+            "--on-calendar",
+            "Mon *-*-* 09:30:15".to_owned(),
+            true,
+        ),
+        (
+            serde_json::json!({"calendar": "hourly"}),
+            "--on-calendar",
+            "hourly".to_owned(),
+            true,
+        ),
+    ];
+    for (timing, flag, value, recurring) in choices {
+        let mut arguments = serde_json::json!({
+            "action": "create", "message": "Do X", "pushover": true,
+        });
+        arguments
+            .as_object_mut()
+            .unwrap()
+            .extend(timing.as_object().unwrap().clone());
+        let response = agent_tool(&fixture.config, &arguments).unwrap();
+        let record = store::list().unwrap().pop().unwrap();
+        assert!(response.contains(&record.id));
+        assert_eq!(record.recurring, recurring);
+        let calls = std::fs::read_to_string(&registrations).unwrap();
+        let last: Vec<String> = serde_json::from_str(calls.lines().last().unwrap()).unwrap();
+        assert!(last
+            .windows(2)
+            .any(|args| args[0] == flag && args[1] == value));
+        assert!(last
+            .windows(2)
+            .any(|args| { args[0] == "reminder-ping-dispatch" && args[1] == record.id }));
+        assert_eq!(
+            last.iter()
+                .any(|arg| arg.starts_with("--property=ExecStopPost=")),
+            !recurring,
+        );
+        agent_tool(
+            &fixture.config,
+            &serde_json::json!({"action": "cancel", "id": record.id}),
+        )
+        .unwrap();
+        assert!(!fixture.pending(&record.id).exists());
+        assert!(store::list().unwrap().is_empty());
+    }
+    assert_eq!(
+        std::fs::read_to_string(registrations)
+            .unwrap()
+            .lines()
+            .count(),
+        5,
+    );
+}
+
+#[test]
+fn invalid_tool_arguments_fail_before_registration_or_snapshot_side_effects() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    let invalid = [
+        serde_json::json!({"after_seconds": 0}),
+        serde_json::json!({"after_seconds": -1}),
+        serde_json::json!({"after_seconds": 1.5}),
+        serde_json::json!({"after_seconds": u64::MAX}),
+        serde_json::json!({"after_seconds": null}),
+        serde_json::json!({"after_seconds": 10, "at": null}),
+        serde_json::json!({"after_seconds": 10, "daily": "09:00"}),
+        serde_json::json!({"at": "2020-01-01T12:00:00Z"}),
+        serde_json::json!({"at": "9999-01-01T12:00:00Z"}),
+        serde_json::json!({"at": "2099-01-01 12:00"}),
+        serde_json::json!({"daily": "24:00"}),
+        serde_json::json!({"daily": "9:00"}),
+        serde_json::json!({"daily": "23:59:60"}),
+        serde_json::json!({"weekly": {"day": "monday", "time": "09:00"}}),
+        serde_json::json!({"weekly": {"day": "mon", "time": "09:00", "extra": true}}),
+        serde_json::json!({"calendar": ""}),
+        serde_json::json!({"calendar": "hourly\nextra"}),
+        serde_json::json!({"calendar": "not a calendar"}),
+        serde_json::json!({"after_seconds": 10, "extra": true}),
+        serde_json::json!({}),
+    ];
+    for timing in invalid {
+        let mut arguments = serde_json::json!({"action": "create", "message": "Do X"});
+        arguments
+            .as_object_mut()
+            .unwrap()
+            .extend(timing.as_object().unwrap().clone());
+        assert!(
+            agent_tool(&fixture.config, &arguments).is_err(),
+            "{arguments}"
+        );
+    }
+    for arguments in [
+        serde_json::json!({"action": "list", "message": "unexpected"}),
+        serde_json::json!({"action": "cancel", "id": "../escape"}),
+        serde_json::json!({"action": "cancel", "id": ""}),
+        serde_json::json!({"action": "cancel", "id": "abc123", "extra": true}),
+        serde_json::json!({"action": "create", "after_seconds": 10, "message": " "}),
+        serde_json::json!({"action": "create", "after_seconds": 10, "message": "\0"}),
+        serde_json::json!({"action": "create", "after_seconds": 10, "message": "x".repeat(1025)}),
+    ] {
+        assert!(
+            agent_tool(&fixture.config, &arguments).is_err(),
+            "{arguments}"
+        );
+    }
+    for name in ["reminders.toml", "reminder.key", "reminder-notifications"] {
+        assert!(
+            !fixture.root.join("data/tcui").join(name).exists(),
+            "{name}"
+        );
+    }
+    assert!(!fixture.events().exists());
+}
+
+#[test]
+fn calendar_without_a_future_occurrence_is_rejected_before_persisting_keys() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    let analyzer = fixture.root.join("expired-calendar");
+    std::fs::write(&analyzer, "#!/bin/sh\nprintf '  Next elapse: never\\n'\n").unwrap();
+    std::fs::set_permissions(&analyzer, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::env::set_var("TCUI_REMINDER_SYSTEMD_ANALYZE", analyzer);
+    assert!(agent_tool(
+        &fixture.config,
+        &serde_json::json!({
+            "action": "create", "calendar": "2020-01-01", "message": "Too late",
+        }),
+    )
+    .is_err());
+    assert!(!fixture.root.join("data/tcui/reminders.toml").exists());
+    assert!(!fixture
+        .root
+        .join("data/tcui/reminder-notifications")
+        .exists());
+}
+
+struct SchedulerGate {
+    listener: std::os::unix::net::UnixListener,
+}
+
+impl SchedulerGate {
+    fn new(fixture: &Fixture, variable: &str, before: &str, after: &str) -> Self {
+        let socket = fixture.root.join("scheduler-gate.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let program = fixture.root.join("gated-native-scheduler");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/usr/bin/python3\nimport os, pathlib, socket, sys\n{before}\ns=socket.socket(socket.AF_UNIX)\ns.settimeout(5)\ns.connect({:?})\ns.sendall(str(os.getpid()).encode()+b'\\n')\nassert s.recv(1)==b'x'\ns.close()\n{after}\n",
+                socket.to_str().unwrap(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::env::set_var(variable, program);
+        Self { listener }
+    }
+
+    fn accept(&self) -> (std::os::unix::net::UnixStream, libc::pid_t) {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+
+        let mut descriptor = libc::pollfd {
+            fd: self.listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: this pollfd refers to the live fixture listener.
+        assert_eq!(unsafe { libc::poll(&mut descriptor, 1, 5_000) }, 1);
+        let (mut stream, _) = self.listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut pid = Vec::new();
+        loop {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            if byte[0] == b'\n' {
+                break;
+            }
+            pid.push(byte[0]);
+        }
+        (stream, String::from_utf8(pid).unwrap().parse().unwrap())
+    }
+
+    fn release(mut stream: std::os::unix::net::UnixStream) {
+        use std::io::Write;
+        // Cancellation may already have killed and reaped the gated child.
+        let _ = stream.write_all(b"x");
+    }
+}
+
+fn write_scheduler_program(fixture: &Fixture, variable: &str, name: &str, body: &str) {
+    let program = fixture.root.join(name);
+    std::fs::write(
+        &program,
+        format!("#!/usr/bin/python3\nimport pathlib, sys\n{body}\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::env::set_var(variable, program);
+}
+
+fn assert_no_pending_registration(fixture: &Fixture) {
+    assert!(store::list().unwrap().is_empty());
+    let directory = fixture.root.join("data/tcui/reminder-notifications");
+    if directory.exists() {
+        assert!(std::fs::read_dir(directory).unwrap().all(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_none_or(|extension| extension != "json")
+        }));
+    }
+    assert!(!fixture.events().exists());
+}
+
+fn assert_scheduler_reaped(pid: libc::pid_t) {
+    let mut status = 0;
+    // SAFETY: these calls inspect the fixture's native child without signaling it.
+    assert_eq!(
+        unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+        -1
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD)
+    );
+    // SAFETY: signal 0 only checks whether this process still exists.
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
+}
+
+#[test]
+fn cancelled_calendar_preflight_cannot_register_a_timer_or_persist_credentials() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    let registration = fixture.root.join("timer-registered");
+    write_scheduler_program(
+        &fixture,
+        "TCUI_REMINDER_SYSTEMD_RUN",
+        "record-registration",
+        &format!("pathlib.Path({:?}).touch()", registration.to_str().unwrap()),
+    );
+    let gate = SchedulerGate::new(
+        &fixture,
+        "TCUI_REMINDER_SYSTEMD_ANALYZE",
+        "",
+        "print('  Next elapse: Thu 2099-01-01 00:00:00 UTC')",
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let pid = runtime.block_on(async {
+        let mut request = Box::pin(super::agent_tool_cancellable(
+            fixture.config.clone(),
+            serde_json::json!({
+                "action": "create", "calendar": "hourly", "message": "Cancelled preflight",
+                "pushover": true,
+            }),
+        ));
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        let (stream, pid) = gate.accept();
+        drop(request);
+        SchedulerGate::release(stream);
+        pid
+    });
+    // Runtime shutdown joins the cancelled blocking worker, not just its future.
+    drop(runtime);
+    assert_scheduler_reaped(pid);
+    assert!(!registration.exists());
+    assert_no_pending_registration(&fixture);
+}
+
+#[test]
+fn cancelled_registration_stops_the_timer_and_removes_its_private_payload() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    let timer = fixture.root.join("active-timer");
+    let stops = fixture.root.join("stopped-units");
+    write_scheduler_program(
+        &fixture,
+        "TCUI_REMINDER_SYSTEMCTL",
+        "rollback-controller",
+        &format!(
+            "assert sys.argv[2]=='stop'\npathlib.Path({:?}).unlink(missing_ok=True)\nwith pathlib.Path({:?}).open('a') as out: out.write(sys.argv[-1]+'\\n')",
+            timer.to_str().unwrap(), stops.to_str().unwrap(),
+        ),
+    );
+    let gate = SchedulerGate::new(
+        &fixture,
+        "TCUI_REMINDER_SYSTEMD_RUN",
+        &format!("pathlib.Path({:?}).touch()", timer.to_str().unwrap()),
+        "",
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let pid = runtime.block_on(async {
+        let mut request = Box::pin(super::agent_tool_cancellable(
+            fixture.config.clone(),
+            serde_json::json!({
+                "action": "create", "after_seconds": 1200, "message": "Cancelled registration",
+                "pushover": true,
+            }),
+        ));
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        let (stream, pid) = gate.accept();
+        let record = store::list().unwrap().pop().unwrap();
+        assert!(fixture.pending(&record.id).exists() && timer.exists());
+        drop(request);
+        SchedulerGate::release(stream);
+        pid
+    });
+    drop(runtime);
+    assert_scheduler_reaped(pid);
+    assert!(!timer.exists());
+    let stopped = std::fs::read_to_string(stops).unwrap();
+    assert!(stopped.contains(".timer\n") && stopped.contains(".service\n"));
+    assert_no_pending_registration(&fixture);
+}
+
+#[test]
+fn completed_but_unobserved_registration_rolls_back_before_releasing_its_guard() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    let timer = fixture.root.join("active-timer");
+    write_scheduler_program(
+        &fixture,
+        "TCUI_REMINDER_SYSTEMCTL",
+        "rollback-controller",
+        &format!(
+            "pathlib.Path({:?}).unlink(missing_ok=True)",
+            timer.to_str().unwrap()
+        ),
+    );
+    let gate = SchedulerGate::new(
+        &fixture,
+        "TCUI_REMINDER_SYSTEMD_RUN",
+        "",
+        &format!("pathlib.Path({:?}).touch()", timer.to_str().unwrap()),
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (owner, result, worker) = super::execution::start(
+            fixture.config.clone(),
+            serde_json::json!({
+                "action": "create", "after_seconds": 1200, "message": "Unobserved result",
+                "pushover": true,
+            }),
+        );
+        let (stream, pid) = gate.accept();
+        SchedulerGate::release(stream);
+        let receipt = result.await.unwrap().unwrap();
+        let record = store::list().unwrap().pop().unwrap();
+        assert!(receipt.contains(&record.id));
+        assert!(timer.exists() && fixture.pending(&record.id).exists());
+        assert!(ping::JobGuard::open(&record.id).is_err());
+        // The channel has a completed result, but the requesting future has not
+        // acknowledged it. Dropping that owner must not commit the registration.
+        drop(owner);
+        worker.await.unwrap();
+        assert_scheduler_reaped(pid);
+        assert!(ping::JobGuard::open(&record.id).is_ok());
+    });
+    assert!(!timer.exists());
+    assert_no_pending_registration(&fixture);
+}
+
+#[test]
+fn unobserved_registration_cleanup_failure_retains_metadata_but_not_credentials() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    std::env::set_var("TCUI_REMINDER_SYSTEMCTL", "/usr/bin/false");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (owner, result, worker) = super::execution::start(
+            fixture.config.clone(),
+            serde_json::json!({
+                "action": "create", "after_seconds": 1200, "message": "Recover cleanup",
+                "pushover": true,
+            }),
+        );
+        result.await.unwrap().unwrap();
+        let record = store::list().unwrap().pop().unwrap();
+        drop(owner);
+        worker.await.unwrap();
+        assert!(store::get(&record.id).unwrap().is_some());
+        assert!(!fixture.pending(&record.id).exists());
+        std::env::set_var("TCUI_REMINDER_SYSTEMCTL", "/usr/bin/true");
+        agent_tool(
+            &fixture.config,
+            &serde_json::json!({"action": "cancel", "id": record.id}),
+        )
+        .unwrap();
+    });
+    assert_no_pending_registration(&fixture);
+}
+
+#[test]
+fn observed_async_receipts_commit_one_shot_and_recurring_reminders_and_release_the_guard() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        for timing in [
+            serde_json::json!({"after_seconds": 1200}),
+            serde_json::json!({"daily": "09:00"}),
+        ] {
+            let mut arguments = serde_json::json!({
+                "action": "create", "message": "Observed registration", "pushover": true,
+            });
+            arguments
+                .as_object_mut()
+                .unwrap()
+                .extend(timing.as_object().unwrap().clone());
+            let receipt = super::agent_tool_cancellable(fixture.config.clone(), arguments)
+                .await
+                .unwrap();
+            let record = store::list().unwrap().pop().unwrap();
+            assert!(receipt.contains(&record.id));
+            assert!(fixture.pending(&record.id).exists());
+            // A returned receipt must release the registration lock immediately,
+            // even before the blocking worker receives its acknowledgement.
+            agent_tool(
+                &fixture.config,
+                &serde_json::json!({"action": "cancel", "id": record.id}),
+            )
+            .unwrap();
+            assert_no_pending_registration(&fixture);
+        }
+    });
+}
+
+#[test]
+fn cancelled_cancel_action_kills_its_child_and_keeps_state_for_explicit_recovery() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    let record = fixture.schedule();
+    let stopped = fixture.root.join("stop-finished");
+    let gate = SchedulerGate::new(
+        &fixture,
+        "TCUI_REMINDER_SYSTEMCTL",
+        "",
+        &format!("pathlib.Path({:?}).touch()", stopped.to_str().unwrap()),
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (owner, result, worker) = super::execution::start(
+            fixture.config.clone(),
+            serde_json::json!({"action": "cancel", "id": record.id}),
+        );
+        let (stream, pid) = gate.accept();
+        drop(owner);
+        drop(result);
+        // Do not release the fake controller until the worker has stopped and
+        // reaped it. Its socket timeout is five seconds, longer than this bound.
+        tokio::time::timeout(std::time::Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        SchedulerGate::release(stream);
+        assert_scheduler_reaped(pid);
+    });
+    assert!(!stopped.exists());
+    assert!(store::get(&record.id).unwrap().is_some());
+    assert!(fixture.pending(&record.id).exists());
+    std::env::set_var("TCUI_REMINDER_SYSTEMCTL", "/usr/bin/true");
+    agent_tool(
+        &fixture.config,
+        &serde_json::json!({"action": "cancel", "id": record.id}),
+    )
+    .unwrap();
+    assert_no_pending_registration(&fixture);
 }

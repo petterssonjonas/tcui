@@ -233,6 +233,8 @@ pub struct PushoverConfig {
     pub enabled: bool,
     pub application: String,
     pub use_vault: bool,
+    /// Storage for new or explicitly replaced Pushover keys only.
+    pub encrypt_credentials: bool,
     pub env_file: Option<String>,
 }
 
@@ -242,6 +244,7 @@ impl Default for PushoverConfig {
             enabled: false,
             application: "tcui".to_owned(),
             use_vault: false,
+            encrypt_credentials: true,
             env_file: None,
         }
     }
@@ -590,6 +593,22 @@ mod tests {
             .expect("system clock before epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("tcui-{label}-{}-{nanos}", std::process::id()))
+    }
+
+    #[test]
+    fn pushover_legacy_configuration_keeps_encrypted_storage_default() {
+        let legacy: PushoverConfig =
+            toml::from_str("enabled = true\nuse_vault = true\napplication = 'work'").unwrap();
+        assert!(legacy.encrypt_credentials);
+        assert!(legacy.use_vault);
+        assert_eq!(legacy.application, "work");
+        let plaintext: PushoverConfig =
+            toml::from_str("enabled = true\nuse_vault = true\nencrypt_credentials = false")
+                .unwrap();
+        assert!(!plaintext.encrypt_credentials);
+        let round_trip: PushoverConfig =
+            toml::from_str(&toml::to_string(&plaintext).unwrap()).unwrap();
+        assert!(!round_trip.encrypt_credentials);
     }
 
     #[test]

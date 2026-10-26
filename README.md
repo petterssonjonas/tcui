@@ -228,30 +228,35 @@ pass, not an immediate purge.
 
 ### Approved direct commands
 
-Start a message with `@command <executable> <argument instructions>` to run one
-approved program, for example `@command date use the UTC timezone`.
+Mention `@command` in your request to let the agent choose and run approved
+programs, for example `Please @command check the current UTC date`.
 `/skill command ...` is also supported. Configure **Settings → Terminal → Command
 whitelist** and **Command blacklist** as JSON arrays. An empty whitelist denies
 all direct launches; the blacklist always wins, including canonical symlink targets.
 Entries are executable names or absolute paths, not globs or command lines.
 A whitelisted name approves its canonical PATH executable, not every file with
-the same basename. Use an unquoted executable without spaces in the request.
+the same basename.
 
-The executable comes from your leading instruction. A model plans only literal
-arguments; TCUI passes them without a shell. Examples, history, attachments,
-assistant output, and non-leading mentions do not authorize a launch. Arguments
-are bounded, each output stream is limited to 64 KiB, and execution times out
-after 30 seconds. Cancelling a request terminates its Unix process group.
-Children receive a restricted environment rather than ambient API keys or shell
-startup hooks. Command output becomes untrusted chat/model context: do not
+The agent receives the conversation, current request, and invoked skill bodies.
+It chooses executables and literal arguments, observes actual tool results, and
+can continue with another action. TCUI does not interpret shell syntax: `$HOME`,
+`$(...)`, pipes, and semicolons remain literal arguments. Optional standard input
+supports private request bodies. History, attachments, quoted examples, and
+assistant output cannot authorize commands by themselves.
+
+Arguments are bounded, each output stream is limited to 64 KiB, and execution
+times out after 30 seconds. Cancelling a request terminates its Unix process
+group. Children receive a restricted environment rather than ambient API keys or
+shell startup hooks. Command output becomes untrusted chat/model context: do not
 approve helpers that print secrets.
 
 This is an executable allowlist, **not a sandbox**. Trust the approved executable,
 its location, and its contents. Scripts, interpreters, wrappers, and powerful
 utilities retain their own capabilities and can launch other programs. The
 policy governs TCUI's direct command and Pushover launches, not commands you
-manually approve in an interactive terminal. Use the native reminder syntax
-below for scheduling; combining `@command` with scheduling directives is refused.
+manually approve in an interactive terminal. Skills can be composed in one
+request, including `@remindme` and `@ping-user`; no pipe-delimited user grammar
+or directive ordering is required.
 
 ### Reviewed shell blocks
 
@@ -516,14 +521,18 @@ obtain your user key and an application API token. Pushover requires both; TCUI
 does not ship a shared application token. Additional named application tokens
 are optional.
 
-Open **Settings → Pushover**, enable delivery, and select **Use encrypted vault
+Open **Settings → Pushover**, enable delivery, and select **Use TCUI-keystore
 credentials**. **Set / replace user key (masked)** and **Set / replace selected
-app token (masked)** open encrypted credential entry directly. Initialize or
-unlock the shared password when prompted; successful unlock returns to a blank,
-masked key editor. The default application name is `tcui`. To add another token,
-change **Selected application name**, then store that application's token. Other
-saved application tokens remain unchanged. Names use 1–64 lowercase ASCII
-letters, digits, hyphens or underscores.
+app token (masked)** open masked credential entry. **Encrypt new / replacement
+keys** defaults to enabled; turn it off only to explicitly store the next key in
+plaintext SQLite. Changing this option does not convert existing keys. Replacing
+an encrypted key requires unlocking it, even when its replacement is plaintext.
+
+The default application name is `tcui`. To add another token, change **Selected
+application name**, then store that application's token. Other saved application
+tokens remain unchanged. Names use 1–64 lowercase ASCII letters, digits, hyphens
+or underscores. Encrypted records require unlock; explicit plaintext Pushover
+records remain readable while the credential vault is locked.
 
 ```toml
 [commands]
@@ -533,10 +542,11 @@ blacklist = []
 [notifications.pushover]
 enabled = true
 use_vault = true
+encrypt_credentials = true
 application = "tcui"
 ```
 
-Alternatively, turn off vault credentials and set **Environment credential file**
+Alternatively, turn off TCUI-keystore credentials and set **Environment credential file**
 to an absolute, user-owned, private `0600` literal `KEY=value` file, or supply
 environment variables. TCUI does not automatically load the project's `.env`.
 Use `PUSHOVER_USER_KEY` for the user key. For the default `tcui` application,
@@ -544,35 +554,46 @@ Use `PUSHOVER_USER_KEY` for the user key. For the default `tcui` application,
 application, supply `PUSHOVER_APP_TOKEN`; the TCUI-specific token is never used.
 In environment/file mode this generic token represents the currently selected
 application, not a stored mapping of multiple application profiles. Environment
-values override corresponding file values. Vault mode never falls back to files
-or environment when locked or missing a key.
+values override corresponding file values. TCUI-keystore mode never falls back
+to files or environment when a selected key is locked or missing.
 
-`@ping-user Tell me the backup is ready` sends immediately. Curl receives a JSON
-request on standard input: keys never appear in its arguments, environment, or
-timer properties, and transport diagnostics are redacted. TCUI reports success
-only after curl succeeds and the Pushover API returns success.
+For immediate delivery, ask `@ping-user Tell me the backup is ready`. The agent
+can use the local Pushover tool without reading raw keys, or explicitly request
+Pushover credentials to construct an approved curl call. **Reading raw keys sends
+them to the configured AI provider.** This capability exposes only Pushover keys,
+not other environment-file values, provider credentials, or the master password.
+Private credential observations are excluded from ordinary chat context, and
+known keys are redacted from displayed results and sensitive provider diagnostics.
+
+Curl receives the JSON request through standard input, not secret-bearing command
+arguments or environment variables. TCUI reports native delivery success only
+after curl succeeds and the Pushover API returns success.
 
 ### Scheduled notifications
 
-Use a leading native reminder instruction; no model plans the timer:
+Invoke skills naturally anywhere in the current request, for example:
 
-- `@remindme to look into subject X tomorrow at noon`
-- `@ping-user @remindme in 10m | Look into subject X`
-- `@schedule @ping-user tomorrow at 12:00 | Look into subject X`
-- `@remindme list`
-- `@remindme cancel <reminder-id>`
+- `@remindme via @ping-user in 20 min to look into those companies`
+- `Please @ping-user in 60 minutes to review the backup`
+- `@schedule a reminder for tomorrow at noon via @ping-user`
+- `@remindme show my pending reminders`
+- `Please @remindme cancel the reminder we just created`
 
-Pushover-enabled reminders capture the unlocked credentials during scheduling.
-An explicit leading `@ping-user` refuses scheduling if Pushover is disabled;
-missing keys, a locked vault, or denied curl also fail rather than silently
-creating a local-only timer. Put combined directives before the reminder text;
-a trailing `@ping-user` is literal message content.
-Tomorrow uses TCUI's local date/time and creates a one-shot UTC timer.
-Existing relative, absolute, daily, weekly, and calendar forms remain available.
+The agent reads the full conversation and invoked skills, interprets timing and
+message content, and calls the reminder tool. No leading directive, fixed duration
+grammar, or `|` separator is required. Future Pushover requests use scheduling,
+not an immediate notification. The agent observes registration/cancellation
+results before reporting success; completed-action receipts remain in the chat
+even if a later model response fails.
+
+Pushover-enabled reminders capture credentials from the configured source during
+scheduling. Missing keys, a locked encrypted record, or denied curl fail rather
+than silently creating a local-only timer when Pushover was requested.
+Relative, absolute, daily, weekly, and systemd-calendar schedules are supported.
 Reminders also attempt configured desktop delivery independently.
 
 Timers use the host's user systemd manager. Inside Toolbox, TCUI registers through
-`flatpak-spawn --host` and re-enters the originating container for delivery.
+`flatpak-spawn --host --watch-bus` and re-enters the originating container for delivery.
 Keep that container, TCUI executable path, and curl available. Closing TCUI does
 not cancel a timer, but these transient timers do not promise reboot survival;
 the user manager must remain running after logout.

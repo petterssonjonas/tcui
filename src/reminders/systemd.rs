@@ -1,9 +1,53 @@
-use super::{parse::weekday_label, ReminderError, ReminderSchedule};
+use super::execution::{self, Cancellation};
+use super::{weekday_label, ReminderError, ReminderSchedule};
+
+pub(super) fn absolute_calendar(datetime: &chrono::DateTime<chrono::Local>) -> String {
+    datetime
+        .with_timezone(&chrono::Utc)
+        .format("%Y-%m-%d %H:%M:%S UTC")
+        .to_string()
+}
+
+pub(super) fn validate_calendar(
+    expression: &str,
+    cancellation: &Cancellation,
+) -> Result<(), ReminderError> {
+    if expression.trim().is_empty() || expression.chars().any(char::is_control) {
+        return Err(ReminderError::Invalid(
+            "calendar must be a nonempty systemd calendar expression without control characters"
+                .to_owned(),
+        ));
+    }
+    let analyzer = SchedulerContext::new("systemd-analyze", "TCUI_REMINDER_SYSTEMD_ANALYZE")?;
+    let output = execution::output(
+        analyzer
+            .command()
+            .args(["calendar", "--iterations=1", "--", expression]),
+        cancellation,
+    )?;
+    if !output.status.success() {
+        return Err(ReminderError::Invalid(
+            "calendar is not a valid systemd calendar expression".to_owned(),
+        ));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let next = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Next elapse:"))
+        .map(str::trim);
+    if next.is_none_or(|value| value.is_empty() || value == "never" || value == "n/a") {
+        return Err(ReminderError::Invalid(
+            "calendar must have a future occurrence".to_owned(),
+        ));
+    }
+    Ok(())
+}
 
 pub(super) fn schedule(
     id: &str,
     schedule: &ReminderSchedule,
     pushover: bool,
+    cancellation: &Cancellation,
 ) -> Result<String, ReminderError> {
     let unit = format!("tcui-reminder-{id}");
     let executable = std::env::current_exe()?;
@@ -34,12 +78,9 @@ pub(super) fn schedule(
                 .arg(format!("{}s", duration.as_secs()));
         }
         ReminderSchedule::At(datetime) => {
-            command.arg("--on-calendar").arg(
-                datetime
-                    .with_timezone(&chrono::Utc)
-                    .format("%Y-%m-%d %H:%M:%S UTC")
-                    .to_string(),
-            );
+            command
+                .arg("--on-calendar")
+                .arg(absolute_calendar(datetime));
         }
         ReminderSchedule::Daily(time) => {
             command
@@ -61,15 +102,15 @@ pub(super) fn schedule(
     if let Some(container) = &scheduler.toolbox {
         command.args(["toolbox", "run", "--container", container, "--"]);
     }
-    let output = command
+    command
         .arg(executable)
         .arg(if pushover {
             "reminder-ping-dispatch"
         } else {
             "reminder-dispatch"
         })
-        .arg(id)
-        .output()?;
+        .arg(id);
+    let output = execution::output(&mut command, cancellation)?;
     if output.status.success() {
         Ok(unit)
     } else {
@@ -159,16 +200,28 @@ fn set_notification_environment(
 }
 
 pub(super) fn cancel(unit: &str) -> Result<(), ReminderError> {
-    stop_units(unit, &["timer", "service"], true)
+    cancel_cancellable(unit, &Cancellation::cleanup())
+}
+
+pub(super) fn cancel_cancellable(
+    unit: &str,
+    cancellation: &Cancellation,
+) -> Result<(), ReminderError> {
+    stop_units(unit, &["timer", "service"], true, cancellation)
 }
 
 pub(super) fn complete(unit: &str) -> Result<(), ReminderError> {
     // Stop ordering reverses timer Before=service. ExecStopPost must not wait
     // for its own service to finish stopping before the timer can stop.
-    stop_units(unit, &["timer"], false)
+    stop_units(unit, &["timer"], false, &Cancellation::default())
 }
 
-fn stop_units(unit: &str, kinds: &[&str], wait: bool) -> Result<(), ReminderError> {
+fn stop_units(
+    unit: &str,
+    kinds: &[&str],
+    wait: bool,
+    cancellation: &Cancellation,
+) -> Result<(), ReminderError> {
     let suffix = unit.strip_prefix("tcui-reminder-").filter(|suffix| {
         !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
     });
@@ -184,21 +237,21 @@ fn stop_units(unit: &str, kinds: &[&str], wait: bool) -> Result<(), ReminderErro
         if !wait {
             command.arg("--no-block");
         }
-        let output = command.args(["stop", "--", &name]).output()?;
+        let output = execution::output(command.args(["stop", "--", &name]), cancellation)?;
         if output.status.success() {
             continue;
         }
-        let state = controller
-            .command()
-            .args([
+        let state = execution::output(
+            controller.command().args([
                 "--user",
                 "show",
                 "--property=LoadState",
                 "--value",
                 "--",
                 &name,
-            ])
-            .output()?;
+            ]),
+            cancellation,
+        )?;
         if state.status.success() && state.stdout.trim_ascii() == b"not-found" {
             continue;
         }
@@ -271,13 +324,19 @@ impl SchedulerContext {
     }
 
     fn command(&self) -> std::process::Command {
-        if self.toolbox.is_some() {
+        let mut command = if self.toolbox.is_some() {
             let mut command = std::process::Command::new("flatpak-spawn");
-            command.arg("--host").arg(&self.program);
+            command
+                .arg("--host")
+                .arg("--watch-bus")
+                .arg("--env=LC_ALL=C")
+                .arg(&self.program);
             command
         } else {
             std::process::Command::new(&self.program)
-        }
+        };
+        command.env("LC_ALL", "C");
+        command
     }
 }
 

@@ -180,6 +180,7 @@ impl TuiApp {
                     self.finalize_assistant_message(completion)
                 }
                 Action::StopStream(id) => self.finish_request(id),
+                Action::PersistHostActionReceipts(id) => self.persist_host_action_receipts(id),
                 _ => Ok(()),
             };
             result = result.and(event_result);
@@ -494,6 +495,7 @@ impl TuiApp {
                 self.finalize_assistant_message(completion)
             }
             Action::StopStream(request_id) => self.finish_request(request_id),
+            Action::PersistHostActionReceipts(id) => self.persist_host_action_receipts(id),
             Action::AddMessage(tab_id, msg) => {
                 let mut stored = msg;
                 if let Ok(message_id) = self.storage.save_message(&stored) {
@@ -780,74 +782,6 @@ impl TuiApp {
         }
         let tab_endpoint = tab_state.tab.endpoint.clone();
         let config_snapshot = self.config.read().await.clone();
-        if let Some(response) = crate::reminders::maybe_handle_request(&config_snapshot, &content) {
-            self.transition_submission(
-                app_tab_id,
-                crate::app::submission::SubmissionState::finish_preparing,
-            )?;
-            let created_conversation = conversation_id == 0;
-            let conversation_id = if created_conversation {
-                match self.storage.create_conversation(tab_id as i64) {
-                    Ok(conversation_id) => conversation_id,
-                    Err(error) => {
-                        self.transition_submission(
-                            app_tab_id,
-                            crate::app::submission::SubmissionState::return_to_draft,
-                        )?;
-                        return Err(error);
-                    }
-                }
-            } else {
-                conversation_id
-            };
-            let mut user_message = Message::new(
-                conversation_id,
-                "user".to_string(),
-                canonical_content.clone(),
-            );
-            if let Some(context) = &ephemeral_context {
-                user_message.content.push_str(context);
-            }
-            match self.storage.save_message(&user_message) {
-                Ok(message_id) => user_message.id = Some(message_id),
-                Err(error) => {
-                    if created_conversation {
-                        let _ = self.storage.delete_conversation(conversation_id);
-                    }
-                    self.transition_submission(
-                        app_tab_id,
-                        crate::app::submission::SubmissionState::return_to_draft,
-                    )?;
-                    return Err(error);
-                }
-            }
-            self.transition_submission(
-                app_tab_id,
-                crate::app::submission::SubmissionState::commit,
-            )?;
-            if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
-                tab.active_conversation = conversation_id;
-            }
-            self.ui.add_message(tab_id, user_message);
-            if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
-                if tab.messages.len() == 1 && tab.generated_title.is_none() {
-                    let title = Self::generate_title(&canonical_content);
-                    tab.generated_title = Some(title.clone());
-                    self.storage
-                        .update_conversation_title(conversation_id, &title)?;
-                }
-            }
-            let mut assistant = Message::new(conversation_id, "assistant".to_string(), response);
-            assistant.id = Some(self.storage.save_message(&assistant)?);
-            self.ui.add_message(tab_id, assistant);
-            self.refresh_tab_conversations(tab_id)?;
-            self.transition_submission(
-                app_tab_id,
-                crate::app::submission::SubmissionState::launch,
-            )?;
-            self.discard_pending_documents();
-            return Ok(());
-        }
         if provider.is_empty()
             || !self
                 .ui
@@ -966,22 +900,9 @@ impl TuiApp {
                 }
             }
         }
-        let mentions = crate::skills::mentions(&user_request);
-        let host_execution = mentions
-            .iter()
-            .any(|name| matches!(name.as_str(), "command" | "ping-user"));
-        if host_execution && mentions.iter().any(|name| name == "vault") {
-            self.transition_submission(
-                app_tab_id,
-                crate::app::submission::SubmissionState::return_to_draft,
-            )?;
-            return Err(color_eyre::eyre::eyre!(
-                "Use separate requests for host commands and confirmed Vault mutations"
-            ));
-        }
+        let host_execution = crate::skill_runtime::host_execution::requested(&user_request);
         let work = if host_execution {
-            // Register ownership and cancellation before the hidden planner or
-            // external command can run. The event loop must remain responsive.
+            // Own cancellation before agent tool decisions or host actions begin.
             LaunchWork::Deferred(Box::new(preparation))
         } else {
             let preparation_outcome =
@@ -1110,12 +1031,26 @@ impl TuiApp {
             self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::CloudConnected;
             self.ui.connection_message = Some(format!("{provider} / {model}"));
         }
+        let host_receipts = self
+            .requests
+            .get(&submission_id)
+            .map(|request| request.host_receipts.clone())
+            .ok_or_else(|| color_eyre::eyre::eyre!("Request disappeared before agent launch"))?;
+        let completion = crate::app::requests::StreamCompletion {
+            request_id: submission_id,
+            sender: action_tx.clone(),
+        };
         let handle = tokio::spawn(async move {
-            let _completion = crate::app::requests::StreamCompletion {
-                request_id: submission_id,
-                sender: action_tx.clone(),
-            };
-            let prepared = match work.prepare().await {
+            // Capture the guard before spawning so even an unpolled abort reports termination.
+            let _completion = completion;
+            let prepared = match crate::skill_runtime::host_receipts::capture(
+                host_receipts,
+                submission_id,
+                action_tx.clone(),
+                work.prepare(),
+            )
+            .await
+            {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     let message = format!("Request preparation failed: {error}");
@@ -1156,20 +1091,50 @@ impl TuiApp {
                 memory_activities.clone(),
             ));
             let event_tx = action_tx.clone();
+            let redactions = prepared.redactions;
+            let private_output = !redactions.is_empty();
             let request = prepared.request;
             let mut visible_answer = String::new();
-            let result = crate::llm::chat::stream_prepared_chat(request, |event| match event {
-                crate::llm::chat::ChatStreamEvent::Answer(content) => {
-                    if !content.is_empty() {
-                        visible_answer.push_str(&content);
-                        let _ = event_tx.send(Action::StreamResponse(submission_id, content));
+            let provider_future =
+                crate::llm::chat::stream_prepared_chat(request, |event| match event {
+                    crate::llm::chat::ChatStreamEvent::Answer(content) => {
+                        if !content.is_empty() {
+                            visible_answer.push_str(&content);
+                            if !private_output {
+                                let _ =
+                                    event_tx.send(Action::StreamResponse(submission_id, content));
+                            }
+                        }
+                    }
+                    crate::llm::chat::ChatStreamEvent::Thinking(content) => {
+                        if !private_output {
+                            let _ = event_tx.send(Action::StreamThinking(submission_id, content));
+                        }
+                    }
+                });
+            let result = if host_execution {
+                crate::diagnostics::sensitive_provider_round(provider_future).await
+            } else {
+                provider_future.await
+            }
+            .map(|mut response| {
+                if private_output {
+                    // Buffer sensitive replies so keys split across chunks cannot reach the UI.
+                    visible_answer = redactions.redact(&visible_answer);
+                    response.thinking = redactions.redact(&response.thinking);
+                    let _ = event_tx.send(Action::StreamResponse(
+                        submission_id,
+                        visible_answer.clone(),
+                    ));
+                    if !response.thinking.is_empty() {
+                        let _ = event_tx.send(Action::StreamThinking(
+                            submission_id,
+                            response.thinking.clone(),
+                        ));
                     }
                 }
-                crate::llm::chat::ChatStreamEvent::Thinking(content) => {
-                    let _ = event_tx.send(Action::StreamThinking(submission_id, content));
-                }
-            })
-            .await;
+                response
+            });
 
             match result {
                 Ok(response)
@@ -1218,7 +1183,7 @@ impl TuiApp {
                 }
                 Ok(_) => {}
                 Err(err) => {
-                    let message = format!("Provider request failed: {err}");
+                    let message = redactions.redact(&format!("Provider request failed: {err}"));
                     let _ = action_tx.send(Action::UpdateStatus(message.clone()));
                     let final_message =
                         Message::new(conversation_id, "assistant".to_string(), message);

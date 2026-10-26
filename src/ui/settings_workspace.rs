@@ -19,14 +19,14 @@ use crate::{
 };
 
 const PUSHOVER_SETUP: &str = "\
-Mobile: https://pushover.net - download the Pushover app.\n\
-Requires user key + one app token; extra named tokens optional.\n\
-Default app: tcui. Approve curl in Terminal > Command whitelist.\n\
-WARNING: scheduled keys/messages are PLAINTEXT in private\n\
-payload files, even when copied from the encrypted vault.\n\
-One-shot: until delivery attempt ends (success or failure).\n\
-Recurring: until cancellation. Cancel reminders to remove copies.\n\
-Vault lock/password changes do not revoke these copies.";
+Mobile app: https://pushover.net - download and set up.\n\
+Needs user key + app token; approve curl in Terminal.\n\
+Model key reads disclose keys to your AI provider.\n\
+Scheduled keys/messages: private PLAINTEXT copies.\n\
+Encrypted sources are copied too.\n\
+One-shot: through delivery attempt (success or failure).\n\
+Recurring: until cancellation; cancel to remove copies.\n\
+Lock/password changes do not revoke scheduled copies.";
 
 #[derive(Debug, Clone, Copy)]
 pub enum ValueKind {
@@ -133,11 +133,12 @@ pub fn catalog() -> &'static [WorkspaceSetting] {
         entry!("tui.toast_position", "Toast position", "Place transient notifications, or turn them off.", Notifications, Choice(&["top_left", "top_center", "top_right", "center", "off"])),
         entry!("notifications.desktop", "Desktop notifications", "Allow supported terminal, Herdr or local DBus notification delivery.", Notifications, Bool),
         entry!("notifications.pushover.enabled", "Enable Pushover", "Send mobile notifications and explicit @ping-user messages through curl. Approve curl in Command whitelist first; blacklist overrides approval.", Pushover, Bool),
-        entry!("notifications.pushover.use_vault", "Use encrypted vault credentials", "On: encrypted user key and selected application token only; locked or missing keys fail without fallback. Off: explicitly use environment / credential file.", Pushover, Bool),
-        entry!("notifications.pushover.application", "Selected application name", "Default tcui. Enter a saved application name to select its token, or a new name then store its token below. Other application tokens remain saved. Use 1–64 lowercase letters, digits, hyphens or underscores.", Pushover, Text),
-        entry!("pushover_user_key", "Set / replace user key (masked)", "Open encrypted credential entry directly. Unlock or initialize the vault when prompted. Replacement starts blank and never reveals the saved key.", Pushover, Manager("pushover_user_key")),
-        entry!("pushover_app_key", "Set / replace selected app token (masked)", "Store a token for Selected application name in the encrypted vault. Replaces only that application's token; all other saved application tokens are preserved.", Pushover, Manager("pushover_app_key")),
-        entry!("notifications.pushover.env_file", "Environment credential file", "Optional absolute path to a user-owned mode-0600 literal KEY=value file, at most 64 KiB. Environment overrides file values. Ignored in encrypted vault mode. Never paste keys here.", Pushover, OptionalText),
+        entry!("notifications.pushover.use_vault", "Use TCUI-keystore credentials", "On: selected encrypted/plaintext keys only; no fallback. Encrypted keys require unlock. Off: environment/file only.", Pushover, Bool),
+        entry!("notifications.pushover.encrypt_credentials", "Encrypt new / replacement keys", "On: password-encrypted keystore. Off: explicit PLAINTEXT SQLite, readable while locked. Applies only when saving a key; siblings are unchanged.", Pushover, Bool),
+        entry!("notifications.pushover.application", "Selected application name", "Default tcui; select a saved token or name a new one, then store it below. Use 1-64 lowercase letters, digits, hyphens or underscores.", Pushover, Text),
+        entry!("pushover_user_key", "Set / replace user key (masked)", "Use the encryption choice above. Encrypted replacement requires unlock, even when saving plaintext. Other keys stay unchanged.", Pushover, Manager("pushover_user_key")),
+        entry!("pushover_app_key", "Set / replace selected app token (masked)", "Save only the selected application's token with the encryption choice above. Other profiles stay unchanged; saved keys are never revealed.", Pushover, Manager("pushover_app_key")),
+        entry!("notifications.pushover.env_file", "Environment credential file", "Absolute, user-owned mode-0600 literal KEY=value file, max 64 KiB. Environment overrides file. Ignored in TCUI-keystore mode; never paste keys.", Pushover, OptionalText),
         entry!("commands.whitelist", "Command whitelist", "JSON array of approved executable names or absolute paths, for example [\"curl\"]. Empty denies all. Exact executable identity, not arbitrary matching basenames. Never add a shell to bypass policy.", Terminal, Json),
         entry!("commands.blacklist", "Command blacklist", "JSON array of denied executable names or absolute paths. Denial overrides whitelist, including canonical targets and symlinks. Policy controls direct launches, not commands inside scripts.", Terminal, Json),
         entry!("show_memories", "Show memories", "Show memories in the Chat Artifacts sidebar.", Files, Bool),
@@ -699,10 +700,14 @@ impl SettingsWorkspaceState {
         }
         if let Some(setting) = rows.clone().nth(self.selected) {
             frame.render_widget(
-                Paragraph::new(format!(
-                    "{} · {}\n{}",
-                    setting.title, setting.id, setting.description
-                ))
+                Paragraph::new(if self.category == SettingCategory::Pushover {
+                    format!("{}\n{}", setting.title, setting.description)
+                } else {
+                    format!(
+                        "{} · {}\n{}",
+                        setting.title, setting.id, setting.description
+                    )
+                })
                 .wrap(Wrap { trim: true })
                 .style(base),
                 description,

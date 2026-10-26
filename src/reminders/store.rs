@@ -8,6 +8,7 @@ use color_eyre::eyre::{eyre, WrapErr};
 use rustix::fs::{fstat, openat, statat, AtFlags, Mode, OFlags};
 use serde::{Deserialize, Serialize};
 
+use super::execution::Cancellation;
 use super::{ReminderError, ReminderRecord};
 
 const STORE_FILE: &str = "reminders.toml";
@@ -19,9 +20,19 @@ struct ReminderStoreFile {
     reminders: Vec<ReminderRecord>,
 }
 
+#[cfg(test)]
 pub(super) fn upsert(record: ReminderRecord) -> Result<(), ReminderError> {
+    upsert_cancellable(record, &Cancellation::default())
+}
+
+pub(super) fn upsert_cancellable(
+    record: ReminderRecord,
+    cancellation: &Cancellation,
+) -> Result<(), ReminderError> {
     let store = LockedStore::open(&store_root(dirs::data_dir())?)?;
-    store.upsert(record)
+    // The stable metadata lock may have blocked after the caller cancelled.
+    cancellation.check()?;
+    store.upsert(record, cancellation)
 }
 
 pub(super) fn get(id: &str) -> Result<Option<ReminderRecord>, ReminderError> {
@@ -145,21 +156,32 @@ impl LockedStore {
         Ok(toml::from_str(&content)?)
     }
 
-    fn upsert(&self, record: ReminderRecord) -> Result<(), ReminderError> {
+    fn upsert(
+        &self,
+        record: ReminderRecord,
+        cancellation: &Cancellation,
+    ) -> Result<(), ReminderError> {
         let mut file = self.load()?;
         file.reminders.retain(|existing| existing.id != record.id);
         file.reminders.push(record);
-        self.save(&file)
+        self.save(&file, Some(cancellation))
     }
 
     fn remove(&self, id: &str) -> Result<(), ReminderError> {
         let mut file = self.load()?;
         file.reminders.retain(|record| record.id != id);
-        self.save(&file)
+        self.save(&file, None)
     }
 
-    fn save(&self, file: &ReminderStoreFile) -> Result<(), ReminderError> {
+    fn save(
+        &self,
+        file: &ReminderStoreFile,
+        cancellation: Option<&Cancellation>,
+    ) -> Result<(), ReminderError> {
         let content = toml::to_string_pretty(file)?;
+        if let Some(cancellation) = cancellation {
+            cancellation.check()?;
+        }
         crate::config::app_config::replace_private_file(
             &self.directory,
             OsStr::new(STORE_FILE),

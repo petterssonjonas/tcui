@@ -53,6 +53,7 @@ pub enum Action {
     ),
     FinalizeAssistantMessage(AssistantFinalization),
     StopStream(crate::app::submission::SubmissionId),
+    PersistHostActionReceipts(crate::app::submission::SubmissionId),
     AddMessage(usize, Message),
     AddGeneratedFile(usize, crate::app::GeneratedFile),
     LoadConversation(i64),
