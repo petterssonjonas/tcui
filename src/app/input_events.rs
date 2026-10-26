@@ -374,13 +374,16 @@ impl TuiApp {
             if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 return Some(Action::OpenCommandPalette);
             }
-            if let Some(action) =
-                crate::ui::settings_workspace::keybinding_action(key, &self.ui.keybinding_overrides)
-            {
-                return Some(action);
-            }
             if self.ui.app_tabs.active_view() == crate::ui::app_tabs::AppView::Settings {
                 return match key.code {
+                    KeyCode::Char(',') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Some(Action::ToggleSettings)
+                    }
+                    KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.ui.app_tabs.add_launcher();
+                        self.ui.focus = crate::tui::focus::Focus::Chat;
+                        None
+                    }
                     KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         self.request_app_tab_close(self.ui.app_tabs.active_id());
                         None
@@ -390,6 +393,11 @@ impl TuiApp {
                     }
                     _ => self.settings_workspace_key(key),
                 };
+            }
+            if let Some(action) =
+                crate::ui::settings_workspace::keybinding_action(key, &self.ui.keybinding_overrides)
+            {
+                return Some(action);
             }
             if self.ui.app_tabs.active_view().is_chat()
                 && key.modifiers.contains(KeyModifiers::CONTROL)

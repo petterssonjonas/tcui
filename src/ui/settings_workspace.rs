@@ -1,4 +1,5 @@
 mod keyboard;
+mod plaintext;
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -36,7 +37,8 @@ pub enum ValueKind {
     Number { min: u64, max: u64 },
     Decimal,
     Choice(&'static [&'static str]),
-    Json,
+    Lines,
+    Structured,
     Manager(&'static str),
 }
 
@@ -95,9 +97,9 @@ pub fn catalog() -> &'static [WorkspaceSetting] {
         entry!("theme", "Color theme", "Applies immediately across the workspace. Choose a built-in theme.", Theme, Choice(&["system", "gruvbox-dark-low-contrast", "gruvbox-dark-high-contrast", "nord", "dracula", "github", "kanagawa", "catppuccin", "material", "matrix", "monokai", "zenburn", "solarized", "tokyo-night", "opencode"])),
         entry!("default_provider", "Default provider", "Saved connection used for new conversations. Add connections through Providers / Connect first. Existing chats keep their selection.", Provider, Text),
         entry!("providers", "Providers / Connect", "Manage provider name, endpoint, environment-variable reference, backend type and authentication type in the dedicated manager. Secrets stay in masked credential fields.", Provider, Manager("open_providers")),
-        entry!("disabled_providers", "Disabled providers", "JSON array of provider names hidden from selectors; for example [\"OpenAI\"]. Provider manager also controls visibility.", Provider, Json),
+        entry!("disabled_providers", "Disabled providers", "One provider name per line; spaces are literal. Blank lines are ignored. Escapes: \\\\, \\n, \\r, \\t; \\e means an empty entry. Provider manager also controls visibility.", Provider, Lines),
         entry!("default_model", "Default model", "Model identifier for new conversations using the saved default connection. Empty selects an available model or the local fallback. Existing chats keep their model.", Model, Text),
-        entry!("disabled_models", "Disabled models", "JSON array of provider:model identifiers hidden from selectors.", Model, Json),
+        entry!("disabled_models", "Disabled models", "One provider:model identifier per line; spaces are literal. Blank lines are ignored. Escapes: \\\\, \\n, \\r, \\t; \\e means an empty entry.", Model, Lines),
         entry!("local_inference.enabled", "Enable local inference", "Make the local inference provider available. Saving does not start a server or execute a command.", Local, Bool),
         entry!("local_inference.scheme", "Local server protocol", "HTTP or HTTPS for the local inference endpoint.", Local, Choice(&["http", "https"])),
         entry!("local_inference.host", "Local server host", "Hostname or IP address only; no scheme, path or credentials.", Local, Text),
@@ -128,7 +130,7 @@ pub fn catalog() -> &'static [WorkspaceSetting] {
         entry!("tui.right_thin_width", "Files thin width", "Sidebar width in columns, 20–56.", UiLayout, Number { min: 20, max: 56 }),
         entry!("tui.right_wide_width", "Files wide width", "Sidebar width in columns, 40–80.", UiLayout, Number { min: 40, max: 80 }),
         entry!("tui.status_bar_rows", "Status bar rows", "Use one or two status rows.", UiLayout, Number { min: 1, max: 2 }),
-        entry!("tui.status_widgets", "Status widget placement", "JSON array of objects with id, row (1–2), area (1–6). Empty uses the default status layout.", UiLayout, Json),
+        entry!("tui.status_widgets", "Status widget placement", "One widget per line: provider 1 1 (id row area). Rows 1–2, areas 1–6. Empty restores defaults.", UiLayout, Structured),
         entry!("tui.helper_enabled", "Terminal helper hints", "Show or hide the terminal footer keyboard legend. Terminal header controls remain available.", UiLayout, Bool),
         entry!("tui.toast_position", "Toast position", "Place transient notifications, or turn them off.", Notifications, Choice(&["top_left", "top_center", "top_right", "center", "off"])),
         entry!("notifications.desktop", "Desktop notifications", "Allow supported terminal, Herdr or local DBus notification delivery.", Notifications, Bool),
@@ -139,15 +141,15 @@ pub fn catalog() -> &'static [WorkspaceSetting] {
         entry!("pushover_user_key", "Set / replace user key (masked)", "Use the encryption choice above. Encrypted replacement requires unlock, even when saving plaintext. Other keys stay unchanged.", Pushover, Manager("pushover_user_key")),
         entry!("pushover_app_key", "Set / replace selected app token (masked)", "Save only the selected application's token with the encryption choice above. Other profiles stay unchanged; saved keys are never revealed.", Pushover, Manager("pushover_app_key")),
         entry!("notifications.pushover.env_file", "Environment credential file", "Absolute, user-owned mode-0600 literal KEY=value file, max 64 KiB. Environment overrides file. Ignored in TCUI-keystore mode; never paste keys.", Pushover, OptionalText),
-        entry!("commands.whitelist", "Command whitelist", "JSON array of approved executable names or absolute paths, for example [\"curl\"]. Empty denies all. Exact executable identity, not arbitrary matching basenames. Never add a shell to bypass policy.", Terminal, Json),
-        entry!("commands.blacklist", "Command blacklist", "JSON array of denied executable names or absolute paths. Denial overrides whitelist, including canonical targets and symlinks. Policy controls direct launches, not commands inside scripts.", Terminal, Json),
+        entry!("commands.whitelist", "Command whitelist", "One rule per line. curl allows all arguments; curl -H requires the exact literal argument prefix -H. Quote values containing spaces. Empty denies all. Never approve a shell to bypass policy.", Terminal, Lines),
+        entry!("commands.blacklist", "Command blacklist", "One rule per line. Executable-only rules deny all arguments; argument rules deny the exact literal argv prefix. Quotes preserve spaces. Blacklist wins, including symlinks.", Terminal, Lines),
         entry!("show_memories", "Show memories", "Show memories in the Chat Artifacts sidebar.", Files, Bool),
         entry!("show_vault", "Show Vault", "Show the internal Vault in the Chat Artifacts sidebar.", Files, Bool),
         entry!("credential_vault", "Credential vault", "Unlock, lock and manage credentials in the dedicated encrypted vault. Passwords, API keys and private keys are never shown in settings.", Privacy, Manager("open_credential_vault")),
         entry!("application_protection", "Application protection", "Choose entry password and encryption independently for credentials, chats, memories and the internal vault. Unchecked data stays plaintext. Active requests are cancelled and saved before the application is reconstructed.", Privacy, Manager("open_security")),
         entry!("key_file", "Legacy credential import path", "Optional legacy key-file path, not a secret. Changing this does not import credentials; use the credential manager for migration and unlock.", Privacy, OptionalText),
-        entry!("mcp_servers", "MCP server configuration", "Explicit JSON editor for server name, transport, command, args, url and enabled. Values are concealed until opened; do not embed secrets. Saving does not execute server commands. Browse active tools with Show MCP.", Mcp, Json),
-        entry!("tui.keybinding_overrides", "Keyboard overrides", "JSON object mapping command IDs to key chords, for example {\"new_chat\":\"alt+n\"}. Empty restores defaults. Ctrl+P remains the search navigator. Reserved editing/navigation chords cannot be overridden.", Keybind, Json),
+        entry!("mcp_servers", "MCP server configuration", "Blank line separates servers. Labels: name:, transport: stdio/streamable_http, command:, args: quoted words, url:, enabled: true/false. Omit absent fields; empty removes all. Escapes: \\\\, \\n, \\r, \\t. Save executes nothing.", Mcp, Structured),
+        entry!("tui.keybinding_overrides", "Keyboard overrides", "Select an action and press a key chord. Empty restores defaults. Ctrl+P remains the navigator. Reserved editing/navigation chords cannot be overridden.", Keybind, Structured),
         entry!("tui.terminal_placement", "Terminal placement", "Place the terminal below chat, to its right or in its own tab. Applies immediately to the displayed terminal. Sessions remain alive when views change.", Terminal, Choice(&["bottom", "right", "tab"])),
         entry!("tui.terminal_shell", "Default shell", "Shell executable name or absolute path on the execution host; no command-line arguments. Empty uses the platform shell. Applies to new sessions only; saving executes nothing.", Terminal, OptionalText),
         entry!("tui.terminal_start_directory", "Terminal starting directory", "Optional existing absolute directory on the TCUI host (including SSH servers). Empty uses the application directory. Applies to new sessions only.", Terminal, OptionalText),
@@ -181,6 +183,7 @@ pub fn navigator_settings() -> impl Iterator<Item = Setting> {
 pub enum SettingsIntent {
     Apply { id: String, value: String },
     Command(&'static str),
+    Save { draft: Option<(String, String)> },
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +206,7 @@ pub struct SettingsWorkspaceState {
     category_areas: Vec<(Rect, SettingCategory)>,
     row_areas: Vec<(Rect, usize)>,
     list_height: usize,
+    save_area: Rect,
 }
 
 impl Default for SettingsWorkspaceState {
@@ -214,12 +218,12 @@ impl Default for SettingsWorkspaceState {
             rail_focused: false,
             edit: None,
             keyboard: keyboard::KeyboardSettings::default(),
-            feedback: "Changes apply and persist individually. Enter edits; Esc cancels the draft."
-                .into(),
+            feedback: "Changes apply individually. Save persists all current settings and a valid open draft.".into(),
             has_error: false,
             category_areas: Vec::new(),
             row_areas: Vec::new(),
             list_height: 1,
+            save_area: Rect::default(),
         }
     }
 }
@@ -360,13 +364,19 @@ impl SettingsWorkspaceState {
                 })
             }
             _ => {
-                let text = value_text(current);
+                let text = match plaintext::display(&self.config, setting) {
+                    Ok(text) => text,
+                    Err(error) => {
+                        self.fail(error);
+                        return None;
+                    }
+                };
                 self.edit = Some(EditValue {
                     id: setting.id,
                     cursor: text.len(),
                     text,
                 });
-                self.feedback = "Editing draft. Enter validates, applies and saves this value; Esc discards it. Ctrl+U clears.".into();
+                self.feedback = "Draft: Ctrl+S or Save validates and saves; Esc cancels; Ctrl+U clears. Multiline: Enter adds a line; Ctrl+Enter applies.".into();
                 self.has_error = false;
                 None
             }
@@ -376,20 +386,10 @@ impl SettingsWorkspaceState {
     pub fn paste(&mut self, text: &str) {
         if let Some(edit) = &mut self.edit {
             // Paste is data only, never a command or an apply gesture.
-            let json = catalog()
-                .iter()
-                .any(|entry| entry.id == edit.id && matches!(entry.kind, ValueKind::Json));
             let text: String = text
+                .replace("\r\n", "\n")
                 .chars()
-                .filter_map(|character| {
-                    if json && matches!(character, '\n' | '\r' | '\t') {
-                        Some(' ')
-                    } else if !character.is_control() || matches!(character, '\n' | '\t') {
-                        Some(character)
-                    } else {
-                        None
-                    }
-                })
+                .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
                 .collect();
             edit.text.insert_str(edit.cursor, &text);
             edit.cursor += text.len();
@@ -399,6 +399,9 @@ impl SettingsWorkspaceState {
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<SettingsIntent> {
         if key.kind == KeyEventKind::Release {
             return None;
+        }
+        if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return self.save_intent();
         }
         if self.edit.is_none() && self.category == SettingCategory::Keybind && !self.rail_focused {
             let bindings = self.keyboard_bindings();
@@ -413,18 +416,30 @@ impl SettingsWorkspaceState {
                     self.feedback = "Draft cancelled; saved value unchanged.".into();
                     self.has_error = false;
                 }
+                KeyCode::Enter
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && catalog()
+                            .iter()
+                            .find(|entry| entry.id == edit.id)
+                            .is_some_and(plaintext::multiline) =>
+                {
+                    edit.text.insert(edit.cursor, '\n');
+                    edit.cursor += 1;
+                }
                 KeyCode::Enter => {
                     let id = edit.id;
-                    let text = edit.text.clone();
-                    match validate_edit(&self.config, id, &text) {
-                        Ok(_) => {
-                            return Some(SettingsIntent::Apply {
-                                id: id.into(),
-                                value: text,
-                            })
+                    let setting = catalog().iter().find(|entry| entry.id == id)?;
+                    let text = match plaintext::serialized(setting, &edit.text) {
+                        Ok(text) => text,
+                        Err(error) => {
+                            self.fail(error);
+                            return None;
                         }
-                        Err(error) => self.fail(error),
-                    }
+                    };
+                    return Some(SettingsIntent::Apply {
+                        id: id.into(),
+                        value: text,
+                    });
                 }
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     edit.text.clear();
@@ -466,8 +481,18 @@ impl SettingsWorkspaceState {
                         .next()
                         .map_or(0, char::len_utf8)
                 }
-                KeyCode::Home => edit.cursor = 0,
-                KeyCode::End => edit.cursor = edit.text.len(),
+                KeyCode::Up => edit.cursor = plaintext::move_line(&edit.text, edit.cursor, false),
+                KeyCode::Down => edit.cursor = plaintext::move_line(&edit.text, edit.cursor, true),
+                KeyCode::Home => {
+                    edit.cursor = edit.text[..edit.cursor]
+                        .rfind('\n')
+                        .map_or(0, |index| index + 1)
+                }
+                KeyCode::End => {
+                    edit.cursor += edit.text[edit.cursor..]
+                        .find('\n')
+                        .unwrap_or(edit.text.len() - edit.cursor)
+                }
                 _ => {}
             }
             return None;
@@ -493,7 +518,35 @@ impl SettingsWorkspaceState {
         None
     }
 
+    fn save_intent(&mut self) -> Option<SettingsIntent> {
+        let pending = self.keyboard.pending_draft();
+        if self.keyboard.is_capturing() && pending.is_none() {
+            self.fail("Finish or cancel the keyboard capture before saving.");
+            return None;
+        }
+        let draft = if let Some(edit) = &self.edit {
+            let setting = catalog().iter().find(|entry| entry.id == edit.id)?;
+            match plaintext::serialized(setting, &edit.text) {
+                Ok(text) => Some((edit.id.to_string(), text)),
+                Err(error) => {
+                    self.fail(error);
+                    return None;
+                }
+            }
+        } else {
+            pending
+        };
+        Some(SettingsIntent::Save { draft })
+    }
+
     pub fn handle_mouse(&mut self, event: MouseEvent) -> Option<SettingsIntent> {
+        if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+            && self
+                .save_area
+                .contains(Position::new(event.column, event.row))
+        {
+            return self.save_intent();
+        }
         if self.edit.is_some()
             || (self.category == SettingCategory::Keybind && self.keyboard.is_capturing())
         {
@@ -538,6 +591,7 @@ impl SettingsWorkspaceState {
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         self.category_areas.clear();
         self.row_areas.clear();
+        self.save_area = Rect::default();
         if area.is_empty() {
             return;
         }
@@ -556,10 +610,17 @@ impl SettingsWorkspaceState {
             Constraint::Length(1),
         ])
         .areas(area);
+        let [heading, save] =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(16)]).areas(title);
+        self.save_area = save;
         frame.render_widget(
-            Paragraph::new(" Settings · applied individually ")
-                .style(base.fg(theme.accent).add_modifier(Modifier::BOLD)),
-            title,
+            Paragraph::new(" Settings ").style(base.fg(theme.accent).add_modifier(Modifier::BOLD)),
+            heading,
+        );
+        frame.render_widget(
+            Paragraph::new("[ Save Ctrl+S ]")
+                .style(base.fg(theme.accent).add_modifier(Modifier::REVERSED)),
+            save,
         );
         let narrow = area.width < 76;
         let [rail, list] = if narrow {
@@ -689,7 +750,7 @@ impl SettingsWorkspaceState {
             };
             let value = match setting.kind {
                 ValueKind::Manager(_) => "[Open manager]".into(),
-                ValueKind::Json => "[Enter to review/edit JSON]".into(),
+                ValueKind::Lines | ValueKind::Structured => "[Enter to edit entries]".into(),
                 _ => value_text(get_value(&self.config, setting.id)),
             };
             frame.render_widget(
@@ -714,43 +775,42 @@ impl SettingsWorkspaceState {
             );
         }
         if let Some(edit) = &self.edit {
-            let [input, status] =
-                Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(feedback);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(" Draft · Ctrl+S saves · Esc cancels ");
+            let input = block.inner(list);
+            frame.render_widget(ratatui::widgets::Clear, list);
+            frame.render_widget(block.style(base), list);
             let before = &edit.text[..edit.cursor];
-            let width = input.width.saturating_sub(3) as usize;
-            let mut start = edit.cursor;
-            let mut used = 0;
-            for (index, character) in before.char_indices().rev() {
-                let cells = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
-                if used + cells > width {
-                    break;
-                }
-                used += cells;
-                start = index;
-            }
+            let row = before.bytes().filter(|byte| *byte == b'\n').count();
+            let line_start = before.rfind('\n').map_or(0, |index| index + 1);
+            let column = unicode_width::UnicodeWidthStr::width(&before[line_start..]);
+            let top = row.saturating_sub(input.height.saturating_sub(1) as usize);
+            let left = column.saturating_sub(input.width.saturating_sub(1) as usize);
             frame.render_widget(
-                Paragraph::new(format!("> {}", &edit.text[start..])).style(base.fg(theme.warning)),
+                Paragraph::new(edit.text.as_str())
+                    .style(base.fg(theme.warning))
+                    .scroll((
+                        top.min(u16::MAX as usize) as u16,
+                        left.min(u16::MAX as usize) as u16,
+                    )),
                 input,
             );
-            if input.width > 2 && input.height > 0 {
+            if !input.is_empty() {
                 frame.set_cursor_position((
-                    input.x
-                        + 2
-                        + unicode_width::UnicodeWidthStr::width(&edit.text[start..edit.cursor])
-                            .min(input.width.saturating_sub(3) as usize)
-                            as u16,
-                    input.y,
+                    input.x + (column - left) as u16,
+                    input.y + (row - top) as u16,
                 ));
             }
             frame.render_widget(
-                Paragraph::new(&*self.feedback)
+                Paragraph::new(self.feedback.as_str())
                     .wrap(Wrap { trim: true })
                     .style(base.fg(if self.has_error {
                         theme.error
                     } else {
                         theme.warning
                     })),
-                status,
+                feedback,
             );
         } else {
             frame.render_widget(
@@ -764,7 +824,7 @@ impl SettingsWorkspaceState {
                 feedback,
             );
         }
-        frame.render_widget(Paragraph::new("Tab categories/list · ↑↓ move · ←→ choice · Enter edit/apply · Esc cancel · Ctrl+P search").style(base), help);
+        frame.render_widget(Paragraph::new("Ctrl+S Save · Tab categories · ↑↓ move · Enter edit/newline · Ctrl+Enter apply · Esc cancel").style(base), help);
     }
 }
 
@@ -821,14 +881,16 @@ pub fn validate_edit(config: &Value, id: &str, text: &str) -> Result<AppConfig, 
             }
             text.into()
         }
-        ValueKind::Json => {
+        ValueKind::Lines | ValueKind::Structured => {
             serde_json::from_str(text).map_err(|error| format!("Invalid JSON: {error}"))?
         }
         ValueKind::OptionalText if text.trim().is_empty() => Value::Null,
         ValueKind::Text | ValueKind::OptionalText => text.trim().into(),
     };
     if text.chars().any(|c| {
-        c.is_control() && (!matches!(entry.kind, ValueKind::Json) || !matches!(c, '\n' | '\t'))
+        c.is_control()
+            && (!matches!(entry.kind, ValueKind::Lines | ValueKind::Structured)
+                || !matches!(c, '\n' | '\t'))
     }) {
         return Err("Control characters are not allowed in text values".into());
     }
@@ -865,7 +927,7 @@ pub fn validate_edit(config: &Value, id: &str, text: &str) -> Result<AppConfig, 
     let mut candidate: AppConfig = serde_json::from_value(updated.clone())
         .map_err(|error| format!("Invalid setting: {error}"))?;
     // TUI deserialization clamps old files, but an interactive edit must never silently clamp.
-    if matches!(entry.kind, ValueKind::Json) && id == "tui.status_widgets" {
+    if id == "tui.status_widgets" {
         let input = get_value(&updated, id).ok_or("Missing status widgets")?;
         let actual = serde_json::to_value(&candidate.tui.status_widgets)
             .map_err(|error| error.to_string())?;
@@ -902,7 +964,7 @@ pub fn validate_edit(config: &Value, id: &str, text: &str) -> Result<AppConfig, 
                 &candidate.commands.blacklist
             };
             for program in entries {
-                validate_program(program)?;
+                crate::commands::validate_rule(program)?;
             }
         }
         "notifications.pushover.application" => {
@@ -1009,19 +1071,6 @@ pub fn validate_edit(config: &Value, id: &str, text: &str) -> Result<AppConfig, 
     Ok(candidate)
 }
 
-fn validate_program(program: &str) -> Result<(), String> {
-    if program.is_empty()
-        || program
-            .chars()
-            .any(|ch| ch.is_control() || ch.is_whitespace())
-        || program.contains([';', '|', '&', '$', '`', '\\', '"', '\''])
-        || (program.contains('/') && !std::path::Path::new(program).is_absolute())
-    {
-        return Err("Enter one executable name or absolute path, without shell arguments".into());
-    }
-    Ok(())
-}
-
 fn saved_provider(config: &AppConfig, provider: &str) -> bool {
     !config
         .disabled_providers
@@ -1072,17 +1121,144 @@ mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
 
+    #[test]
+    fn stored_string_lists_round_trip_without_normalization_or_entry_loss() {
+        let entries = vec![
+            " model ",
+            "",
+            "other\nvariant",
+            "\\e",
+            "line\rreturn",
+            "\ttab",
+            "   ",
+        ];
+        for id in ["disabled_models", "disabled_providers"] {
+            let setting = catalog()
+                .iter()
+                .find(|entry| entry.id == id)
+                .expect("setting");
+            let mut source = config();
+            source[id] = serde_json::json!(entries);
+            let text = plaintext::display(&source, setting).expect("open");
+            assert!(text.contains("\\e"));
+            let serialized = plaintext::serialized(setting, &text).expect("serialize");
+            assert_eq!(
+                serde_json::from_str::<Vec<String>>(&serialized).expect("entries"),
+                entries
+            );
+            let candidate = validate_edit(&source, id, &serialized).expect("valid");
+            assert_eq!(
+                get_value(&serde_json::to_value(candidate).expect("config"), id),
+                source.get(id)
+            );
+            assert_eq!(
+                plaintext::serialized(setting, "").expect("empty list"),
+                "[]"
+            );
+            assert_eq!(
+                plaintext::serialized(setting, "\\e").expect("empty entry"),
+                "[\"\"]"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_keyboard_reset_is_saved_by_mouse_and_keyboard_until_success() {
+        let mut state = SettingsWorkspaceState::default();
+        let mut config = AppConfig::default();
+        config
+            .tui
+            .keybinding_overrides
+            .insert("new_chat".into(), "alt+n".into());
+        state.load(&config);
+        state.select_id("keybind:new_chat");
+        assert!(matches!(
+            state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            Some(SettingsIntent::Apply { .. })
+        ));
+        state.fail("disk full");
+        assert!(!state.keyboard.is_capturing());
+        let keyboard = state.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(
+            keyboard,
+            Some(SettingsIntent::Save {
+                draft: Some(("tui.keybinding_overrides".into(), "{}".into()))
+            })
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        terminal
+            .draw(|frame| state.render(frame, frame.area()))
+            .expect("render");
+        assert!(terminal.backend().to_string().contains("Save Ctrl+S"));
+        let mouse = state.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: state.save_area.x,
+            row: state.save_area.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(mouse, keyboard);
+        assert!(state.keyboard.pending_draft().is_some());
+        config.tui.keybinding_overrides.clear();
+        state.applied(&config, "tui.keybinding_overrides");
+        assert_eq!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            Some(SettingsIntent::Save { draft: None })
+        );
+    }
+
+    #[test]
+    fn plaintext_collections_round_trip_and_validate_every_editable_field() {
+        for (id, text) in [
+            ("disabled_providers", "one\ntwo"),
+            ("disabled_models", "one:model\ntwo:model"),
+            ("commands.blacklist", "curl -H 'X-Name: value'"),
+            ("tui.status_widgets", "provider 1 1\nmcps 2 6"),
+            ("tui.keybinding_overrides", "new_chat=alt+n"),
+            ("mcp_servers", "name: server\ntransport: stdio\ncommand: program\nargs: 'one two' '' \"quote'value\"\nurl: https://example.org/mcp\nenabled: true"),
+        ] {
+            let setting = catalog().iter().find(|setting| setting.id == id).expect("setting");
+            let serialized = plaintext::serialized(setting, text).expect("plaintext");
+            let candidate = validate_edit(&config(), id, &serialized).expect("valid edit");
+            let value = serde_json::to_value(candidate).expect("config");
+            let reopened = plaintext::display(&value, setting).expect("display");
+            let serialized = plaintext::serialized(setting, &reopened).expect("round trip");
+            let next = validate_edit(&value, id, &serialized).expect("round trip valid");
+            assert_eq!(get_value(&value, id), get_value(&serde_json::to_value(next).expect("config"), id));
+        }
+        for (id, invalid) in [
+            ("tui.status_widgets", "provider 4 1"),
+            ("tui.status_widgets", "provider 1 1\nmodel 1 1"),
+            ("tui.keybinding_overrides", "new_chat=ctrl+p"),
+            (
+                "mcp_servers",
+                "name: server\ntransport: stdio\ncommand: server\ntypo: true",
+            ),
+            (
+                "mcp_servers",
+                "name: server\ntransport: stdio\ncommand: server\nargs: 'unclosed",
+            ),
+        ] {
+            let setting = catalog()
+                .iter()
+                .find(|setting| setting.id == id)
+                .expect("setting");
+            assert!(plaintext::serialized(setting, invalid)
+                .and_then(|text| validate_edit(&config(), id, &text))
+                .is_err());
+        }
+    }
+
     fn config() -> Value {
         serde_json::to_value(AppConfig::default()).expect("config")
     }
 
     #[test]
-    fn command_policy_edits_require_arrays_of_executable_identities() {
+    fn command_policy_edits_validate_executable_and_literal_argument_rules() {
         for id in ["commands.whitelist", "commands.blacklist"] {
             assert!(validate_edit(&config(), id, r#"["curl","/usr/bin/printf"]"#).is_ok());
             for invalid in [
                 r#""curl""#,
-                r#"["sh -c command"]"#,
+                r#"["curl 'unclosed"]"#,
                 r#"["./curl"]"#,
                 r#"[""]"#,
                 r#"[1]"#,
@@ -1201,16 +1377,17 @@ mod tests {
     }
 
     #[test]
-    fn invalid_numeric_draft_stays_visible_without_an_apply_intent() {
+    fn invalid_numeric_draft_reaches_live_validation_and_stays_visible_on_rejection() {
         let mut state = SettingsWorkspaceState::default();
         state.select_id("local_inference.port");
         state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         state.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         state.paste("not-a-port");
-        assert_eq!(
+        assert!(matches!(
             state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            None
-        );
+            Some(SettingsIntent::Apply { id, value }) if id == "local_inference.port" && value == "not-a-port"
+        ));
+        state.fail("Expected a whole non-negative number");
         assert!(state.has_error);
         assert_eq!(
             state.edit.as_ref().expect("retained draft").text,

@@ -11,6 +11,8 @@ Call `command` with `program`, optional `arguments` (an array of literal strings
 
 Every launch must match the configured whitelist; the default empty whitelist denies all direct commands. The blacklist wins, including canonical paths and symlink targets. Do not add policy entries, choose wrappers to evade a denial, or bypass safeguards. A whitelisted name approves only its canonical PATH executable, not another file sharing its basename.
 
+Settings rules use one plaintext entry per line. An executable-only rule such as `curl` allows any argument list. A rule such as `curl -H` requires the exact literal argv prefix `["-H"]`; it does not approve `--header`, reordered flags, or substrings such as `-Hother`. Quoting preserves argument boundaries and spaces. The same prefix matching applies to blacklist rules, and denial wins. Never change argument order merely to evade a blacklist.
+
 Arguments run without a shell. Pipes, redirects, substitutions, and `$VARIABLE` are literal unless the user has explicitly approved and requested a shell/interpreter. Child environment excludes ambient API keys. Sensitive input belongs in `stdin`, never argv. For Pushover, use its scoped credential tool if raw keys are necessary; otherwise prefer native `pushover`/`reminder` tools that inject keys locally. Never reveal credentials in ordinary responses or logs.
 
 Commands have a 30-second timeout, bounded arguments/stdin, and a 64-KiB limit per output stream. On Unix, timeout, excessive output, or request cancellation terminates the process group and reaps the direct child. Approval is not a filesystem/network sandbox: an approved script or powerful program retains its own capabilities.

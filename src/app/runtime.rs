@@ -384,6 +384,13 @@ impl TuiApp {
                 }
                 Ok(())
             }
+            Action::SaveSettings { draft } => {
+                if let Err(error) = self.save_settings(draft).await {
+                    self.ui
+                        .show_toast(format!("Settings were not saved: {error}"));
+                }
+                Ok(())
+            }
             Action::CloseSettings => {
                 self.ui.settings_v2 = None;
                 self.ui.app_tabs.select(0);

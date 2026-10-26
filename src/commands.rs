@@ -21,32 +21,101 @@ pub(crate) struct CommandOutput {
     pub(crate) stderr: String,
 }
 
-/// Resolve an approved executable, never granting approval by basename alone.
-pub(crate) fn authorize(config: &AppConfig, program: &str) -> Result<PathBuf> {
+/// Resolve an approved executable and literal argument prefix without launching a shell.
+pub(crate) fn authorize(
+    config: &AppConfig,
+    program: &str,
+    arguments: &[String],
+) -> Result<PathBuf> {
+    validate_arguments(arguments)?;
     let resolved = resolve(program)?;
+    let mut blocked = false;
+    let mut approved = false;
+    // Parse every rule before granting access. A malformed rule must never weaken policy.
     for denied in &config.commands.blacklist {
-        validate_program(denied)?;
-        let path = Path::new(denied);
-        let blocked = if path.is_absolute() {
+        let rule = parse_rule(denied).map_err(|error| eyre!("{error}"))?;
+        let path = Path::new(&rule[0]);
+        let identity_matches = if path.is_absolute() {
             std::fs::canonicalize(path).is_ok_and(|target| target == resolved)
         } else {
             Path::new(program).file_name() == path.file_name()
                 || resolved.file_name() == path.file_name()
-                || resolve(denied).is_ok_and(|target| target == resolved)
+                || resolve(&rule[0]).is_ok_and(|target| target == resolved)
         };
-        if blocked {
-            return Err(eyre!("command is blacklisted"));
-        }
+        blocked |= identity_matches && arguments.starts_with(&rule[1..]);
     }
-    if config
-        .commands
-        .whitelist
-        .iter()
-        .any(|allowed| resolve(allowed).is_ok_and(|target| target == resolved))
-    {
+    for allowed in &config.commands.whitelist {
+        let rule = parse_rule(allowed).map_err(|error| eyre!("{error}"))?;
+        approved |= arguments.starts_with(&rule[1..])
+            && resolve(&rule[0]).is_ok_and(|target| target == resolved);
+    }
+    if blocked {
+        return Err(eyre!("command is blacklisted"));
+    }
+    if approved {
         return Ok(resolved);
     }
     Err(eyre!("command is not whitelisted"))
+}
+
+/// Validate executable and quoted literal argv-prefix syntax without requiring installation.
+pub(crate) fn validate_rule(rule: &str) -> Result<(), String> {
+    parse_rule(rule).map(|_| ())
+}
+
+fn parse_rule(rule: &str) -> Result<Vec<String>, String> {
+    if rule.chars().any(char::is_control) {
+        return Err("Command rules must not contain control characters".to_owned());
+    }
+    // shlex treats an unquoted '#' at a word boundary as a comment. Reject comments
+    // instead of silently dropping a constraint; quoted hashes remain literal.
+    let mut quote = None;
+    let mut escaped = false;
+    let mut word_start = true;
+    for character in rule.chars() {
+        if escaped {
+            escaped = false;
+            word_start = false;
+        } else if character == '\\' && quote != Some('\'') {
+            escaped = true;
+            word_start = false;
+        } else if quote == Some(character) {
+            quote = None;
+        } else if quote.is_none() {
+            match character {
+                '\'' | '"' => {
+                    quote = Some(character);
+                    word_start = false;
+                }
+                '#' if word_start => {
+                    return Err(
+                        "Quote literal '#' arguments; command rules do not support comments"
+                            .to_owned(),
+                    );
+                }
+                ' ' => word_start = true,
+                _ => word_start = false,
+            }
+        }
+    }
+    let tokens = shlex::split(rule)
+        .ok_or_else(|| "Command rule has an unterminated quote or escape".to_owned())?;
+    let program = tokens
+        .first()
+        .ok_or_else(|| "Command rule must include an executable".to_owned())?;
+    validate_program(program).map_err(|error| error.to_string())?;
+    validate_arguments(&tokens[1..]).map_err(|error| error.to_string())?;
+    Ok(tokens)
+}
+
+fn validate_arguments(arguments: &[String]) -> Result<()> {
+    if arguments.len() > 128
+        || arguments.iter().map(String::len).sum::<usize>() > MAX_ARGUMENT_BYTES
+        || arguments.iter().any(|argument| argument.contains('\0'))
+    {
+        return Err(eyre!("invalid or excessive command arguments"));
+    }
+    Ok(())
 }
 
 fn validate_program(program: &str) -> Result<()> {
@@ -121,12 +190,8 @@ async fn run_with_timeout(
     input: Option<&[u8]>,
     timeout: Duration,
 ) -> Result<CommandOutput> {
-    let program = authorize(config, program)?;
-    if arguments.len() > 128
-        || arguments.iter().map(String::len).sum::<usize>() > MAX_ARGUMENT_BYTES
-        || arguments.iter().any(|argument| argument.contains('\0'))
-        || input.is_some_and(|input| input.len() > MAX_ARGUMENT_BYTES)
-    {
+    let program = authorize(config, program, arguments)?;
+    if input.is_some_and(|input| input.len() > MAX_ARGUMENT_BYTES) {
         return Err(eyre!("invalid or excessive command arguments or input"));
     }
     let mut command = Command::new(program);

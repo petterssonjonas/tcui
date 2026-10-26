@@ -150,6 +150,13 @@ impl KeyboardSettings {
         self.capture.is_some()
     }
 
+    pub fn pending_draft(&self) -> Option<(String, String)> {
+        match &self.pending {
+            Some(SettingsIntent::Apply { id, value }) => Some((id.clone(), value.clone())),
+            _ => None,
+        }
+    }
+
     pub fn select_action(&mut self, id: &str) -> Option<usize> {
         self.query.clear();
         self.searching = false;
@@ -395,7 +402,7 @@ impl KeyboardSettings {
                 base
             };
             frame.render_widget(
-                Paragraph::new(" Advanced: bulk JSON overrides").style(style),
+                Paragraph::new(" Bulk mappings: command=chord").style(style),
                 rect,
             );
             hit_areas.push((rect, count));

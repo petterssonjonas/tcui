@@ -63,6 +63,7 @@ impl TuiApp {
         match intent {
             SettingsIntent::Apply { id, value } => Some(Action::ApplySetting { id, value }),
             SettingsIntent::Command(command) => crate::tui::settings_panel::command_action(command),
+            SettingsIntent::Save { draft } => Some(Action::SaveSettings { draft }),
         }
     }
 
@@ -78,6 +79,40 @@ impl TuiApp {
             .settings_workspace
             .handle_mouse(event)
             .and_then(Self::settings_intent_action)
+    }
+
+    /// Save the complete live configuration, not the page's possibly stale snapshot.
+    pub(crate) async fn save_settings(&mut self, draft: Option<(String, String)>) -> Result<()> {
+        let result = if let Some((id, value)) = &draft {
+            self.persist_setting(id, value)
+        } else {
+            self.config
+                .try_write()
+                .map_err(|_| eyre!("Configuration is busy; retry Save"))
+                .and_then(|live| {
+                    live.save()?;
+                    Ok(live.clone())
+                })
+        };
+        match result {
+            Ok(config) => {
+                if let Some((id, _)) = draft {
+                    self.publish_setting(&config, &id);
+                } else {
+                    self.ui.settings_workspace.load(&config);
+                }
+                self.ui.settings_workspace.feedback = "Saved all current settings.".into();
+                self.ui.settings_workspace.has_error = false;
+                self.ui.show_toast("Settings saved".into());
+                Ok(())
+            }
+            Err(error) => {
+                self.ui.settings_workspace.fail(format!(
+                    "Not saved: {error}. Draft retained; Ctrl+S retries, Esc cancels."
+                ));
+                Err(error)
+            }
+        }
     }
 
     /// Persist before publishing a configuration, while holding the live write lock.
@@ -225,6 +260,192 @@ impl TuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_provider_drafts_validate_against_live_config_on_enter_and_save() {
+        for save in [false, true] {
+            crate::app::tests::with_test_app("settings-live-provider-draft", |app| {
+                use crossterm::event::{KeyCode, KeyModifiers};
+                app.open_settings_page(Some("default_provider"));
+                app.settings_workspace_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                app.settings_workspace_key(KeyEvent::new(
+                    KeyCode::Char('u'),
+                    KeyModifiers::CONTROL,
+                ));
+                app.ui.settings_workspace.paste("Added while draft open");
+                app.config.try_write().expect("live").providers.push(
+                    crate::config::ProviderConfig {
+                        name: "Added while draft open".into(),
+                        ..Default::default()
+                    },
+                );
+                let key = if save {
+                    KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)
+                } else {
+                    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+                };
+                let action = app
+                    .settings_workspace_key(key)
+                    .expect("stale page must submit draft");
+                let runtime = tokio::runtime::Runtime::new().expect("runtime");
+                match action {
+                    Action::SaveSettings { draft } => runtime
+                        .block_on(app.save_settings(draft))
+                        .expect("save live draft"),
+                    Action::ApplySetting { id, value } => runtime
+                        .block_on(app.apply_settings_value(&id, &value))
+                        .expect("apply live draft"),
+                    _ => panic!("setting intent"),
+                }
+                assert_eq!(
+                    AppConfig::load().expect("reload").default_provider,
+                    "Added while draft open"
+                );
+                assert!(!app.ui.settings_workspace.has_error);
+            });
+        }
+    }
+
+    #[test]
+    fn settings_reserved_navigation_preserves_editor_draft_and_blocks_custom_actions() {
+        crate::app::tests::with_test_app("settings-navigation-draft", |app| {
+            use crossterm::event::{KeyCode, KeyModifiers};
+            app.open_settings_page(Some("local_inference.port"));
+            app.settings_workspace_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            app.settings_workspace_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+            app.ui.settings_workspace.paste("8123");
+            app.ui
+                .keybinding_overrides
+                .insert("new_chat".into(), "alt+n".into());
+            assert!(app
+                .handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT))
+                .is_none());
+            assert!(matches!(
+                app.handle_key(KeyEvent::new(KeyCode::Char(','), KeyModifiers::CONTROL)),
+                Some(Action::ToggleSettings)
+            ));
+            assert!(app
+                .handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))
+                .is_none());
+            assert_ne!(
+                app.ui.app_tabs.active_view(),
+                crate::ui::app_tabs::AppView::Settings
+            );
+            app.open_settings_page(None);
+            assert!(
+                matches!(app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+                Some(Action::SaveSettings { draft: Some((id, value)) }) if id == "local_inference.port" && value == "8123")
+            );
+        });
+    }
+
+    #[test]
+    fn rejected_current_draft_reports_failure_and_keeps_text_for_retry() {
+        crate::app::tests::with_test_app("settings-invalid-current-draft", |app| {
+            use crossterm::event::{KeyCode, KeyModifiers};
+            app.open_settings_page(Some("local_inference.port"));
+            app.settings_workspace_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            app.settings_workspace_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+            app.ui.settings_workspace.paste("not-a-port");
+            let Action::SaveSettings { draft } = app
+                .settings_workspace_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+                .expect("submit draft")
+            else {
+                panic!("Save");
+            };
+            assert!(tokio::runtime::Runtime::new()
+                .expect("runtime")
+                .block_on(app.save_settings(draft))
+                .is_err());
+            assert!(app.ui.settings_workspace.has_error);
+            assert!(
+                matches!(app.settings_workspace_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+                Some(Action::SaveSettings { draft: Some((_, value)) }) if value == "not-a-port")
+            );
+        });
+    }
+
+    #[test]
+    fn explicit_save_commits_draft_and_preserves_complete_live_configuration() {
+        crate::app::tests::with_test_app("settings-explicit-save", |app| {
+            app.open_settings_page(Some("local_inference.port"));
+            {
+                let mut live = app.config.try_write().expect("live");
+                live.commands.blacklist = vec!["blocked --literal".into()];
+                live.disabled_models = vec!["saved:model".into()];
+            }
+            app.settings_workspace_key(KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            app.settings_workspace_key(KeyEvent::new(
+                crossterm::event::KeyCode::Char('u'),
+                crossterm::event::KeyModifiers::CONTROL,
+            ));
+            app.ui.settings_workspace.paste("8123");
+            let action = app
+                .settings_workspace_key(KeyEvent::new(
+                    crossterm::event::KeyCode::Char('s'),
+                    crossterm::event::KeyModifiers::CONTROL,
+                ))
+                .expect("Save");
+            let Action::SaveSettings { draft } = action else {
+                panic!("Save action");
+            };
+            tokio::runtime::Runtime::new()
+                .expect("runtime")
+                .block_on(app.save_settings(draft))
+                .expect("saved");
+            let saved = AppConfig::load().expect("reload");
+            assert_eq!(saved.local_inference.port, 8123);
+            assert_eq!(saved.commands.blacklist, vec!["blocked --literal"]);
+            assert_eq!(saved.disabled_models, vec!["saved:model"]);
+            assert!(!app.ui.settings_workspace.has_error);
+            app.config
+                .try_write()
+                .expect("live")
+                .disabled_models
+                .push("another:model".into());
+            tokio::runtime::Runtime::new()
+                .expect("runtime")
+                .block_on(app.save_settings(None))
+                .expect("save live");
+            assert_eq!(AppConfig::load().expect("reload").disabled_models.len(), 2);
+        });
+    }
+
+    #[test]
+    fn explicit_save_failure_keeps_draft_and_reports_error() {
+        crate::app::tests::with_test_app("settings-explicit-save-failure", |app| {
+            app.open_settings_page(Some("local_inference.port"));
+            app.settings_workspace_key(KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            app.settings_workspace_key(KeyEvent::new(
+                crossterm::event::KeyCode::Char('u'),
+                crossterm::event::KeyModifiers::CONTROL,
+            ));
+            app.ui.settings_workspace.paste("8123");
+            let shared = app.config.clone();
+            let guard = shared.try_write().expect("busy");
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            assert!(runtime
+                .block_on(app.save_settings(Some(("local_inference.port".into(), "8123".into()))))
+                .is_err());
+            assert!(app.ui.settings_workspace.has_error);
+            drop(guard);
+            let action = app
+                .settings_workspace_key(KeyEvent::new(
+                    crossterm::event::KeyCode::Char('s'),
+                    crossterm::event::KeyModifiers::CONTROL,
+                ))
+                .expect("retry");
+            assert!(
+                matches!(action, Action::SaveSettings { draft: Some((_, value)) } if value == "8123")
+            );
+        });
+    }
 
     #[test]
     fn validated_changes_update_live_values_and_disk() {
