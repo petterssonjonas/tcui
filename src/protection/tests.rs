@@ -73,8 +73,12 @@ fn all_protected() -> ProtectionPolicy {
 }
 
 fn legacy_database(environment: &Environment) -> rusqlite::Connection {
+    let key = SharedKey::load_or_create_default(&TcuiDataPaths::discover())
+        .expect("legacy key")
+        .key;
     let content =
-        Storage::encrypt_shared_text("legacy SQLite private body").expect("legacy cipher");
+        crate::storage::crypto::encrypt_shared_text_with_key(&key, "legacy SQLite private body")
+            .expect("legacy cipher");
     let connection =
         rusqlite::Connection::open(environment.data().join("tcui.db")).expect("database");
     connection

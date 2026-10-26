@@ -18,6 +18,16 @@ use crate::{
     tui::settings_panel::{DangerLevel, Setting, SettingCategory, SettingType},
 };
 
+const PUSHOVER_SETUP: &str = "\
+Mobile: https://pushover.net - download the Pushover app.\n\
+Requires user key + one app token; extra named tokens optional.\n\
+Default app: tcui. Approve curl in Terminal > Command whitelist.\n\
+WARNING: scheduled keys/messages are PLAINTEXT in private\n\
+payload files, even when copied from the encrypted vault.\n\
+One-shot: until delivery attempt ends (success or failure).\n\
+Recurring: until cancellation. Cancel reminders to remove copies.\n\
+Vault lock/password changes do not revoke these copies.";
+
 #[derive(Debug, Clone, Copy)]
 pub enum ValueKind {
     Bool,
@@ -122,10 +132,14 @@ pub fn catalog() -> &'static [WorkspaceSetting] {
         entry!("tui.helper_enabled", "Terminal helper hints", "Show or hide the terminal footer keyboard legend. Terminal header controls remain available.", UiLayout, Bool),
         entry!("tui.toast_position", "Toast position", "Place transient notifications, or turn them off.", Notifications, Choice(&["top_left", "top_center", "top_right", "center", "off"])),
         entry!("notifications.desktop", "Desktop notifications", "Allow supported terminal, Herdr or local DBus notification delivery.", Notifications, Bool),
-        entry!("notifications.ntfy.enabled", "Enable ntfy", "Allow notifications to the configured ntfy host and topic. Requires a host.", Notifications, Bool),
-        entry!("notifications.ntfy.host", "ntfy host", "Notification service hostname or HTTP(S) URL without credentials. Configure before enabling delivery.", Notifications, Text),
-        entry!("notifications.ntfy.port", "ntfy port", "Notification service TCP port, 1–65535.", Notifications, Number { min: 1, max: 65535 }),
-        entry!("notifications.ntfy.topic", "ntfy topic", "Notification topic. May be sensitive: value is concealed until explicitly edited.", Notifications, Text),
+        entry!("notifications.pushover.enabled", "Enable Pushover", "Send mobile notifications and explicit @ping-user messages through curl. Approve curl in Command whitelist first; blacklist overrides approval.", Pushover, Bool),
+        entry!("notifications.pushover.use_vault", "Use encrypted vault credentials", "On: encrypted user key and selected application token only; locked or missing keys fail without fallback. Off: explicitly use environment / credential file.", Pushover, Bool),
+        entry!("notifications.pushover.application", "Selected application name", "Default tcui. Enter a saved application name to select its token, or a new name then store its token below. Other application tokens remain saved. Use 1–64 lowercase letters, digits, hyphens or underscores.", Pushover, Text),
+        entry!("pushover_user_key", "Set / replace user key (masked)", "Open encrypted credential entry directly. Unlock or initialize the vault when prompted. Replacement starts blank and never reveals the saved key.", Pushover, Manager("pushover_user_key")),
+        entry!("pushover_app_key", "Set / replace selected app token (masked)", "Store a token for Selected application name in the encrypted vault. Replaces only that application's token; all other saved application tokens are preserved.", Pushover, Manager("pushover_app_key")),
+        entry!("notifications.pushover.env_file", "Environment credential file", "Optional absolute path to a user-owned mode-0600 literal KEY=value file, at most 64 KiB. Environment overrides file values. Ignored in encrypted vault mode. Never paste keys here.", Pushover, OptionalText),
+        entry!("commands.whitelist", "Command whitelist", "JSON array of approved executable names or absolute paths, for example [\"curl\"]. Empty denies all. Exact executable identity, not arbitrary matching basenames. Never add a shell to bypass policy.", Terminal, Json),
+        entry!("commands.blacklist", "Command blacklist", "JSON array of denied executable names or absolute paths. Denial overrides whitelist, including canonical targets and symlinks. Policy controls direct launches, not commands inside scripts.", Terminal, Json),
         entry!("show_memories", "Show memories", "Show memories in the Chat Artifacts sidebar.", Files, Bool),
         entry!("show_vault", "Show Vault", "Show the internal Vault in the Chat Artifacts sidebar.", Files, Bool),
         entry!("credential_vault", "Credential vault", "Unlock, lock and manage credentials in the dedicated encrypted vault. Passwords, API keys and private keys are never shown in settings.", Privacy, Manager("open_credential_vault")),
@@ -272,6 +286,7 @@ impl SettingsWorkspaceState {
             Model,
             Local,
             Notifications,
+            Pushover,
             Files,
             Keybind,
             Mcp,
@@ -621,6 +636,20 @@ impl SettingsWorkspaceState {
                 self.category_areas.push((rect, *category));
             }
         }
+        let list = if self.category == SettingCategory::Pushover {
+            let notice = Paragraph::new(PUSHOVER_SETUP)
+                .wrap(Wrap { trim: true })
+                .style(base.fg(theme.warning));
+            let notice_height =
+                (notice.line_count(list.width) as u16).min(list.height.saturating_sub(3));
+            let [notice_area, controls] =
+                Layout::vertical([Constraint::Length(notice_height), Constraint::Min(1)])
+                    .areas(list);
+            frame.render_widget(notice, notice_area);
+            controls
+        } else {
+            list
+        };
         if self.category == SettingCategory::Keybind && self.edit.is_none() {
             self.selected = self.selected.min(self.keyboard.count().saturating_sub(1));
             self.list_height = list.height.saturating_sub(2) as usize;
@@ -660,9 +689,6 @@ impl SettingsWorkspaceState {
             let value = match setting.kind {
                 ValueKind::Manager(_) => "[Open manager]".into(),
                 ValueKind::Json => "[Enter to review/edit JSON]".into(),
-                _ if setting.id == "notifications.ntfy.topic" => {
-                    "[concealed · Enter to edit]".into()
-                }
                 _ => value_text(get_value(&self.config, setting.id)),
             };
             frame.render_widget(
@@ -864,6 +890,25 @@ pub fn validate_edit(config: &Value, id: &str, text: &str) -> Result<AppConfig, 
         }
     }
     match id {
+        "commands.whitelist" | "commands.blacklist" => {
+            let entries = if id == "commands.whitelist" {
+                &candidate.commands.whitelist
+            } else {
+                &candidate.commands.blacklist
+            };
+            for program in entries {
+                validate_program(program)?;
+            }
+        }
+        "notifications.pushover.application" => {
+            crate::notifications::pushover::application_key_id(text.trim())
+                .map_err(|error| error.to_string())?;
+        }
+        "notifications.pushover.env_file" if !text.trim().is_empty() => {
+            if !std::path::Path::new(text.trim()).is_absolute() {
+                return Err("Enter an absolute credential file path, not credentials".into());
+            }
+        }
         "web_search.enabled"
         | "web_search.backend"
         | "web_search.max_results"
@@ -912,25 +957,6 @@ pub fn validate_edit(config: &Value, id: &str, text: &str) -> Result<AppConfig, 
         "key_file" if !text.trim().is_empty() && !std::path::Path::new(text).is_absolute() => {
             return Err("Enter an absolute path".into())
         }
-        "notifications.ntfy.host" if !text.trim().is_empty() => {
-            let value = if text.contains("://") {
-                text.trim().to_string()
-            } else {
-                format!("http://{}", text.trim())
-            };
-            validate_url(&value)?;
-            let url = reqwest::Url::parse(&value).map_err(|_| "Invalid notification host")?;
-            if url.port().is_some()
-                || url.path() != "/"
-                || url.query().is_some()
-                || url.fragment().is_some()
-            {
-                return Err(
-                    "Use a hostname or HTTP(S) origin; configure the port and topic separately"
-                        .into(),
-                );
-            }
-        }
         "tui.keybinding_overrides" => {
             validate_bindings(&candidate.tui.keybinding_overrides)?;
             for binding in candidate.tui.keybinding_overrides.values_mut() {
@@ -975,14 +1001,20 @@ pub fn validate_edit(config: &Value, id: &str, text: &str) -> Result<AppConfig, 
         }
         _ => {}
     }
-    if id.starts_with("notifications.ntfy.")
-        && candidate.notifications.ntfy.enabled
-        && (candidate.notifications.ntfy.host.trim().is_empty()
-            || candidate.notifications.ntfy.topic.trim().is_empty())
-    {
-        return Err("Configure a notification host and topic before enabling ntfy".into());
-    }
     Ok(candidate)
+}
+
+fn validate_program(program: &str) -> Result<(), String> {
+    if program.is_empty()
+        || program
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace())
+        || program.contains([';', '|', '&', '$', '`', '\\', '"', '\''])
+        || (program.contains('/') && !std::path::Path::new(program).is_absolute())
+    {
+        return Err("Enter one executable name or absolute path, without shell arguments".into());
+    }
+    Ok(())
 }
 
 fn saved_provider(config: &AppConfig, provider: &str) -> bool {
@@ -1037,6 +1069,48 @@ mod tests {
 
     fn config() -> Value {
         serde_json::to_value(AppConfig::default()).expect("config")
+    }
+
+    #[test]
+    fn command_policy_edits_require_arrays_of_executable_identities() {
+        for id in ["commands.whitelist", "commands.blacklist"] {
+            assert!(validate_edit(&config(), id, r#"["curl","/usr/bin/printf"]"#).is_ok());
+            for invalid in [
+                r#""curl""#,
+                r#"["sh -c command"]"#,
+                r#"["./curl"]"#,
+                r#"[""]"#,
+                r#"[1]"#,
+            ] {
+                assert!(validate_edit(&config(), id, invalid).is_err());
+            }
+        }
+        for invalid in ["", "Uppercase", "other app", "../other", &"a".repeat(65)] {
+            assert!(
+                validate_edit(&config(), "notifications.pushover.application", invalid).is_err()
+            );
+        }
+        assert_eq!(
+            validate_edit(
+                &config(),
+                "notifications.pushover.application",
+                "work_alerts"
+            )
+            .expect("named application")
+            .notifications
+            .pushover
+            .application,
+            "work_alerts"
+        );
+        assert!(
+            validate_edit(&config(), "notifications.pushover.env_file", "relative.env").is_err()
+        );
+        assert!(validate_edit(
+            &config(),
+            "notifications.pushover.env_file",
+            "/private/pushover.env"
+        )
+        .is_ok());
     }
 
     #[test]

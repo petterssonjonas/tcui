@@ -4,9 +4,7 @@ use color_eyre::Result;
 use rusqlite::{params, types::Type, Connection};
 
 use crate::storage::chat_store::{ChatDocument, ChatLineage, ChatStore};
-use crate::storage::crypto::{
-    decrypt_shared_text_with_key, encrypt_shared_text_with_key, SharedKey,
-};
+use crate::storage::crypto::SharedKey;
 use crate::storage::paths::TcuiDataPaths;
 
 pub type ProviderRow = (String, String, String, String, String);
@@ -26,16 +24,6 @@ pub struct Storage {
 }
 
 impl Storage {
-    pub(crate) fn encrypt_shared_text(plaintext: &str) -> Result<String> {
-        let shared_key = SharedKey::load_or_create_default(&TcuiDataPaths::discover())?;
-        Ok(encrypt_shared_text_with_key(&shared_key.key, plaintext)?)
-    }
-
-    pub(crate) fn decrypt_shared_text(stored: &str) -> Result<String> {
-        let shared_key = SharedKey::load_or_create_default(&TcuiDataPaths::discover())?;
-        Ok(decrypt_shared_text_with_key(&shared_key.key, stored)?)
-    }
-
     pub fn new() -> Result<Self> {
         crate::protection::require(crate::protection::Domain::Chats)?;
         let paths = TcuiDataPaths::discover();
@@ -646,10 +634,15 @@ mod tests {
         std::fs::create_dir_all(&data_home).expect("create data dir");
         std::env::set_var("XDG_DATA_HOME", &data_home);
 
+        let key = SharedKey::load_or_create_default(&TcuiDataPaths::discover())
+            .expect("legacy key")
+            .key;
         let encrypted_content =
-            Storage::encrypt_shared_text("hello from sqlite").expect("encrypt legacy content");
+            crate::storage::crypto::encrypt_shared_text_with_key(&key, "hello from sqlite")
+                .expect("encrypt legacy content");
         let encrypted_thinking =
-            Storage::encrypt_shared_text("sqlite thinking").expect("encrypt thinking");
+            crate::storage::crypto::encrypt_shared_text_with_key(&key, "sqlite thinking")
+                .expect("encrypt thinking");
         let database_path = data_home.join("tcui").join("tcui.db");
         if let Some(parent) = database_path.parent() {
             std::fs::create_dir_all(parent).expect("create db parent");

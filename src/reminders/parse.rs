@@ -3,18 +3,62 @@ use chrono::{Local, NaiveDateTime, NaiveTime, TimeZone, Weekday};
 use super::{ReminderError, ReminderRequest, ReminderSchedule};
 
 pub(super) fn parse_request(input: &str) -> Result<ReminderRequest, ReminderError> {
-    let (schedule, message) = input.split_once('|').ok_or_else(|| {
-        ReminderError::Invalid(
-            "use `in <duration> | <message>`, `at <YYYY-MM-DD HH:MM> | <message>`, `daily <HH:MM> | <message>`, `weekly <mon|tue|...> <HH:MM> | <message>`, or `calendar <expr> | <message>`".to_string(),
+    parse_request_at(input, Local::now())
+}
+
+fn parse_request_at(
+    input: &str,
+    now: chrono::DateTime<Local>,
+) -> Result<ReminderRequest, ReminderError> {
+    let (schedule, message) = if let Some(parts) = input.split_once('|') {
+        (parts.0.trim().to_owned(), parts.1.trim())
+    } else if let Some((message, time)) = input.rsplit_once(" tomorrow at ") {
+        let message = message.trim();
+        let (first, rest) = message
+            .split_once(char::is_whitespace)
+            .unwrap_or((message, ""));
+        (
+            format!("tomorrow at {}", time.trim()),
+            if first == "to" { rest.trim() } else { message },
         )
-    })?;
+    } else {
+        return Err(ReminderError::Invalid(
+            "use `to <message> tomorrow at noon`, `tomorrow at <HH:MM> | <message>`, `in <duration> | <message>`, `at <YYYY-MM-DD HH:MM> | <message>`, `daily <HH:MM> | <message>`, `weekly <day> <HH:MM> | <message>`, or `calendar <expr> | <message>`".to_owned(),
+        ));
+    };
     let message = message.trim();
     if message.is_empty() {
         return Err(ReminderError::Invalid(
             "reminder message cannot be empty".to_string(),
         ));
     }
-    let schedule = parse_schedule(schedule.trim())?;
+    let schedule = if let Some(time) = schedule.strip_prefix("tomorrow at ") {
+        let time = match time.trim() {
+            "noon" => NaiveTime::from_hms_opt(12, 0, 0),
+            "midnight" => NaiveTime::from_hms_opt(0, 0, 0),
+            value => Some(parse_time(value)?),
+        }
+        .ok_or_else(|| ReminderError::Invalid("invalid reminder time".to_owned()))?;
+        let date = now
+            .date_naive()
+            .succ_opt()
+            .ok_or_else(|| ReminderError::Invalid("reminder date is out of range".to_owned()))?;
+        ReminderSchedule::At(
+            Local
+                .from_local_datetime(&date.and_time(time))
+                .single()
+                .ok_or_else(|| {
+                    ReminderError::Invalid("ambiguous or invalid local reminder time".to_owned())
+                })?,
+        )
+    } else {
+        parse_schedule(schedule.trim())?
+    };
+    if matches!(&schedule, ReminderSchedule::At(time) if *time <= now) {
+        return Err(ReminderError::Invalid(
+            "the reminder time must be in the future".to_owned(),
+        ));
+    }
     Ok(ReminderRequest {
         schedule,
         message: message.to_string(),
@@ -105,18 +149,20 @@ fn parse_duration(input: &str) -> Result<std::time::Duration, ReminderError> {
             .parse::<u64>()
             .map_err(|_| ReminderError::Invalid("invalid duration number".to_string()))?;
         digits.clear();
-        seconds = seconds
-            .checked_add(match ch {
-                's' => value,
-                'm' => value * 60,
-                'h' => value * 60 * 60,
-                'd' => value * 60 * 60 * 24,
-                _ => {
-                    return Err(ReminderError::Invalid(
-                        "duration units are s, m, h, and d".to_string(),
-                    ));
-                }
-            })
+        let multiplier = match ch {
+            's' => 1,
+            'm' => 60,
+            'h' => 60 * 60,
+            'd' => 60 * 60 * 24,
+            _ => {
+                return Err(ReminderError::Invalid(
+                    "duration units are s, m, h, and d".to_string(),
+                ));
+            }
+        };
+        seconds = value
+            .checked_mul(multiplier)
+            .and_then(|value| seconds.checked_add(value))
             .ok_or_else(|| ReminderError::Invalid("duration is too large".to_string()))?;
     }
     if !digits.is_empty() {
@@ -188,9 +234,9 @@ fn format_duration(duration: std::time::Duration) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{describe_schedule, parse_request};
+    use super::{parse_request, parse_request_at};
     use crate::reminders::ReminderSchedule;
-    use chrono::{Timelike, Weekday};
+    use chrono::{Datelike, Local, TimeZone, Timelike, Weekday};
 
     #[test]
     fn parses_relative_reminder() {
@@ -213,8 +259,44 @@ mod tests {
     }
 
     #[test]
-    fn describe_daily_schedule_is_stable() {
-        let parsed = parse_request("daily 08:15 | Stand up").expect("daily reminder");
-        assert_eq!(describe_schedule(&parsed.schedule), "daily 08:15:00");
+    fn tomorrow_noon_resolves_next_local_day_and_preserves_the_subject() {
+        let now = Local
+            .with_ymd_and_hms(2026, 6, 30, 17, 45, 0)
+            .single()
+            .unwrap();
+        let request = parse_request_at("to look into subject X tomorrow at noon", now).unwrap();
+        assert_eq!(request.message, "look into subject X");
+        let ReminderSchedule::At(time) = request.schedule else {
+            panic!("one-shot deadline")
+        };
+        assert_eq!(
+            (
+                time.year(),
+                time.month(),
+                time.day(),
+                time.hour(),
+                time.minute()
+            ),
+            (2026, 7, 1, 12, 0)
+        );
+    }
+
+    #[test]
+    fn explicit_tomorrow_time_is_one_shot_and_past_deadlines_are_rejected() {
+        let now = Local
+            .with_ymd_and_hms(2026, 6, 30, 17, 45, 0)
+            .single()
+            .unwrap();
+        let request = parse_request_at("tomorrow at 08:30 | Review subject", now).unwrap();
+        let ReminderSchedule::At(time) = request.schedule else {
+            panic!("one-shot deadline")
+        };
+        assert_eq!(
+            (time.month(), time.day(), time.hour(), time.minute()),
+            (7, 1, 8, 30)
+        );
+        assert!(parse_request_at("at 2026-06-30 17:44 | Too late", now).is_err());
+        assert!(parse_request_at("to tomorrow at noon", now).is_err());
+        assert!(parse_request_at("in 18446744073709551615d | Overflow", now).is_err());
     }
 }

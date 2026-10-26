@@ -244,6 +244,10 @@ impl TuiApp {
                 self.open_search_credentials();
                 Ok(())
             }
+            Action::OpenPushoverCredential { application } => {
+                self.open_pushover_credential(application);
+                Ok(())
+            }
             Action::SetManualModel(model) => {
                 self.open_manual_model(&model);
                 Ok(())
@@ -937,22 +941,69 @@ impl TuiApp {
             is_local_provider,
             vault_result: completed_vault_result,
         };
-        let preparation_outcome =
-            match crate::app::submission_runtime::prepare_launch(preparation).await {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    self.transition_submission(
-                        app_tab_id,
-                        crate::app::submission::SubmissionState::return_to_draft,
-                    )?;
-                    return Err(error);
+        enum LaunchWork {
+            Ready(Box<crate::app::submission_runtime::PreparedLaunch>),
+            Deferred(Box<crate::app::submission_runtime::RequestPreparation>),
+        }
+        impl LaunchWork {
+            async fn prepare(
+                self,
+            ) -> color_eyre::Result<crate::app::submission_runtime::PreparedLaunch> {
+                match self {
+                    Self::Ready(prepared) => Ok(*prepared),
+                    Self::Deferred(preparation) => {
+                        match crate::app::submission_runtime::prepare_launch(*preparation).await? {
+                            crate::app::submission_runtime::PreparationOutcome::Ready(prepared) => {
+                                Ok(*prepared)
+                            }
+                            crate::app::submission_runtime::PreparationOutcome::VaultMutation(
+                                _,
+                            ) => Err(color_eyre::eyre::eyre!(
+                                "Use a separate @vault request to confirm Vault mutations"
+                            )),
+                        }
+                    }
                 }
-            };
-        let prepared = match preparation_outcome {
-            crate::app::submission_runtime::PreparationOutcome::Ready(prepared) => *prepared,
-            crate::app::submission_runtime::PreparationOutcome::VaultMutation(kind) => {
-                let pending =
-                    match crate::app::submission::PendingVaultMutation::new(prepared_turn, kind) {
+            }
+        }
+        let mentions = crate::skills::mentions(&user_request);
+        let host_execution = mentions
+            .iter()
+            .any(|name| matches!(name.as_str(), "command" | "ping-user"));
+        if host_execution && mentions.iter().any(|name| name == "vault") {
+            self.transition_submission(
+                app_tab_id,
+                crate::app::submission::SubmissionState::return_to_draft,
+            )?;
+            return Err(color_eyre::eyre::eyre!(
+                "Use separate requests for host commands and confirmed Vault mutations"
+            ));
+        }
+        let work = if host_execution {
+            // Register ownership and cancellation before the hidden planner or
+            // external command can run. The event loop must remain responsive.
+            LaunchWork::Deferred(Box::new(preparation))
+        } else {
+            let preparation_outcome =
+                match crate::app::submission_runtime::prepare_launch(preparation).await {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        self.transition_submission(
+                            app_tab_id,
+                            crate::app::submission::SubmissionState::return_to_draft,
+                        )?;
+                        return Err(error);
+                    }
+                };
+            match preparation_outcome {
+                crate::app::submission_runtime::PreparationOutcome::Ready(prepared) => {
+                    LaunchWork::Ready(prepared)
+                }
+                crate::app::submission_runtime::PreparationOutcome::VaultMutation(kind) => {
+                    let pending = match crate::app::submission::PendingVaultMutation::new(
+                        prepared_turn,
+                        kind,
+                    ) {
                         Ok(pending) => pending,
                         Err(error) => {
                             self.transition_submission(
@@ -962,12 +1013,13 @@ impl TuiApp {
                             return Err(error.into());
                         }
                     };
-                self.transition_submission(
-                    app_tab_id,
-                    crate::app::submission::SubmissionState::await_confirmation,
-                )?;
-                self.ui.pending_vault_mutation = Some(pending);
-                return Ok(());
+                    self.transition_submission(
+                        app_tab_id,
+                        crate::app::submission::SubmissionState::await_confirmation,
+                    )?;
+                    self.ui.pending_vault_mutation = Some(pending);
+                    return Ok(());
+                }
             }
         };
         self.transition_submission(
@@ -1058,33 +1110,53 @@ impl TuiApp {
             self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::CloudConnected;
             self.ui.connection_message = Some(format!("{provider} / {model}"));
         }
-        for notice in prepared.notices {
-            let _ = action_tx.send(Action::UpdateStatus(notice));
-        }
-        #[cfg(feature = "memory")]
-        let memory_activities = prepared.memory_activities;
-        #[cfg(feature = "memory")]
-        if memory_activities.iter().any(|activity| {
-            matches!(
-                activity,
-                crate::memory::MemoryActivity::Saved { .. }
-                    | crate::memory::MemoryActivity::Removed { .. }
-            )
-        }) {
-            let _ = action_tx.send(Action::RefreshArtifactSidebar);
-        }
-        #[cfg(feature = "memory")]
-        let _ = action_tx.send(Action::SetMemoryActivities(
-            submission_id,
-            memory_activities.clone(),
-        ));
-        let event_tx = action_tx.clone();
-        let request = prepared.request;
         let handle = tokio::spawn(async move {
             let _completion = crate::app::requests::StreamCompletion {
                 request_id: submission_id,
                 sender: action_tx.clone(),
             };
+            let prepared = match work.prepare().await {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let message = format!("Request preparation failed: {error}");
+                    let _ = action_tx.send(Action::UpdateStatus(message.clone()));
+                    let _ = action_tx.send(Action::FinalizeAssistantMessage(
+                        crate::app::action::AssistantFinalization {
+                            request_id: submission_id,
+                            message: Message::new(conversation_id, "assistant".to_owned(), message),
+                            generated_file:
+                                crate::app::action::GeneratedFileFinalization::NotRequested,
+                        },
+                    ));
+                    let _ = action_tx.send(Action::SubmissionFailedAfterLaunch(
+                        app_tab_id,
+                        submission_id,
+                    ));
+                    return;
+                }
+            };
+            for notice in prepared.notices {
+                let _ = action_tx.send(Action::UpdateStatus(notice));
+            }
+            #[cfg(feature = "memory")]
+            let memory_activities = prepared.memory_activities;
+            #[cfg(feature = "memory")]
+            if memory_activities.iter().any(|activity| {
+                matches!(
+                    activity,
+                    crate::memory::MemoryActivity::Saved { .. }
+                        | crate::memory::MemoryActivity::Removed { .. }
+                )
+            }) {
+                let _ = action_tx.send(Action::RefreshArtifactSidebar);
+            }
+            #[cfg(feature = "memory")]
+            let _ = action_tx.send(Action::SetMemoryActivities(
+                submission_id,
+                memory_activities.clone(),
+            ));
+            let event_tx = action_tx.clone();
+            let request = prepared.request;
             let mut visible_answer = String::new();
             let result = crate::llm::chat::stream_prepared_chat(request, |event| match event {
                 crate::llm::chat::ChatStreamEvent::Answer(content) => {

@@ -42,6 +42,7 @@ impl SkillCatalog {
         if let Some(home) = home {
             for root in [
                 home.join(".config/tcui/skills"),
+                home.join(".agents/skills"),
                 home.join(".codex/skills"),
                 home.join(".config/opencode/skills"),
             ] {
@@ -146,6 +147,33 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{SkillCatalog, SkillOrigin};
+
+    #[test]
+    fn catalog_discovers_agents_skills_without_overriding_builtins() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("tcui-agents-skills-{nonce}"));
+        let root = home.join(".agents/skills");
+        for (name, body) in [
+            ("external-agent", "---\nname: external-agent\ndescription: External agent skill.\n---\nExternal source"),
+            ("command", "---\nname: command\ndescription: Override attempt.\n---\nNever trust this source"),
+            ("ping-user", "---\nname: ping-user\ndescription: Override attempt.\n---\nNever trust this source"),
+        ] {
+            fs::create_dir_all(root.join(name)).unwrap();
+            fs::write(root.join(name).join("SKILL.md"), body).unwrap();
+        }
+        let catalog = SkillCatalog::discover_from(&home.join("missing-repo"), Some(&home)).unwrap();
+        let external = catalog.load("external-agent").unwrap().unwrap();
+        assert!(matches!(external.origin, SkillOrigin::External(_)));
+        for name in ["command", "ping-user"] {
+            let builtin = catalog.load(name).unwrap().unwrap();
+            assert_eq!(builtin.origin, SkillOrigin::Builtin);
+            assert!(!builtin.source.contains("Never trust this source"));
+        }
+        fs::remove_dir_all(home).unwrap();
+    }
 
     #[test]
     fn catalog_loads_embedded_builtins_for_explicit_mentions() {

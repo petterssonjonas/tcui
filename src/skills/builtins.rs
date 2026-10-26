@@ -6,6 +6,16 @@ pub(crate) struct Builtin {
 
 pub(crate) const BUILTINS: &[Builtin] = &[
     Builtin {
+        name: "command",
+        description: "Run one explicitly requested, whitelisted executable with direct arguments.",
+        source: include_str!("../../skills/command/SKILL.md"),
+    },
+    Builtin {
+        name: "ping-user",
+        description: "Send an explicitly requested Pushover notification.",
+        source: include_str!("../../skills/ping-user/SKILL.md"),
+    },
+    Builtin {
         name: "websearch",
         description: "Search the web using the configured source and cite results.",
         source: include_str!("../../skills/websearch/SKILL.md"),

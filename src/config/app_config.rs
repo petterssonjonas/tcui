@@ -220,13 +220,31 @@ pub struct LocalInferenceConfig {
     pub api_token_env: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CommandConfig {
+    pub whitelist: Vec<String>,
+    pub blacklist: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct NtfyConfig {
+pub struct PushoverConfig {
     pub enabled: bool,
-    pub host: String,
-    pub port: u16,
-    pub topic: String,
+    pub application: String,
+    pub use_vault: bool,
+    pub env_file: Option<String>,
+}
+
+impl Default for PushoverConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            application: "tcui".to_owned(),
+            use_vault: false,
+            env_file: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,7 +252,7 @@ pub struct NtfyConfig {
 pub struct NotificationConfig {
     /// Allow automatic delivery through Herdr, a supported terminal, or local DBus.
     pub desktop: bool,
-    pub ntfy: NtfyConfig,
+    pub pushover: PushoverConfig,
 }
 
 impl LocalInferenceConfig {
@@ -280,6 +298,7 @@ pub struct AppConfig {
     #[serde(alias = "show_markdown_vault")]
     pub show_vault: bool,
     pub notifications: NotificationConfig,
+    pub commands: CommandConfig,
     pub local_inference: LocalInferenceConfig,
     pub web_search: WebSearchConfig,
     #[serde(default, deserialize_with = "crate::config::tui::deserialize_tui")]
@@ -368,6 +387,7 @@ impl Default for AppConfig {
             show_memories: true,
             show_vault: true,
             notifications: NotificationConfig::default(),
+            commands: CommandConfig::default(),
             local_inference: LocalInferenceConfig::default(),
             web_search: WebSearchConfig::default(),
             tui: crate::config::tui::TuiConfig::default(),
@@ -406,22 +426,11 @@ impl Default for LocalInferenceConfig {
     }
 }
 
-impl Default for NtfyConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            host: String::new(),
-            port: 80,
-            topic: "tcui".to_string(),
-        }
-    }
-}
-
 impl Default for NotificationConfig {
     fn default() -> Self {
         Self {
             desktop: true,
-            ntfy: NtfyConfig::default(),
+            pushover: PushoverConfig::default(),
         }
     }
 }
