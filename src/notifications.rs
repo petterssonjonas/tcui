@@ -1,3 +1,5 @@
+pub(crate) mod pushover;
+
 use std::{
     io::{self, IsTerminal, Write},
     path::PathBuf,
@@ -131,6 +133,29 @@ pub(crate) async fn notify_reminder(config: &AppConfig, message: &str) -> color_
     notify_text(config, REMINDER_TITLE, &body, true).await
 }
 
+/// Delivers a scheduled reminder without reopening its credential vault.
+pub(crate) async fn notify_reminder_with_delivery(
+    config: &AppConfig,
+    message: &str,
+    delivery: &pushover::Delivery,
+) -> color_eyre::Result<()> {
+    let body = clean_text(message, MAX_BODY_CHARS);
+    let mut failure = if body.is_empty() {
+        None
+    } else {
+        notify_desktop_and_ntfy(config, REMINDER_TITLE, &body, true)
+            .await
+            .err()
+    };
+    if let Err(error) = delivery.send(config, "reminder", message).await {
+        failure.get_or_insert(error);
+    }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 fn notification_body(prompt: &str, answer: &str) -> String {
     let summary = answer
         .lines()
@@ -178,6 +203,31 @@ fn ntfy_url(config: &AppConfig) -> Option<String> {
 }
 
 async fn notify_text(
+    config: &AppConfig,
+    title: &str,
+    body: &str,
+    audible_bell: bool,
+) -> color_eyre::Result<()> {
+    let mut failure = notify_desktop_and_ntfy(config, title, body, audible_bell)
+        .await
+        .err();
+    let delivery = async {
+        if let Some(delivery) = pushover::prepare(config)? {
+            delivery.send(config, title, body).await?;
+        }
+        color_eyre::Result::<()>::Ok(())
+    }
+    .await;
+    if let Err(error) = delivery {
+        failure.get_or_insert(error);
+    }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+async fn notify_desktop_and_ntfy(
     config: &AppConfig,
     title: &str,
     body: &str,
@@ -451,6 +501,172 @@ async fn run_helper(command: &mut Command, timeout: Duration) -> io::Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    mod captured_reminders {
+        use super::*;
+        use crate::config::key_store::{KeyStore, SecretKind};
+        use std::{ffi::OsString, os::unix::fs::PermissionsExt};
+
+        struct Environment {
+            root: PathBuf,
+            previous: [(&'static str, Option<OsString>); 4],
+        }
+
+        impl Environment {
+            fn new() -> Self {
+                let root = std::env::temp_dir().join(format!(
+                    "tcui-captured-reminder-{}-{:032x}",
+                    std::process::id(),
+                    rand::random::<u128>()
+                ));
+                std::fs::create_dir(&root).expect("fixture directory");
+                std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+                    .expect("private fixture");
+                let previous = ["HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"]
+                    .map(|name| (name, std::env::var_os(name)));
+                for (name, _) in &previous {
+                    let path = root.join(*name);
+                    std::fs::create_dir(&path).expect("isolated environment directory");
+                    std::env::set_var(name, path);
+                }
+                Self { root, previous }
+            }
+        }
+
+        impl Drop for Environment {
+            fn drop(&mut self) {
+                let _ = crate::protection::lock();
+                for (name, value) in &self.previous {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+                let _ = std::fs::remove_dir_all(&self.root);
+            }
+        }
+
+        fn backend_case(failed_backend: Option<&str>) {
+            let _guard = crate::test_support::env_lock()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let environment = Environment::new();
+            let mut config = AppConfig::default();
+            let program = environment.root.join("pushover-helper");
+            let desktop = environment.root.join("desktop-helper");
+            let user_key = "u".repeat(30);
+            let app_key = "a".repeat(30);
+            std::fs::write(&program, format!(
+                "#!/bin/sh\n[ \"$PUSHOVER_USER_KEY\" = '{user_key}' ] || exit 2\n[ \"$PUSHOVER_TCUI_APP_TOKEN\" = '{app_key}' ] || exit 3\n[ \"${{PUSHOVER_ENV_FILE+x}}\" = x ] && [ -z \"$PUSHOVER_ENV_FILE\" ] || exit 4\n[ \"$#\" = 6 ] && [ \"$1\" = --app ] && [ \"$2\" = tcui ] && [ \"$3\" = --title ] && [ \"$4\" = reminder ] && [ \"$5\" = -- ] || exit 5\nprintf '%s' \"$6\" > \"$0.sentinel\"\nexit {}\n",
+                if failed_backend == Some("pushover") { 1 } else { 0 }
+            )).expect("Pushover fixture helper");
+            std::fs::write(&desktop, format!(
+                "#!/bin/sh\nprintf 'desktop attempted' > \"$0.sentinel\"\nprintf '%s' '{{\"result\":{{\"type\":\"notification_show\",\"shown\":{},\"reason\":\"disabled\"}}}}'\n",
+                failed_backend != Some("desktop")
+            )).expect("desktop fixture helper");
+            for path in [&program, &desktop] {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                    .expect("executable helper");
+            }
+            config.notifications.desktop = true;
+            config.notifications.ntfy.enabled = true;
+            config.notifications.ntfy.host = "127.0.0.1".into();
+            config.notifications.pushover.enabled = true;
+            config.notifications.pushover.use_vault = true;
+            config.notifications.pushover.command = program.to_string_lossy().into_owned();
+            config.commands.whitelist = vec![config.notifications.pushover.command.clone()];
+            KeyStore::initialize_vault(&config, "isolated reminder vault password")
+                .expect("fixture vault");
+            KeyStore::set_secret(
+                &config,
+                pushover::USER_KEY_ID,
+                "Pushover user",
+                SecretKind::Password,
+                &user_key,
+            )
+            .expect("fixture user key");
+            KeyStore::set_secret(
+                &config,
+                pushover::APP_KEY_ID,
+                "Pushover app",
+                SecretKind::Password,
+                &app_key,
+            )
+            .expect("fixture app key");
+            let delivery = pushover::prepare(&config)
+                .expect("prepare snapshot")
+                .expect("enabled");
+            KeyStore::lock_vault(&config).expect("cold lock");
+            assert!(KeyStore::get_secret(&config, pushover::USER_KEY_ID).is_err());
+            // Pushover must retain the full message; existing local backends retain their excerpt.
+            let message = format!(
+                "{}\ncomplete scheduled reminder",
+                "m".repeat(MAX_BODY_CHARS + 20)
+            );
+            let local_body = clean_text(&message, MAX_BODY_CHARS);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            runtime.block_on(async {
+                use tokio::io::AsyncWriteExt;
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("local ntfy fixture");
+                config.notifications.ntfy.port = listener.local_addr().expect("fixture address").port();
+                let expected_body = local_body.clone();
+                let status = if failed_backend == Some("ntfy") { "500 Failed" } else { "200 OK" };
+                let server = tokio::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.expect("ntfy connection");
+                    let mut request = Vec::new();
+                    let mut chunk = [0; 1024];
+                    loop {
+                        let count = stream.read(&mut chunk).await.expect("fixture request");
+                        assert_ne!(count, 0, "request ended before the reminder body");
+                        request.extend_from_slice(&chunk[..count]);
+                        assert!(request.len() <= 16_384, "unexpected fixture request size");
+                        if request.ends_with(expected_body.as_bytes()) {
+                            break;
+                        }
+                    }
+                    stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.expect("fixture response");
+                    request
+                });
+                // Install a local desktop fixture, never probe a real terminal, bus or Herdr session.
+                let route = DESKTOP_ROUTE.get_or_init(|| async { Mutex::new(DesktopRoute::Disabled) }).await;
+                let previous = std::mem::replace(&mut *route.lock().await, DesktopRoute::Herdr(desktop.clone()));
+                let result = notify_reminder_with_delivery(&config, &message, &delivery).await;
+                let request = tokio::time::timeout(Duration::from_secs(2), server).await;
+                *route.lock().await = previous;
+                assert_eq!(result.is_err(), failed_backend.is_some());
+                let request = request.expect("ntfy must be attempted").expect("ntfy task");
+                assert!(request.starts_with(b"POST /tcui HTTP/1.1\r\n"));
+                assert!(request.ends_with(local_body.as_bytes()));
+                assert_eq!(std::fs::read(program.with_extension("sentinel")).expect("captured Pushover attempted"), message.as_bytes());
+                assert_eq!(std::fs::read(desktop.with_extension("sentinel")).expect("desktop attempted"), b"desktop attempted");
+                assert!(KeyStore::get_secret(&config, pushover::APP_KEY_ID).is_err(), "dispatch reopened the vault");
+            });
+        }
+
+        #[test]
+        fn cold_locked_reminder_delivers_all_enabled_backends() {
+            backend_case(None);
+        }
+
+        #[test]
+        fn desktop_failure_does_not_skip_ntfy_or_captured_pushover() {
+            backend_case(Some("desktop"));
+        }
+
+        #[test]
+        fn ntfy_failure_does_not_skip_desktop_or_captured_pushover() {
+            backend_case(Some("ntfy"));
+        }
+
+        #[test]
+        fn pushover_failure_does_not_skip_desktop_or_ntfy() {
+            backend_case(Some("pushover"));
+        }
+    }
 
     fn environment(values: &[(&str, &str)], output_terminal: bool) -> NotificationEnvironment {
         NotificationEnvironment::read(

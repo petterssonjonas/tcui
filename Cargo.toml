@@ -57,7 +57,7 @@ libc = "0.2.191"
 rand = "0.10.3"
 blake3 = "1.8.7"
 webbrowser = { version = "1.2.5", features = ["hardened"] }
-rustix = { version = "1.1.5", features = ["fs"] }
+rustix = { version = "1.1.5", features = ["fs", "process"] }
 unicode-width = "0.2"
 unicode-segmentation = "1.13"
 unicode-normalization = "0.1.26"

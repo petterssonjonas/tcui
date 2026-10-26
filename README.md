@@ -226,6 +226,35 @@ pass, not an immediate purge.
 
 ## Commands and terminal tabs
 
+### Approved direct commands
+
+Start a message with `@command <executable> <argument instructions>` to run one
+approved program, for example `@command date use the UTC timezone`.
+`/skill command ...` is also supported. Configure **Settings → Terminal → Command
+whitelist** and **Command blacklist** as JSON arrays. An empty whitelist denies
+all direct launches; the blacklist always wins, including canonical symlink targets.
+Entries are executable names or absolute paths, not globs or command lines.
+A whitelisted name approves its canonical PATH executable, not every file with
+the same basename. Use an unquoted executable without spaces in the request.
+
+The executable comes from your leading instruction. A model plans only literal
+arguments; TCUI passes them without a shell. Examples, history, attachments,
+assistant output, and non-leading mentions do not authorize a launch. Arguments
+are bounded, each output stream is limited to 64 KiB, and execution times out
+after 30 seconds. Cancelling a request terminates its Unix process group.
+Children receive a restricted environment rather than ambient API keys or shell
+startup hooks. Command output becomes untrusted chat/model context: do not
+approve helpers that print secrets.
+
+This is an executable allowlist, **not a sandbox**. Trust the approved executable,
+its location, and its contents. Scripts, interpreters, wrappers, and powerful
+utilities retain their own capabilities and can launch other programs. The
+policy governs TCUI's direct command and Pushover launches, not commands you
+manually approve in an interactive terminal. Use the native reminder syntax
+below for scheduling; combining `@command` with scheduling directives is refused.
+
+### Reviewed shell blocks
+
 Completed assistant command blocks use an explicit fence such as `bash tcui-run`.
 Supported shells are `sh`, `bash`, `shell`, `zsh`, and `fish`; `tcui-run` is required.
 Fences must be top-level, unindented, closed, and nonempty. Ordinary shell examples,
@@ -464,15 +493,95 @@ notification route instead of blindly running `notify-send`:
   never fall back to the server's D-Bus or sound service. Unverified multiplexer
   passthrough is disabled.
 
-Response notifications still occur only while TCUI is unfocused. Helper errors
-are captured rather than printed over the TUI, and a failed backend is disabled
-for the process lifetime. Set `desktop = false` under `[notifications]` in
-`config.toml` to disable automatic desktop delivery explicitly. Configured ntfy delivery is
-independent.
+Response notifications still occur only while TCUI is unfocused. Desktop helper
+errors are captured rather than printed over the TUI, and a failed desktop backend
+is disabled for the process lifetime. Set `desktop = false` under `[notifications]`
+in `config.toml` to disable automatic desktop delivery explicitly. Configured ntfy
+and Pushover delivery are independent.
 
 Detached SSH reminders cannot notify a terminal that is no longer attached.
-They preserve Herdr routing context when available; otherwise use explicitly
-configured ntfy for delivery after disconnecting.
+They preserve Herdr routing context when available; otherwise configure ntfy or
+Pushover for delivery after disconnecting.
+
+### Pushover
+
+The reference Python 3 helper is `scripts/notify-ping`. Use its absolute executable
+path or install it as `notify-ping` on TCUI's PATH. The installed helper and its
+interpreter must be available on the machine or Toolbox running TCUI.
+
+Configure **Settings → Notifications**: enable Pushover, choose the helper, and
+select encrypted credentials. Open **Pushover keys / Credential vault**, unlock
+or initialize it, then use **Set / replace Pushover user key** and **Set / replace
+Pushover TCUI application key**. Both inputs are masked and always encrypted.
+The helper must also be whitelisted. Example configuration:
+
+```toml
+[commands]
+whitelist = ["notify-ping"]
+blacklist = []
+
+[notifications.pushover]
+enabled = true
+command = "notify-ping"
+use_vault = true
+```
+
+Alternatively, disable encrypted credentials and set **Pushover credential file**
+to an absolute, user-owned, private `0600` literal `KEY=value` file, or supply
+environment variables. TCUI does not automatically load the project's `.env`.
+Use `PUSHOVER_USER_KEY` and `PUSHOVER_TCUI_APP_TOKEN`; `PUSHOVER_APP_TOKEN` is the
+generic application-token fallback. Environment values override corresponding
+file values. Vault mode never falls back to files or environment when locked or
+missing a key.
+
+`@ping-user Tell me the backup is ready` sends immediately through the approved
+helper. TCUI supplies credentials only to that child, not the model or command
+arguments, and suppresses helper output that could disclose them. The standalone
+helper also accepts `--user-key` and `--app-key`; these explicit flags override
+other sources but expose their values in process arguments. Prefer the encrypted
+vault when TCUI invokes it.
+
+### Scheduled notifications
+
+Use a leading native reminder instruction; no model plans the timer:
+
+- `@remindme to look into subject X tomorrow at noon`
+- `@ping-user @remindme in 10m | Look into subject X`
+- `@schedule @ping-user tomorrow at 12:00 | Look into subject X`
+- `@remindme list`
+- `@remindme cancel <reminder-id>`
+
+Pushover-enabled reminders capture the unlocked credentials during scheduling.
+An explicit leading `@ping-user` refuses scheduling if Pushover is disabled;
+missing keys, a locked vault, or denied helper also fail rather than silently
+creating a local-only timer. Put combined directives before the reminder text;
+a trailing `@ping-user` is literal message content.
+Tomorrow uses TCUI's local date/time and creates a one-shot UTC timer.
+Existing relative, absolute, daily, weekly, and calendar forms remain available.
+Reminders also attempt configured desktop and ntfy delivery independently.
+
+Timers use the host's user systemd manager. Inside Toolbox, TCUI registers through
+`flatpak-spawn --host` and re-enters the originating container for delivery.
+Keep that container, TCUI executable path, and helper available. Closing TCUI does
+not cancel a timer, but these transient timers do not promise reboot survival;
+the user manager must remain running after logout.
+
+**Pending Pushover jobs contain plaintext messages and credentials**, even with
+app/chat/vault encryption enabled. Snapshots live in private `0600` files under
+`$XDG_DATA_HOME/tcui/reminder-notifications/`, normally
+`~/.local/share/tcui/reminder-notifications/`.
+They intentionally work without unlocking TCUI again. Locking the vault,
+changing its password, or replacing vault keys does not revoke captured
+credentials: cancel existing jobs first. The enabled flag and command policy
+are checked again at delivery. One-shot snapshots and records are removed after
+the delivery attempt, including failure; there is no automatic retry. Recurring
+snapshots remain until cancellation.
+
+Reminder metadata uses a separate private `reminder.key`, not the password-protected
+chat key. Back up `reminders.toml` together with `reminder.key` when moving reminders.
+Existing legacy records retain their ciphertext and migrate their original
+`chat.key` without replacement. Missing or incompatible keys require restoration;
+TCUI does not generate a replacement over unreadable reminder data.
 
 ## Vault and Memories
 

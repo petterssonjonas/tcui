@@ -8,6 +8,12 @@ use zeroize::Zeroize;
 use super::TuiApp;
 use crate::config::key_store::{CredentialStorage, KeyStore, SecretEntry, SecretKind};
 use crate::config::{AppConfig, ProviderConfig, SearchBackend};
+use crate::notifications::pushover::{self, APP_KEY_ID, USER_KEY_ID};
+
+const PUSHOVER_PRESETS: [(&str, &str); 2] = [
+    (USER_KEY_ID, "Pushover user key"),
+    (APP_KEY_ID, "Pushover TCUI application key"),
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
@@ -173,7 +179,7 @@ impl CredentialManager {
         match self.screen {
             Screen::Providers => self.providers.len() + 1,
             Screen::SearchKeys => SearchBackend::SERVICES.len(),
-            Screen::Vault => self.secrets.len() + 7,
+            Screen::Vault => self.secrets.len() + 7 + PUSHOVER_PRESETS.len(),
             Screen::Presets => self.preset_choices().len() + 1,
             Screen::Storage => 2,
             _ => 1,
@@ -310,6 +316,11 @@ impl CredentialManager {
                         }
                     )
                 }));
+                rows.extend(
+                    PUSHOVER_PRESETS
+                        .iter()
+                        .map(|(_, label)| format!("+ Set / replace {label}")),
+                );
                 "↑/↓ select · Enter edit/apply · c copy · d delete · s search keys · p providers · Esc close"
             }
             Screen::Storage => {
@@ -388,7 +399,11 @@ impl CredentialManager {
                     "Secret for {} (masked):",
                     self.secret_label
                 )));
-                lines.push(Line::from("Paste a complete multiline SSH private key. Existing value can be replaced with Ctrl+U."));
+                lines.push(Line::from(if PUSHOVER_PRESETS.iter().any(|(id, _)| *id == self.secret_id) {
+                    "Enter the 30-character Pushover key. This value always stays encrypted."
+                } else {
+                    "Paste a complete multiline SSH private key. Existing value can be replaced with Ctrl+U."
+                }));
                 "Enter save · Shift+Enter newline · Ctrl+U clear · Esc cancel"
             }
             Screen::RemoveProvider => {
@@ -1024,10 +1039,16 @@ impl TuiApp {
             KeyCode::Char('d') if manager.screen == Screen::Providers && manager.selected > 0 => {
                 manager.screen = Screen::RemoveProvider
             }
-            KeyCode::Char('d') if manager.screen == Screen::Vault && manager.selected >= 7 => {
+            KeyCode::Char('d')
+                if manager.screen == Screen::Vault
+                    && (7..7 + manager.secrets.len()).contains(&manager.selected) =>
+            {
                 manager.screen = Screen::RemoveSecret
             }
-            KeyCode::Char('c') if manager.screen == Screen::Vault && manager.selected >= 7 => {
+            KeyCode::Char('c')
+                if manager.screen == Screen::Vault
+                    && (7..7 + manager.secrets.len()).contains(&manager.selected) =>
+            {
                 let secret = manager
                     .secrets
                     .get(manager.selected - 7)
@@ -1191,6 +1212,21 @@ impl TuiApp {
                     manager
                         .notice
                         .push_str(&format!(" · imported {count} credential(s)"));
+                }
+                index if index >= 7 + manager.secrets.len() => {
+                    if !KeyStore::vault_status(config)
+                        .map_err(|e| e.to_string())?
+                        .unlocked
+                    {
+                        return Err("Unlock or initialize the vault first.".into());
+                    }
+                    let (id, label) = PUSHOVER_PRESETS[index - 7 - manager.secrets.len()];
+                    manager.secret_id = id.into();
+                    manager.secret_label = label.into();
+                    manager.secret_kind = SecretKind::Password;
+                    manager.secret_value.zeroize();
+                    // Replacement starts blank: never reveal the saved key, even temporarily.
+                    manager.go(Screen::SecretValue);
                 }
                 index => {
                     let secret = manager
@@ -1358,6 +1394,12 @@ impl TuiApp {
             Screen::SecretValue => {
                 if manager.input.trim().is_empty() {
                     return Err("Enter a secret value.".into());
+                }
+                if PUSHOVER_PRESETS
+                    .iter()
+                    .any(|(id, _)| *id == manager.secret_id)
+                {
+                    pushover::validate_key(&manager.input).map_err(|error| error.to_string())?;
                 }
                 KeyStore::set_secret(
                     config,
@@ -1749,6 +1791,148 @@ mod tests {
                         .as_deref(),
                     Some("encrypted-tavily-canary")
                 );
+            },
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pushover_presets_store_replace_and_mask_both_encrypted_keys() {
+        super::super::tests::with_test_app_config(
+            "pushover-key-presets",
+            AppConfig::default(),
+            |app| {
+                app.open_credential_manager(true);
+                app.ui
+                    .credential_manager
+                    .as_mut()
+                    .expect("manager")
+                    .selected = 7;
+                press(app, KeyCode::Enter);
+                assert!(app
+                    .ui
+                    .credential_manager
+                    .as_ref()
+                    .expect("manager")
+                    .error
+                    .is_some());
+                app.ui
+                    .credential_manager
+                    .as_mut()
+                    .expect("manager")
+                    .selected = 0;
+                press(app, KeyCode::Enter);
+                paste(app, "long pushover vault password");
+                press(app, KeyCode::Enter);
+                paste(app, "long pushover vault password");
+                press(app, KeyCode::Enter);
+                let mut config = app.config.blocking_read().clone();
+                KeyStore::set_storage_default(&config, CredentialStorage::Plaintext)
+                    .expect("plaintext preference");
+                for (preset, (id, _)) in PUSHOVER_PRESETS.iter().enumerate() {
+                    let manager = app.ui.credential_manager.as_mut().expect("manager");
+                    manager.selected = 7 + manager.secrets.len() + preset;
+                    press(app, KeyCode::Enter);
+                    let manager = app.ui.credential_manager.as_ref().expect("manager");
+                    assert!(manager.masked());
+                    assert!(manager.input.is_empty());
+                    paste(app, "invalid-secret-canary");
+                    press(app, KeyCode::Enter);
+                    assert!(app
+                        .ui
+                        .credential_manager
+                        .as_ref()
+                        .expect("manager")
+                        .error
+                        .is_some());
+                    assert!(KeyStore::get_secret(&config, id)
+                        .expect("not saved")
+                        .is_none());
+                    app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+                    let key = if preset == 0 {
+                        "u".repeat(30)
+                    } else {
+                        "a".repeat(30)
+                    };
+                    paste(app, &key);
+                    let mut terminal =
+                        ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30))
+                            .expect("terminal");
+                    terminal
+                        .draw(|frame| {
+                            app.ui
+                                .credential_manager
+                                .as_ref()
+                                .expect("manager")
+                                .render(frame, frame.area())
+                        })
+                        .expect("masked render");
+                    assert!(!terminal.backend().to_string().contains(&key));
+                    press(app, KeyCode::Enter);
+                    assert_eq!(
+                        KeyStore::get_secret(&config, id).expect("saved").as_deref(),
+                        Some(key.as_str())
+                    );
+                }
+                let manager = app.ui.credential_manager.as_mut().expect("manager");
+                manager.selected = 7 + manager.secrets.len();
+                press(app, KeyCode::Enter);
+                assert!(app
+                    .ui
+                    .credential_manager
+                    .as_ref()
+                    .expect("manager")
+                    .input
+                    .is_empty());
+                paste(app, &"r".repeat(30));
+                press(app, KeyCode::Enter);
+                assert_eq!(
+                    KeyStore::list_secrets(&config).expect("two presets").len(),
+                    2
+                );
+                assert_eq!(
+                    KeyStore::get_secret(&config, USER_KEY_ID).expect("replacement"),
+                    Some("r".repeat(30))
+                );
+                config.notifications.pushover.enabled = true;
+                config.notifications.pushover.use_vault = true;
+                use std::os::unix::fs::PermissionsExt;
+                // The existing fixture owns HOME and holds the shared environment lock.
+                let program =
+                    std::path::PathBuf::from(std::env::var_os("HOME").expect("fixture HOME"))
+                        .join("pushover-notify-ping");
+                let sentinel = program.with_extension("sentinel");
+                std::fs::write(&program, format!(
+                "#!/bin/sh\n[ \"$PUSHOVER_USER_KEY\" = '{}' ] || exit 2\n[ \"$PUSHOVER_TCUI_APP_TOKEN\" = '{}' ] || exit 3\n[ \"${{PUSHOVER_ENV_FILE+x}}\" = x ] && [ -z \"$PUSHOVER_ENV_FILE\" ] || exit 4\n[ \"$#\" = 6 ] && [ \"$1\" = --app ] && [ \"$2\" = tcui ] && [ \"$3\" = --title ] && [ \"$4\" = reminder ] && [ \"$5\" = -- ] || exit 5\nprintf 'captured delivery' > \"$0.sentinel\"\n",
+                "r".repeat(30), "a".repeat(30)
+            )).expect("scratch helper");
+                std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
+                    .expect("scratch helper executable");
+                config.notifications.pushover.command = program.to_string_lossy().into_owned();
+                config.commands.whitelist = vec![config.notifications.pushover.command.clone()];
+                let snapshot = pushover::prepare(&config)
+                    .expect("unlocked snapshot")
+                    .expect("enabled");
+                KeyStore::lock_vault(&config).expect("lock");
+                assert!(KeyStore::get_secret(&config, USER_KEY_ID).is_err());
+                assert!(pushover::prepare(&config).is_err());
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime");
+                runtime
+                    .block_on(snapshot.send(
+                        &config,
+                        "reminder",
+                        "captured credentials after cold lock",
+                    ))
+                    .expect("snapshot dispatch must not reopen the vault");
+                assert_eq!(
+                    std::fs::read(&sentinel).expect("cold-lock delivery evidence"),
+                    b"captured delivery"
+                );
+                let serialized = serde_json::to_string(&config).expect("configuration");
+                assert!(!serialized.contains(&"r".repeat(30)));
             },
         );
     }

@@ -65,6 +65,9 @@ Type any slash command in the message box:
 - Notifications use Herdr, a reachable local desktop service, or supported
   Kitty/Ghostty/WezTerm terminal delivery over SSH. Unsupported routes are off;
   SSH never sends desktop notifications to the server's D-Bus.
+- Optional Pushover delivery uses an approved `notify-ping` helper. Configure its
+  command policy and encrypted keys in Settings → Notifications. A locked vault
+  never falls back to plaintext credentials.
 
 ## Application protection
 
@@ -211,6 +214,32 @@ must first be upgraded on their source instance with its original key metadata.
   Shift+PageUp/PageDown scroll terminal history.
 - Closing live terminals or quitting with them requires confirmation. Sessions
   survive switching views, not application exit.
+
+## Approved commands and reminders
+
+- Start with `@command <executable> <argument instructions>` for one direct launch.
+  Configure JSON whitelist/blacklist arrays in Settings → Terminal; blacklist wins.
+  The model chooses arguments, not the executable. No shell is used. Command output
+  becomes chat/model context. Trust approved scripts and their contents: this is
+  not a sandbox, and it does not restrict your manually approved terminal commands.
+- Commands have a 30-second timeout and 64-KiB output limit per stream.
+  Cancel the request to terminate its Unix process group.
+- `@ping-user Tell me the backup is ready` sends an immediate Pushover notification.
+  Settings → Notifications → Pushover keys / Credential vault manages the two
+  encrypted keys. The helper must also be whitelisted.
+- `@remindme to review subject X tomorrow at noon` creates a one-shot local-time
+  reminder. `@ping-user @remindme in 10m | Review subject X` explicitly requires
+  Pushover. Put both directives before the message. `@schedule` is equivalent.
+  Use `@remindme list` and `@remindme cancel <id>` to manage timers.
+- Scheduling requires the host's user systemd manager. Toolbox timers re-enter the
+  originating container. Keep that container, TCUI binary, and helper available.
+  Timers can outlive TCUI, but do not promise delivery after logout or reboot.
+- Pending Pushover jobs store plaintext messages and keys in private files, even
+  when the app is encrypted. Locking or changing the vault password does not revoke
+  them. Cancel jobs to remove them. One-shot snapshots are consumed after one
+  attempt, including failure; recurring snapshots remain until cancelled.
+- Back up `reminders.toml` with `reminder.key`; reminder protection is independent
+  of the app password so authorized background delivery works while TCUI is locked.
 
 ## Tips
 

@@ -23,6 +23,7 @@ use tokio::sync::RwLock;
 mod app;
 mod auth_command;
 mod clipboard;
+mod commands;
 mod config;
 mod diagnostics;
 mod event;
@@ -91,6 +92,10 @@ enum Command {
     Upgrade,
     #[command(hide = true)]
     ReminderDispatch {
+        id: String,
+    },
+    #[command(hide = true)]
+    ReminderPingDispatch {
         id: String,
     },
     #[cfg(feature = "memory")]
@@ -185,6 +190,11 @@ async fn main() -> Result<()> {
                 let _session = protection::session_guard()?;
                 protection::require_app()?;
                 return reminders::dispatch(&AppConfig::load()?, &id).await;
+            }
+            Command::ReminderPingDispatch { id } => {
+                // This path consumes only an explicitly prepared notification job.
+                // It cannot unlock or read protected application data.
+                return reminders::dispatch_ping(&AppConfig::load()?, &id).await;
             }
             #[cfg(feature = "memory")]
             Command::MemoryMcp => {

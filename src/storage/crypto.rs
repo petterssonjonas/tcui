@@ -96,9 +96,13 @@ impl SharedKey {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn load_from_path(path: &Path) -> Result<Self, StorageCryptoError> {
         Self::read_from_path(path)
+    }
+
+    /// Create a fresh private key file without replacing an existing key.
+    pub(crate) fn create_at(path: &Path) -> Result<Self, StorageCryptoError> {
+        Ok(create_key_file(path)?)
     }
 
     fn read_from_path(path: &Path) -> Result<Self, StorageCryptoError> {

@@ -299,6 +299,29 @@ mod tests {
     #[test]
     fn owned_auth_store_keeps_policy_session_guard_until_operation_finishes() {
         let _guard = crate::test_support::env_lock().lock().expect("env lock");
+        const CHILD: &str = "TCUI_TEST_AUTH_SESSION_GUARD_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Unrelated pre-exec children can inherit an exclusive flock briefly.
+            // Isolate this guard-lifetime contract without retrying authentication.
+            let name = std::any::type_name_of_val(
+                &owned_auth_store_keeps_policy_session_guard_until_operation_finishes,
+            );
+            let name = name
+                .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+                .expect("qualified test name");
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args(["--exact", name, "--test-threads=1"])
+                .env(CHILD, "1")
+                .output()
+                .expect("isolated auth guard probe");
+            assert!(
+                output.status.success(),
+                "isolated auth guard failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
         let _environment = TestEnv::new("auth-session-guard");
         crate::protection::configure(ProtectionPolicy::default(), "").expect("plaintext policy");
         let runtime = tokio::runtime::Builder::new_current_thread()

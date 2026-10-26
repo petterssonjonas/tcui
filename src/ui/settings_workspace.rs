@@ -126,6 +126,13 @@ pub fn catalog() -> &'static [WorkspaceSetting] {
         entry!("notifications.ntfy.host", "ntfy host", "Notification service hostname or HTTP(S) URL without credentials. Configure before enabling delivery.", Notifications, Text),
         entry!("notifications.ntfy.port", "ntfy port", "Notification service TCP port, 1–65535.", Notifications, Number { min: 1, max: 65535 }),
         entry!("notifications.ntfy.topic", "ntfy topic", "Notification topic. May be sensitive: value is concealed until explicitly edited.", Notifications, Text),
+        entry!("notifications.pushover.enabled", "Enable Pushover", "Send automatic notifications and explicit @ping-user messages with the approved helper. Configure command policy and credential source first.", Notifications, Bool),
+        entry!("notifications.pushover.command", "Pushover helper", "One executable name or absolute path, without arguments. Must also be in Command whitelist; blacklist always wins. Saving does not launch it.", Notifications, Text),
+        entry!("notifications.pushover.use_vault", "Pushover encrypted credentials", "Use only encrypted vault keys. A locked vault or missing key fails; environment fallback is never allowed.", Notifications, Bool),
+        entry!("notifications.pushover.env_file", "Pushover credential file", "Optional absolute path to a user-owned mode-0600 literal KEY=value file, at most 64 KiB. Environment overrides file values. Ignored in encrypted credential mode. Never paste keys here.", Notifications, OptionalText),
+        entry!("pushover_credentials", "Pushover keys / Credential vault", "Open Credential vault, unlock / initialize, then choose Set / replace Pushover user key and Set / replace Pushover TCUI application key. Both inputs are masked and always encrypted.", Notifications, Manager("open_credential_vault")),
+        entry!("commands.whitelist", "Command whitelist", "JSON array of approved executable names or absolute paths, for example [\"notify-ping\"]. Empty denies all. Exact executable identity, not arbitrary matching basenames. Never add a shell to bypass policy.", Terminal, Json),
+        entry!("commands.blacklist", "Command blacklist", "JSON array of denied executable names or absolute paths. Denial overrides whitelist, including canonical targets and symlinks. Policy controls direct launches, not commands inside scripts.", Terminal, Json),
         entry!("show_memories", "Show memories", "Show memories in the Chat Artifacts sidebar.", Files, Bool),
         entry!("show_vault", "Show Vault", "Show the internal Vault in the Chat Artifacts sidebar.", Files, Bool),
         entry!("credential_vault", "Credential vault", "Unlock, lock and manage credentials in the dedicated encrypted vault. Passwords, API keys and private keys are never shown in settings.", Privacy, Manager("open_credential_vault")),
@@ -864,6 +871,22 @@ pub fn validate_edit(config: &Value, id: &str, text: &str) -> Result<AppConfig, 
         }
     }
     match id {
+        "commands.whitelist" | "commands.blacklist" => {
+            let entries = if id == "commands.whitelist" {
+                &candidate.commands.whitelist
+            } else {
+                &candidate.commands.blacklist
+            };
+            for program in entries {
+                validate_program(program)?;
+            }
+        }
+        "notifications.pushover.command" => validate_program(text.trim())?,
+        "notifications.pushover.env_file" if !text.trim().is_empty() => {
+            if !std::path::Path::new(text.trim()).is_absolute() {
+                return Err("Enter an absolute credential file path, not credentials".into());
+            }
+        }
         "web_search.enabled"
         | "web_search.backend"
         | "web_search.max_results"
@@ -985,6 +1008,19 @@ pub fn validate_edit(config: &Value, id: &str, text: &str) -> Result<AppConfig, 
     Ok(candidate)
 }
 
+fn validate_program(program: &str) -> Result<(), String> {
+    if program.is_empty()
+        || program
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace())
+        || program.contains([';', '|', '&', '$', '`', '\\', '"', '\''])
+        || (program.contains('/') && !std::path::Path::new(program).is_absolute())
+    {
+        return Err("Enter one executable name or absolute path, without shell arguments".into());
+    }
+    Ok(())
+}
+
 fn saved_provider(config: &AppConfig, provider: &str) -> bool {
     !config
         .disabled_providers
@@ -1037,6 +1073,37 @@ mod tests {
 
     fn config() -> Value {
         serde_json::to_value(AppConfig::default()).expect("config")
+    }
+
+    #[test]
+    fn command_policy_edits_require_arrays_of_executable_identities() {
+        for id in ["commands.whitelist", "commands.blacklist"] {
+            assert!(validate_edit(&config(), id, r#"["notify-ping","/usr/bin/printf"]"#).is_ok());
+            for invalid in [
+                r#""notify-ping""#,
+                r#"["sh -c command"]"#,
+                r#"["./notify-ping"]"#,
+                r#"[""]"#,
+                r#"[1]"#,
+            ] {
+                assert!(validate_edit(&config(), id, invalid).is_err());
+            }
+        }
+        assert!(validate_edit(
+            &config(),
+            "notifications.pushover.command",
+            "notify-ping --app other"
+        )
+        .is_err());
+        assert!(
+            validate_edit(&config(), "notifications.pushover.env_file", "relative.env").is_err()
+        );
+        assert!(validate_edit(
+            &config(),
+            "notifications.pushover.env_file",
+            "/private/pushover.env"
+        )
+        .is_ok());
     }
 
     #[test]

@@ -25,6 +25,7 @@ shellcheck scripts/ci.sh scripts/setup-ci.sh scripts/release-ref.sh scripts/pack
   tests/release-build.sh
 bash tests/install.sh
 bash tests/release-abi.sh
+python3 -B scripts/test_notify_ping.py
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 run_tests --all-features

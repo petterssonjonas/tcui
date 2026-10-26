@@ -229,12 +229,40 @@ pub struct NtfyConfig {
     pub topic: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CommandConfig {
+    pub whitelist: Vec<String>,
+    pub blacklist: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PushoverConfig {
+    pub enabled: bool,
+    pub command: String,
+    pub use_vault: bool,
+    pub env_file: Option<String>,
+}
+
+impl Default for PushoverConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            command: "notify-ping".to_owned(),
+            use_vault: false,
+            env_file: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NotificationConfig {
     /// Allow automatic delivery through Herdr, a supported terminal, or local DBus.
     pub desktop: bool,
     pub ntfy: NtfyConfig,
+    pub pushover: PushoverConfig,
 }
 
 impl LocalInferenceConfig {
@@ -280,6 +308,7 @@ pub struct AppConfig {
     #[serde(alias = "show_markdown_vault")]
     pub show_vault: bool,
     pub notifications: NotificationConfig,
+    pub commands: CommandConfig,
     pub local_inference: LocalInferenceConfig,
     pub web_search: WebSearchConfig,
     #[serde(default, deserialize_with = "crate::config::tui::deserialize_tui")]
@@ -368,6 +397,7 @@ impl Default for AppConfig {
             show_memories: true,
             show_vault: true,
             notifications: NotificationConfig::default(),
+            commands: CommandConfig::default(),
             local_inference: LocalInferenceConfig::default(),
             web_search: WebSearchConfig::default(),
             tui: crate::config::tui::TuiConfig::default(),
@@ -422,6 +452,7 @@ impl Default for NotificationConfig {
         Self {
             desktop: true,
             ntfy: NtfyConfig::default(),
+            pushover: PushoverConfig::default(),
         }
     }
 }
