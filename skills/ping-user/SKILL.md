@@ -32,6 +32,8 @@ For a direct curl action, use the `command` tool with program `curl`, this liter
 
 The command tool passes literal argv and stdin, without a shell: it does not expand `$VARIABLE`, source `.env`, or interpret pipes/substitutions. Never put keys in `--data` arguments. Curl must be whitelisted; blacklist overrides approval. Curl exit success AND response JSON `status: 1` are required. Do not claim success on HTTP, transport, or API failure. Prefer `pushover` for its built-in validation and response checking.
 
+Command rules match exact literal argv prefixes. A bare `curl` rule permits the recipe above. A constrained rule must match that recipe's arguments; `curl -H` does not approve its `--disable` prefix. Native Pushover delivery checks the same full argument policy. Report a denied rule rather than changing argument order or using another program to evade it.
+
 # Scheduling and evidence
 
 Use `reminder`, not a hand-written timer or a sleeping curl command, so TCUI retains Toolbox routing, cancellation, registration evidence, and cleanup. Inspect its returned ID and schedule; only then report registration. If a later model step fails after registration, the successful reminder still exists: report its ID instead of retrying it. Do not repeat a successful create or notification.

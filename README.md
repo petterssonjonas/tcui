@@ -213,11 +213,30 @@ notifications, memory limits, and terminal defaults. Provider secrets stay in
 their dedicated managers. Inactive legacy fields are not presented as working settings.
 
 Use Tab to switch category/list focus and arrows to navigate. Toggle booleans or
-cycle choices directly; Enter edits text and numbers and commits valid values.
-Changes persist individually without a global Save button. Errors preserve the
-draft and previous saved value. Keyboard actions show current/default bindings:
-Enter captures a binding, Enter confirms it, and Backspace resets it. Advanced
-MCP and bulk keybinding editors accept validated JSON.
+cycle choices directly; Enter edits text and numbers and applies valid values.
+Changes still persist individually. The **Save** button and **Ctrl+S** also save
+all current settings, including a valid open draft. A failed save keeps the draft
+and previous saved value. Enter adds a line in multiline fields; Ctrl+Enter applies
+the field. Esc cancels an edit. Global tab/settings shortcuts preserve open drafts.
+
+Settings accept plaintext, not JSON. Provider/model lists and command rules use one
+entry per line. Non-command lists preserve spaces; `\n`, `\r`, `\t`, and `\\` encode
+literal control characters/backslashes, and `\e` represents an empty entry.
+Keyboard actions support capture/reset; bulk mappings use `new_chat=alt+n`.
+Status widget rows use `provider 1 1` (widget ID, row, area).
+MCP servers use labeled blocks separated by a blank line, for example:
+
+```text
+name: local-tools
+transport: stdio
+command: my-mcp-server
+args: '--directory' 'path with spaces' ''
+enabled: false
+```
+
+The other MCP field is `url:` for HTTP servers. Omit absent optional fields;
+`args:` with no value means an empty argument list. MCP fields support `\\`, `\n`,
+`\r`, and `\t` escapes. Saving configuration does not run server commands.
 
 Terminal placement updates the current split immediately. Shell/directory and
 provider/model defaults apply to new sessions or conversations; existing sessions
@@ -231,11 +250,17 @@ pass, not an immediate purge.
 Mention `@command` in your request to let the agent choose and run approved
 programs, for example `Please @command check the current UTC date`.
 `/skill command ...` is also supported. Configure **Settings → Terminal → Command
-whitelist** and **Command blacklist** as JSON arrays. An empty whitelist denies
-all direct launches; the blacklist always wins, including canonical symlink targets.
-Entries are executable names or absolute paths, not globs or command lines.
-A whitelisted name approves its canonical PATH executable, not every file with
-the same basename.
+whitelist** and **Command blacklist**, with one rule per line. An empty whitelist
+denies all direct launches. Blacklist matches always win, including canonical
+symlink targets. Each rule is an executable name or absolute path, optionally
+followed by an exact literal argument prefix. Quote values that contain spaces.
+
+`curl` permits any curl arguments. `curl -H` permits `curl -H "X-Name: value" URL`,
+but not `curl URL`, `curl --header ...`, or `curl -s -H ...`. Rules do not normalize
+option aliases or match flags at arbitrary positions. A bare blacklist rule denies
+every argument list for that executable; a constrained rule denies matching prefixes.
+A whitelisted name approves its canonical PATH executable, not every file with the
+same basename. Native Pushover calls must match their complete curl arguments too.
 
 The agent receives the conversation, current request, and invoked skill bodies.
 It chooses executables and literal arguments, observes actual tool results, and

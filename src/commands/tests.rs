@@ -65,7 +65,7 @@ fn empty_policy_denies_even_existing_executables() {
     let _lock = crate::test_support::env_lock().lock().unwrap();
     let fixture = Fixture::new();
     let program = fixture.script("bin/tool", "exit 0");
-    assert!(authorize(&AppConfig::default(), &program).is_err());
+    assert!(authorize(&AppConfig::default(), &program, &[]).is_err());
 }
 
 #[tokio::test]
@@ -104,8 +104,11 @@ fn name_approval_does_not_grant_same_basename_elsewhere() {
     let approved = fixture.script("bin/tool", "exit 0");
     let impostor = fixture.script("other/tool", "exit 0");
     let config = fixture.approved("tool");
-    assert_eq!(authorize(&config, "tool").unwrap(), PathBuf::from(approved));
-    assert!(authorize(&config, &impostor).is_err());
+    assert_eq!(
+        authorize(&config, "tool", &[]).unwrap(),
+        PathBuf::from(approved)
+    );
+    assert!(authorize(&config, &impostor, &[]).is_err());
 }
 
 #[test]
@@ -123,7 +126,7 @@ fn blacklist_overrides_approval_through_symlink_and_canonical_names() {
     ] {
         let mut config = fixture.approved(&target);
         config.commands.blacklist = vec![denied];
-        assert!(authorize(&config, alias.to_str().unwrap()).is_err());
+        assert!(authorize(&config, alias.to_str().unwrap(), &[]).is_err());
     }
 }
 
@@ -135,7 +138,7 @@ fn blacklist_name_resolves_alias_target_even_under_different_basename() {
     symlink(&target, fixture.root.join("bin/blocked-alias")).unwrap();
     let mut config = fixture.approved(&target);
     config.commands.blacklist = vec!["blocked-alias".to_owned()];
-    assert!(authorize(&config, &target).is_err());
+    assert!(authorize(&config, &target, &[]).is_err());
 }
 
 #[test]
@@ -160,10 +163,161 @@ fn relative_invalid_missing_and_nonexecutable_programs_are_rejected() {
         fixture.root.to_str().unwrap(),
     ] {
         assert!(
-            authorize(&config, program).is_err(),
+            authorize(&config, program, &[]).is_err(),
             "authorized {program:?}"
         );
     }
+}
+
+#[test]
+fn rule_validation_accepts_quoted_literals_without_requiring_an_installed_program() {
+    for rule in [
+        "curl",
+        "curl -H",
+        "curl -H 'Content-Type: application/json'",
+        r#""/not-installed/tool with spaces" --label "two words" ''"#,
+        r#"not-installed-tool '$HOME;$(touch marker)' '#literal' value#suffix"#,
+    ] {
+        assert!(validate_rule(rule).is_ok(), "rejected {rule:?}");
+    }
+}
+
+#[test]
+fn rule_validation_rejects_invalid_or_silently_truncated_constraints() {
+    for rule in [
+        "",
+        "   ",
+        "'' -H",
+        "./curl -H",
+        "bin/curl -H",
+        "-curl -H",
+        "curl 'unterminated",
+        "curl trailing\\",
+        "curl # dropped constraint",
+        "curl '' # dropped constraint",
+        "curl -H\n",
+        "curl bad\0argument",
+    ] {
+        assert!(validate_rule(rule).is_err(), "accepted {rule:?}");
+    }
+    assert!(validate_rule(&format!("curl {}", "x".repeat(MAX_ARGUMENT_BYTES + 1))).is_err());
+    assert!(validate_rule(&format!("curl{}", " x".repeat(129))).is_err());
+}
+
+#[test]
+fn executable_only_rule_allows_every_valid_argument_list() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    let program = fixture.script("bin/curl", "exit 0");
+    let config = fixture.approved("curl");
+    for arguments in [vec![], vec!["--header".to_owned(), "X: Y".to_owned()]] {
+        assert_eq!(
+            authorize(&config, &program, &arguments).unwrap(),
+            PathBuf::from(&program)
+        );
+    }
+}
+
+#[test]
+fn argument_rule_requires_exact_literal_prefix_and_token_boundaries() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    let program = fixture.script("bin/curl", "exit 0");
+    let mut config = fixture.approved("curl -H");
+    for arguments in [
+        vec!["-H".to_owned()],
+        vec![
+            "-H".to_owned(),
+            "X: value".to_owned(),
+            "https://example.test".to_owned(),
+        ],
+    ] {
+        assert!(authorize(&config, &program, &arguments).is_ok());
+    }
+    for arguments in [
+        vec![],
+        vec!["https://example.test".to_owned()],
+        vec!["--header".to_owned(), "X: value".to_owned()],
+        vec!["-HX: value".to_owned()],
+        vec!["--silent".to_owned(), "-H".to_owned()],
+    ] {
+        assert!(authorize(&config, &program, &arguments).is_err());
+    }
+    config.commands.whitelist = vec![r#"curl -H "X: two words" '' '$HOME;$(id)'"#.to_owned()];
+    let expected = vec![
+        "-H".to_owned(),
+        "X: two words".to_owned(),
+        String::new(),
+        "$HOME;$(id)".to_owned(),
+    ];
+    assert!(authorize(&config, &program, &expected).is_ok());
+    let split_value = ["-H", "X:", "two words", "", "$HOME;$(id)"].map(str::to_owned);
+    assert!(authorize(&config, &program, &split_value).is_err());
+    let expanded_value = ["-H", "X: two words", "", "/home/user;uid=0"].map(str::to_owned);
+    assert!(authorize(&config, &program, &expanded_value).is_err());
+}
+
+#[test]
+fn argument_blacklist_wins_through_canonical_identity_without_blocking_other_prefixes() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    let program = fixture.script("bin/curl", "exit 0");
+    let alias = fixture.root.join("bin/alias");
+    symlink(&program, &alias).unwrap();
+    let mut config = fixture.approved(alias.to_str().unwrap());
+    for denied in [
+        "curl".to_owned(),
+        program,
+        alias.to_str().unwrap().to_owned(),
+    ] {
+        config.commands.blacklist = vec![format!("{denied} -H 'X: blocked'")];
+        assert!(authorize(
+            &config,
+            "alias",
+            &["-H".to_owned(), "X: blocked".to_owned(), "url".to_owned()]
+        )
+        .is_err());
+        for arguments in [
+            vec![],
+            vec!["--header".to_owned(), "X: blocked".to_owned()],
+            vec!["-H".to_owned(), "X: blocked suffix".to_owned()],
+            vec!["-H".to_owned(), "X: allowed".to_owned()],
+        ] {
+            assert!(authorize(&config, "alias", &arguments).is_ok());
+        }
+    }
+}
+
+#[test]
+fn malformed_rules_in_either_list_fail_closed_even_after_a_matching_rule() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    let program = fixture.script("bin/tool", "exit 0");
+    for invalid in ["", "tool 'unterminated", "./tool", "tool # omitted prefix"] {
+        for invalid_whitelist in [true, false] {
+            let mut config = fixture.approved(&program);
+            if invalid_whitelist {
+                config.commands.whitelist.push(invalid.to_owned());
+            } else {
+                config.commands.blacklist = vec![invalid.to_owned()];
+            }
+            assert!(authorize(&config, &program, &[]).is_err());
+        }
+    }
+}
+
+#[tokio::test]
+async fn constrained_launches_enforce_policy_and_do_not_interpret_literal_arguments() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let fixture = Fixture::new();
+    let program = fixture.script("bin/tool", "printf '%s\\n' \"$@\"");
+    let config = fixture.approved("tool --literal '$(touch marker);$HOME'");
+    assert!(run(&config, &program, &["--literal".to_owned()])
+        .await
+        .is_err());
+    let arguments = ["--literal", "$(touch marker);$HOME", "suffix"].map(str::to_owned);
+    let output = run(&config, &program, &arguments).await.unwrap();
+    assert_eq!(output.stdout, "--literal\n$(touch marker);$HOME\nsuffix\n");
 }
 
 #[tokio::test]

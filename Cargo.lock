@@ -4453,6 +4453,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "shlex",
  "similar",
  "sqlite-vec",
  "thiserror 2.0.21",

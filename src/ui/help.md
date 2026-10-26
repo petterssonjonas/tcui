@@ -33,7 +33,14 @@ Type any slash command in the message box:
 
 - Press `Ctrl+P` to search settings and actions. With no query, choose **Settings tab**.
   Search results navigate to the selected setting; the popup does not edit values.
-  Settings changes validate and persist individually without a global Save button.
+  Changes persist individually. Click **Save** or press **Ctrl+S** to save all current
+  settings and a valid open draft. Failed saves retain the draft. In multiline
+  editors, Enter adds a line and Ctrl+Enter applies; Esc cancels.
+  Settings use plaintext: lists/rules have one entry per line; status widgets use
+  `provider 1 1`; bulk shortcuts use `new_chat=alt+n`. Non-command list escapes are
+  `\\`, `\n`, `\r`, `\t`, and `\e` for an empty entry. MCP uses labeled fields
+  `name:`, `transport:`, `command:`, `args:`, `url:`, and `enabled:`, with a blank line
+  between servers. Quote literal arguments with spaces; MCP supports text escapes.
   In Keyboard settings, Enter captures a binding and Backspace resets it.
 - Click the **provider** or **model** labels in the status bar to change
   selectors.
@@ -219,7 +226,10 @@ must first be upgraded on their source instance with its original key metadata.
 
 - Mention `@command` to let the agent choose approved programs and literal arguments.
   It reads the conversation and invoked skills, executes tools, and observes results.
-  Configure JSON whitelist/blacklist arrays in Settings → Terminal; blacklist wins.
+  Enter one whitelist/blacklist rule per line in Settings → Terminal; blacklist wins.
+  `curl` allows any arguments; `curl -H` requires the exact argument prefix `-H`.
+  Quotes preserve spaces. Rules do not normalize flag aliases or reorder arguments.
+  Native Pushover delivery is subject to the full argument policy too.
   No shell is used. Command output becomes untrusted chat/model context. Trust
   approved programs and their contents: this is not a sandbox, and does not
   restrict manually approved terminal commands. Quoted examples and history alone

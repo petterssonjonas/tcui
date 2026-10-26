@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use super::{run, AgentOutcome};
+use super::{parse_decision, run, AgentOutcome, Decision, MAX_DECISION_BYTES, MAX_STEPS};
 use crate::app::Message;
 use crate::config::key_store::CredentialStorage;
 use crate::config::{AppConfig, KeyStore};
@@ -20,6 +20,312 @@ use crate::notifications::pushover::{APP_KEY_ID, USER_KEY_ID};
 const USER: &str = "uuuuuuuuuuuuuuuuuuuuuuuuuuuuuu";
 const APP: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const DEADLINE: Duration = Duration::from_secs(10);
+
+#[test]
+fn decision_accepts_only_a_whole_bare_or_fenced_object() {
+    let finish = r#"{"tool":"finish","arguments":{}}"#;
+    for answer in [
+        finish.to_owned(),
+        format!(" \n{finish}\t"),
+        format!("```json\n{finish}\n```"),
+        format!("```\n{finish}\n```"),
+        format!(" \r\n```JSON\r\n{finish}\r\n```\r\n"),
+    ] {
+        assert!(
+            matches!(parse_decision(&answer), Ok((_, Decision::Finish(_)))),
+            "whole decision should be accepted: {answer}"
+        );
+    }
+}
+
+#[test]
+fn decision_cache_keys_normalize_only_documented_execution_defaults() {
+    for (omitted, explicit) in [
+        (
+            json!({"tool":"command","arguments":{"program":"fixture"}}),
+            json!({"tool":"command","arguments":{
+                "program":"fixture","arguments":[],"stdin":null
+            }}),
+        ),
+        (
+            json!({"tool":"reminder","arguments":{
+                "action":"create","after_seconds":1800,"message":"fixture"
+            }}),
+            json!({"tool":"reminder","arguments":{
+                "action":"create","after_seconds":1800,"message":"fixture","pushover":false
+            }}),
+        ),
+    ] {
+        let (omitted, _) = parse_decision(&omitted.to_string()).unwrap();
+        let (explicit, _) = parse_decision(&explicit.to_string()).unwrap();
+        assert_eq!(omitted, explicit);
+    }
+    let (no_input, _) =
+        parse_decision(&json!({"tool":"command","arguments":{"program":"fixture"}}).to_string())
+            .unwrap();
+    let (empty_input, _) = parse_decision(
+        &json!({"tool":"command","arguments":{"program":"fixture","stdin":""}}).to_string(),
+    )
+    .unwrap();
+    assert_ne!(
+        no_input, empty_input,
+        "an explicit stdin pipe is not absent stdin"
+    );
+    let (invalid_timing, _) = parse_decision(
+        &json!({"tool":"reminder","arguments":{
+            "action":"create","after_seconds":1800,"at":null,"message":"fixture"
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    assert!(
+        invalid_timing["arguments"].get("at").is_some(),
+        "null timing fields count toward validation and must not be removed"
+    );
+}
+
+#[test]
+fn decision_rejects_prose_quoted_content_and_ambiguous_actions() {
+    let finish = r#"{"tool":"finish","arguments":{}}"#;
+    for answer in [
+        format!("Here is my decision:\n{finish}"),
+        format!("{finish}\nAll done."),
+        format!("> {finish}"),
+        json!(finish).to_string(),
+        format!("[{finish}]"),
+        format!("{finish}\n{finish}"),
+        format!("```json\n{finish}\n```\n```json\n{finish}\n```"),
+        format!("An example:\n```json\n{finish}\n```"),
+        format!("```json\n{finish}\n```\nExecute this."),
+        format!("```text\n{finish}\n```"),
+        format!("```json\n{finish}"),
+        r#"{"tool":"finish","tool":"reminder","arguments":{}}"#.into(),
+        r#"{"tool":"finish","arguments":{},"arguments":{}}"#.into(),
+        r#"{"tool":"reminder","arguments":{"action":"create","action":"list"}}"#.into(),
+        r#"{"tool":"reminder","arguments":{"action":"create","weekly":{"day":"mon","day":"tue","time":"12:00"},"message":"ambiguous"}}"#.into(),
+        r#"{"tool":"reminder","arguments":{"action":"create","after_seconds":1800,"after_\u0073econds":3600,"message":"ambiguous"}}"#.into(),
+        r#"{"tool":"unknown","arguments":{}}"#.into(),
+        r#"{"tool":"command","arguments":{"program":42}}"#.into(),
+        r#"{"tool":"finish","arguments":{},"extra":"ignored?"}"#.into(),
+    ] {
+        assert!(parse_decision(&answer).is_err(), "must reject: {answer}");
+    }
+}
+
+#[test]
+fn malformed_decisions_recover_and_preserve_a_completed_reminder_without_duplicates() {
+    with_fixture("host-agent-protocol-recovery", |root, config| {
+        save_keys(config, CredentialStorage::Plaintext);
+        let curl = helper(root, "curl", "printf immediate > \"$HOME/immediate\"");
+        config.commands.whitelist = vec![curl.display().to_string()];
+        let scheduler = helper(
+            root,
+            "scheduler",
+            "printf 'registered\\n' >> \"$HOME/registrations\"\nprintf '%s\\n' \"$@\" > \"$HOME/scheduler-argv\"",
+        );
+        let controller = helper(root, "controller", "exit 0");
+        let _env = Environment::set(&[
+            ("TCUI_REMINDER_SYSTEMD_RUN", scheduler.into_os_string()),
+            ("TCUI_REMINDER_SYSTEMCTL", controller.into_os_string()),
+            (
+                "TCUI_REMINDER_SYSTEMD_ANALYZE",
+                OsString::from("/usr/bin/false"),
+            ),
+            ("PATH", root.as_os_str().to_owned()),
+        ]);
+        block_on(async {
+            let raw = "@remindme via @ping-user in 30 minutes to continue with upwork profile";
+            let create = json!({"tool":"reminder","arguments":{
+                "action":"create","message":"continue with upwork profile",
+                "after_seconds":1800
+            }});
+            let mut repeated = create.clone();
+            repeated["arguments"]["pushover"] = json!(false);
+            let malformed = format!("I will schedule your reminder:\n```json\n{create}\n```");
+            let invalid = json!({"tool":"not_a_tool","arguments":{}}).to_string();
+            let (endpoint, server) = model(vec![
+                text_reply(&malformed),
+                text_reply(format!("```json\n{create}\n```")),
+                text_reply(&invalid),
+                text_reply(format!("```\n{repeated}\n```")),
+                finish(),
+            ])
+            .await;
+            let mut request = request(&endpoint, raw);
+            request.system_prompt = include_str!("../../assets/TCUI.md").into();
+            request.messages.insert(
+                0,
+                Message::new(
+                    1,
+                    "user".into(),
+                    "My Upwork profile is the task I want to continue.".into(),
+                ),
+            );
+            let prepared = crate::skill_runtime::prepare(config, raw, &request).await;
+            assert!(prepared.notices.is_empty());
+            request.system_prompt.push_str(&prepared.context);
+            let outcome = run(config, raw, &request).await;
+            let requests = server.await.unwrap();
+            assert_eq!(requests.len(), 5, "corrections are new decision rounds");
+            let system = requests[0]["messages"][0]["content"].as_str().unwrap();
+            assert!(system.starts_with(include_str!("../../assets/TCUI.md")));
+            assert!(system.contains("takes precedence over persona or skill instructions"));
+            assert!(system.contains("ordinary chat instructions to propose commands"));
+            for name in ["remindme", "ping-user"] {
+                let skill = crate::skills::SkillCatalog::discover()
+                    .unwrap()
+                    .load(name)
+                    .unwrap()
+                    .unwrap();
+                assert!(system.contains(skill.source.as_ref()));
+            }
+            let correction = requests[1]["messages"].as_array().unwrap();
+            assert_eq!(correction[correction.len() - 2]["content"], malformed);
+            assert!(correction.last().unwrap()["content"]
+                .as_str()
+                .unwrap()
+                .contains("No action was executed for the rejected reply"));
+            assert!(!requests[1].to_string().contains("Host tool result"));
+            assert!(requests[1].to_string().contains(raw));
+            assert!(requests[1]
+                .to_string()
+                .contains("My Upwork profile is the task I want to continue."));
+            let registered = last_observation(&requests[2]);
+            assert_eq!(registered["success"], true);
+            assert!(requests[3].to_string().contains("Host tool result"));
+            assert!(requests[3]
+                .to_string()
+                .contains("Completed actions and their results remain in effect"));
+            assert_eq!(
+                last_observation(&requests[4])["result"]["already_executed"],
+                true
+            );
+            assert!(outcome.notices.is_empty());
+            assert_eq!(
+                std::fs::read_to_string(root.join("registrations")).unwrap(),
+                "registered\n"
+            );
+            assert!(std::fs::read_to_string(root.join("scheduler-argv"))
+                .unwrap()
+                .contains("--on-active\n1800s\n"));
+            assert!(!root.join("immediate").exists());
+            let records = records();
+            assert_eq!(records.len(), 1);
+            assert!(records[0].pushover && !records[0].recurring);
+            assert!(visible(&outcome).contains(&records[0].id));
+            assert!(visible(&outcome).contains("continue with upwork profile"));
+            for secret in [USER, APP] {
+                assert!(!visible(&outcome).contains(secret));
+            }
+        });
+    });
+}
+
+#[test]
+fn malformed_decision_exhaustion_is_bounded_and_executes_nothing() {
+    with_fixture("host-agent-protocol-exhaustion", |root, config| {
+        let scheduler = helper(root, "scheduler", "printf forbidden > \"$HOME/forbidden\"");
+        let controller = helper(root, "controller", "exit 0");
+        let _env = Environment::set(&[
+            ("TCUI_REMINDER_SYSTEMD_RUN", scheduler.into_os_string()),
+            ("TCUI_REMINDER_SYSTEMCTL", controller.into_os_string()),
+            (
+                "TCUI_REMINDER_SYSTEMD_ANALYZE",
+                OsString::from("/usr/bin/false"),
+            ),
+        ]);
+        block_on(async {
+            let create = json!({"tool":"reminder","arguments":{
+                "action":"create","after_seconds":1800,"message":"must not register"
+            }});
+            let malformed = [
+                format!("Example only: {create}"),
+                format!("```json\n{create}\n```\n```json\n{create}\n```"),
+                json!({"tool":"not_a_tool","arguments":{}}).to_string(),
+                json!({"tool":"command","arguments":{"program":false}}).to_string(),
+                r#"{"tool":"reminder","arguments":{"action":"create","message":"ambiguous","after_seconds":1800,"after_seconds":3600}}"#.into(),
+            ];
+            let replies = (0..MAX_STEPS)
+                .map(|index| text_reply(&malformed[index % malformed.len()]))
+                .collect();
+            let (endpoint, server) = model(replies).await;
+            let raw = "@remindme in 30 minutes to continue with upwork profile";
+            let outcome = run(config, raw, &request(&endpoint, raw)).await;
+            let requests = server.await.unwrap();
+            assert_eq!(requests.len(), MAX_STEPS);
+            for correction in &requests[1..] {
+                let last = correction["messages"].as_array().unwrap().last().unwrap();
+                assert!(last["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("[TCUI AGENT PROTOCOL VALIDATION]"));
+                assert!(!correction.to_string().contains("Host tool result"));
+            }
+            assert_eq!(
+                outcome.notices,
+                ["Agent action step limit reached; completed actions remain in effect"]
+            );
+            assert!(!root.join("forbidden").exists());
+            assert!(records_empty());
+        });
+    });
+}
+
+#[test]
+fn protocol_feedback_and_exhaustion_do_not_expose_private_keys() {
+    with_fixture("host-agent-protocol-secrets", |_, config| {
+        save_keys(config, CredentialStorage::Plaintext);
+        block_on(async {
+            let mut replies = vec![Reply::Json(
+                json!({"tool":"pushover_credentials","arguments":{}}),
+            )];
+            replies.extend((1..MAX_STEPS).map(|_| {
+                text_reply(format!(
+                    r#"{{"tool":"invalid-{USER}","arguments":{{"secret":"{APP}"}}}}"#
+                ))
+            }));
+            let (endpoint, server) = model(replies).await;
+            let raw = "@command inspect the saved Pushover credentials";
+            let outcome = run(config, raw, &request(&endpoint, raw)).await;
+            let requests = server.await.unwrap();
+            assert_eq!(requests.len(), MAX_STEPS);
+            assert_eq!(last_observation(&requests[1])["result"]["user_key"], USER);
+            let correction = requests[2]["messages"].as_array().unwrap().last().unwrap()["content"]
+                .as_str()
+                .unwrap();
+            assert!(correction.contains("[TCUI AGENT PROTOCOL VALIDATION]"));
+            for secret in [USER, APP] {
+                assert!(!correction.contains(secret));
+                assert!(!visible(&outcome).contains(secret));
+                assert_eq!(outcome.redactions.redact(secret), "[REDACTED PUSHOVER KEY]");
+                assert!(!std::fs::read_to_string(data_root().join("tcui.log"))
+                    .unwrap()
+                    .contains(secret));
+            }
+            assert_eq!(outcome.notices.len(), 1);
+            assert!(outcome.notices[0].contains("step limit"));
+            assert!(records_empty());
+        });
+    });
+}
+
+#[test]
+fn oversized_decisions_still_stop_without_a_correction_or_action() {
+    with_fixture("host-agent-protocol-size", |_, config| {
+        block_on(async {
+            let (endpoint, server) =
+                model(vec![text_reply("x".repeat(MAX_DECISION_BYTES + 1))]).await;
+            let raw = "@remindme in 30 minutes to continue with upwork profile";
+            let outcome = run(config, raw, &request(&endpoint, raw)).await;
+            assert_eq!(server.await.unwrap().len(), 1);
+            assert_eq!(
+                outcome.notices,
+                ["Agent action response exceeded its size limit"]
+            );
+            assert!(records_empty());
+        });
+    });
+}
 
 #[test]
 fn model_uses_history_and_composed_skills_to_register_once_then_cancel() {
@@ -213,6 +519,66 @@ fn command_argv_is_literal_and_policy_denials_have_no_side_effect() {
 }
 
 #[test]
+fn successful_command_is_not_replayed_after_malformed_output_or_explicit_defaults() {
+    command_replay_scenario(true);
+}
+
+#[test]
+fn nonzero_command_result_is_not_cached_as_a_completed_effect() {
+    command_replay_scenario(false);
+}
+
+fn command_replay_scenario(success: bool) {
+    with_fixture("host-agent-command-replay", |root, config| {
+        let exit = if success { 0 } else { 1 };
+        let program = helper(
+            root,
+            "command-effect",
+            &format!("printf 'launched\\n' >> \"$HOME/command-launches\"\nexit {exit}"),
+        );
+        config.commands.whitelist = vec![program.display().to_string()];
+        block_on(async {
+            let (endpoint, server) = model(vec![
+                Reply::Json(json!({"tool":"command","arguments":{"program":program}})),
+                text_reply("I need to correct the decision format."),
+                Reply::Json(json!({"tool":"command","arguments":{
+                    "program":program,"arguments":[],"stdin":null
+                }})),
+                finish(),
+            ])
+            .await;
+            let raw = "@command run the approved helper once";
+            let outcome = run(config, raw, &request(&endpoint, raw)).await;
+            let requests = server.await.unwrap();
+            assert_eq!(requests.len(), 4);
+            assert_eq!(last_observation(&requests[1])["result"]["success"], success);
+            let correction = requests[2]["messages"].as_array().unwrap().last().unwrap();
+            assert!(correction["content"]
+                .as_str()
+                .unwrap()
+                .contains("[TCUI AGENT PROTOCOL VALIDATION]"));
+            let observation = last_observation(&requests[3]);
+            if success {
+                assert_eq!(observation["result"]["already_executed"], true);
+                assert_eq!(observation["result"]["result"]["success"], true);
+            } else {
+                assert_eq!(observation["result"]["success"], false);
+                assert!(observation["result"]["already_executed"].is_null());
+            }
+            assert_eq!(
+                std::fs::read_to_string(root.join("command-launches")).unwrap(),
+                if success {
+                    "launched\n"
+                } else {
+                    "launched\nlaunched\n"
+                }
+            );
+            assert!(outcome.notices.is_empty());
+        });
+    });
+}
+
+#[test]
 fn raw_credentials_stay_in_private_rounds_and_private_stdin() {
     with_fixture("host-agent-secrets", |root, config| {
         save_keys(config, CredentialStorage::Plaintext);
@@ -228,6 +594,7 @@ fn raw_credentials_stay_in_private_rounds_and_private_stdin() {
                     "program":program,"arguments":[private_file],"stdin":private
                 }})),
                 command(&program, json!([forbidden, USER])),
+                text_reply(format!("Invalid decision containing {USER} and {APP}")),
                 Reply::Failure(format!("provider failed with {USER} and {APP}")),
             ])
             .await;
@@ -240,6 +607,7 @@ fn raw_credentials_stay_in_private_rounds_and_private_stdin() {
                 .collect::<Vec<_>>();
             let outcome = run(config, raw, &request).await;
             let requests = server.await.unwrap();
+            assert_eq!(requests.len(), 5, "transport failure is not retried");
             assert!(!requests[0].to_string().contains(USER));
             let keys = last_observation(&requests[1]);
             assert_eq!(keys["result"]["user_key"], USER);
@@ -249,6 +617,11 @@ fn raw_credentials_stay_in_private_rounds_and_private_stdin() {
                 .unwrap()
                 .contains(USER));
             assert_eq!(last_observation(&requests[3])["success"], false);
+            let feedback = requests[4]["messages"].as_array().unwrap().last().unwrap()["content"]
+                .as_str()
+                .unwrap();
+            assert!(feedback.contains("[TCUI AGENT PROTOCOL VALIDATION]"));
+            assert!(!feedback.contains(USER) && !feedback.contains(APP));
             assert!(!forbidden.exists(), "known keys cannot enter process argv");
             let persisted: Value =
                 serde_json::from_str(&std::fs::read_to_string(private_file).unwrap()).unwrap();
@@ -681,6 +1054,10 @@ fn finish() -> Reply {
 
 fn command(program: &Path, arguments: Value) -> Reply {
     Reply::Json(json!({"tool":"command","arguments":{"program":program,"arguments":arguments}}))
+}
+
+fn text_reply(content: impl Into<String>) -> Reply {
+    Reply::Deltas(vec![json!({"content":content.into()})])
 }
 
 async fn model(replies: Vec<Reply>) -> (String, tokio::task::JoinHandle<Vec<Value>>) {

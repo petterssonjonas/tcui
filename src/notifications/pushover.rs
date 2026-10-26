@@ -22,6 +22,29 @@ const CREDENTIAL_NAMES: [&str; 3] = [
     "PUSHOVER_TCUI_APP_TOKEN",
     "PUSHOVER_APP_TOKEN",
 ];
+const TRANSPORT_ARGUMENTS: [&str; 21] = [
+    "--disable",
+    "--silent",
+    "--fail",
+    "--proto",
+    "=https",
+    "--connect-timeout",
+    "10",
+    "--max-time",
+    "25",
+    "--max-filesize",
+    "65536",
+    "--max-redirs",
+    "0",
+    "--request",
+    "POST",
+    "--header",
+    "Content-Type: application/json",
+    "--data-binary",
+    "@-",
+    "--url",
+    "https://api.pushover.net/1/messages.json",
+];
 
 /// Only explicitly requested Pushover keys may be exposed to the model provider.
 pub(crate) struct AgentCredentials {
@@ -82,7 +105,8 @@ pub(crate) fn prepare(config: &AppConfig) -> Result<Option<Delivery>> {
     if !config.notifications.pushover.enabled {
         return Ok(None);
     }
-    let program = commands::authorize(config, "curl")
+    let arguments = TRANSPORT_ARGUMENTS.map(str::to_owned);
+    let program = commands::authorize(config, "curl", &arguments)
         .map_err(|_| eyre!("Pushover curl is not available under the current command policy"))?;
     let mut credentials = credentials_for_agent(config, None)?;
     Ok(Some(Delivery {
@@ -107,7 +131,8 @@ impl Delivery {
         {
             return Err(eyre!("Pushover title or message exceeds service limits"));
         }
-        let current = commands::authorize(config, "curl").map_err(|_| {
+        let arguments = TRANSPORT_ARGUMENTS.map(str::to_owned);
+        let current = commands::authorize(config, "curl", &arguments).map_err(|_| {
             eyre!("Pushover curl is not available under the current command policy")
         })?;
         if !self.program.is_absolute() || self.program != current {
@@ -129,31 +154,11 @@ impl Delivery {
             })
             .map_err(|_| eyre!("Cannot encode Pushover delivery"))?,
         );
-        let arguments = [
-            "--disable",
-            "--silent",
-            "--fail",
-            "--proto",
-            "=https",
-            "--connect-timeout",
-            "10",
-            "--max-time",
-            "25",
-            "--max-filesize",
-            "65536",
-            "--max-redirs",
-            "0",
-            "--request",
-            "POST",
-            "--header",
-            "Content-Type: application/json",
-            "--data-binary",
-            "@-",
-            "--url",
-            "https://api.pushover.net/1/messages.json",
-        ]
-        .map(str::to_owned);
-        let output = commands::run_with_input(config, "curl", &arguments, &input)
+        let program = self
+            .program
+            .to_str()
+            .ok_or_else(|| eyre!("Invalid Pushover transport path"))?;
+        let output = commands::run_with_input(config, program, &arguments, &input)
             .await
             .map_err(|_| eyre!("Pushover transport could not complete delivery"))?;
         if !output.success {
@@ -543,7 +548,41 @@ mod tests {
                 serde_json::json!({"token":APP,"user":USER,"title":"literal title","message":"literal body"})
             );
         }
-        std::fs::remove_file(program.with_extension("stdin")).unwrap();
+        std::fs::write(
+            &program,
+            "#!/bin/sh\n/bin/cat > \"$0.stdin\"\nprintf '{\"status\":1}'\n",
+        )
+        .unwrap();
+        for rule in [
+            "curl --disable",
+            "curl --disable --silent --fail --proto '=https'",
+        ] {
+            config.commands.whitelist = vec![rule.to_owned()];
+            runtime
+                .block_on(delivery.send(&config, "title", "body"))
+                .expect("matching native transport prefix");
+        }
+        for (whitelist, blacklist) in [
+            (vec!["curl -H"], vec![]),
+            (vec!["curl --disable --silently"], vec![]),
+            (vec!["curl"], vec!["curl --disable --silent"]),
+            (vec!["curl", "curl 'unterminated"], vec![]),
+            (vec!["curl"], vec!["curl # silently dropped constraint"]),
+        ] {
+            let _ = std::fs::remove_file(program.with_extension("stdin"));
+            config.commands.whitelist = whitelist.into_iter().map(str::to_owned).collect();
+            config.commands.blacklist = blacklist.into_iter().map(str::to_owned).collect();
+            let error = match prepare(&config) {
+                Err(error) => error,
+                Ok(_) => panic!("native preflight ignored argument policy"),
+            };
+            assert!(error.to_string().contains("current command policy"));
+            assert!(runtime
+                .block_on(delivery.send(&config, "title", "body"))
+                .is_err());
+            assert!(!program.with_extension("stdin").exists());
+        }
+        config.commands.whitelist = vec![program.to_string_lossy().into_owned()];
         config.commands.blacklist = vec!["curl".into()];
         assert!(runtime
             .block_on(delivery.send(&config, "title", "body"))

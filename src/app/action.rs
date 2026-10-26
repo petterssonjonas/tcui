@@ -118,6 +118,9 @@ pub enum Action {
         id: String,
         value: String,
     },
+    SaveSettings {
+        draft: Option<(String, String)>,
+    },
     OpenTerminal,
     ApproveCommandReview,
     TransferCommandReview,

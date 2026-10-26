@@ -199,6 +199,35 @@ fn policy_revocation_blocks_and_consumes_a_one_shot_without_launching_the_helper
 }
 
 #[test]
+fn native_pushover_schedule_and_callback_enforce_the_full_argument_policy() {
+    let _lock = crate::test_support::env_lock().lock().unwrap();
+    let mut fixture = Fixture::new();
+    fixture.config.commands.whitelist = vec!["curl -H".to_owned()];
+    assert!(agent_tool(
+        &fixture.config,
+        &serde_json::json!({
+            "action": "create", "after_seconds": 1200,
+            "message": "Must not register unrelated argv", "pushover": true,
+        }),
+    )
+    .is_err());
+    assert!(store::list().unwrap().is_empty());
+    assert!(!fixture.events().exists());
+
+    fixture.config.commands.whitelist = vec!["curl --disable --silent".to_owned()];
+    let record = fixture.schedule();
+    assert!(fixture.pending(&record.id).exists());
+    fixture.config.commands.blacklist = vec!["curl --disable --silent --fail".to_owned()];
+    fixture.config.save().unwrap();
+    KeyStore::lock_vault(&fixture.config).unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    assert!(runtime.block_on(ping::dispatch(&record.id)).is_err());
+    assert!(!fixture.events().exists());
+    assert!(!fixture.pending(&record.id).exists());
+    assert!(store::get(&record.id).unwrap().is_none());
+}
+
+#[test]
 fn cancellation_removes_a_pending_plaintext_snapshot_before_delivery() {
     let _lock = crate::test_support::env_lock().lock().unwrap();
     let fixture = Fixture::new();
