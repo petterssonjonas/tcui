@@ -475,6 +475,83 @@ mod tests {
     }
 
     #[test]
+    fn shortcut_capture_saves_control_s_chords_instead_of_invoking_save() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        for (action_id, modifiers, binding) in [
+            ("toggle_settings", KeyModifiers::CONTROL, "ctrl+s"),
+            (
+                "new_chat",
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                "ctrl+alt+s",
+            ),
+        ] {
+            crate::app::tests::with_test_app("settings-capture-save-chord", |app| {
+                app.open_settings_page(Some(&format!("keybind:{action_id}")));
+                app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                let action = app
+                    .handle_key(KeyEvent::new(KeyCode::Char('s'), modifiers))
+                    .expect("capture must submit the new binding");
+                tokio::runtime::Runtime::new()
+                    .expect("runtime")
+                    .block_on(app.dispatch(action))
+                    .expect("save captured shortcut");
+                assert_eq!(
+                    AppConfig::load()
+                        .expect("saved shortcuts")
+                        .tui
+                        .keybinding_overrides
+                        .get(action_id)
+                        .map(String::as_str),
+                    Some(binding)
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn failed_shortcut_capture_retries_original_binding_with_control_s() {
+        use crate::config::app_config::{inject_private_file_failure, TestFailurePoint};
+        use crossterm::event::{KeyCode, KeyModifiers};
+        crate::app::tests::with_test_app("settings-capture-save-retry", |app| {
+            app.config
+                .try_read()
+                .expect("config")
+                .save()
+                .expect("initial save");
+            app.open_settings_page(Some("keybind:new_chat"));
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            let action = app
+                .handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT))
+                .expect("captured binding");
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            inject_private_file_failure(TestFailurePoint::Rename);
+            runtime
+                .block_on(app.dispatch(action))
+                .expect("report save failure");
+            assert!(app.ui.settings_workspace.has_error);
+            assert!(!AppConfig::load()
+                .expect("saved config")
+                .tui
+                .keybinding_overrides
+                .contains_key("new_chat"));
+            let retry = app
+                .handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+                .expect("retry captured binding");
+            runtime.block_on(app.dispatch(retry)).expect("retry save");
+            assert_eq!(
+                AppConfig::load()
+                    .expect("saved shortcut")
+                    .tui
+                    .keybinding_overrides
+                    .get("new_chat")
+                    .map(String::as_str),
+                Some("alt+n")
+            );
+            assert!(!app.ui.settings_workspace.has_error);
+        });
+    }
+
+    #[test]
     fn retained_provider_drafts_validate_against_live_config_on_enter_and_save() {
         for save in [false, true] {
             crate::app::tests::with_test_app("settings-live-provider-draft", |app| {
