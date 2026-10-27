@@ -5,8 +5,6 @@ use crate::{
 use secrecy::ExposeSecret;
 use serde::Deserialize;
 
-const CODEX_MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/models";
-
 #[derive(Debug, Deserialize)]
 struct OpenRouterModel {
     id: String,
@@ -47,8 +45,6 @@ struct CodexModel {
     slug: String,
     #[serde(default)]
     visibility: String,
-    #[serde(default = "default_true")]
-    supported_in_api: bool,
     #[serde(default)]
     priority: i32,
     #[serde(default)]
@@ -99,28 +95,43 @@ pub async fn fetch_models(
     credential: Option<&Credential>,
     backend_type: &str,
 ) -> Vec<ModelInfo> {
+    if !crate::llm::local::is_local_provider(provider) && credential.is_none() {
+        return Vec::new();
+    }
     if crate::llm::auth::canonical_provider_name(provider) == "Codex" {
         return fetch_codex_models(credential).await;
     }
 
     let url = format!("{}/models", endpoint);
 
-    let client = reqwest::Client::builder()
+    let Ok(client) = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    else {
+        return Vec::new();
+    };
 
     let mut request = client.get(&url);
     if let Some(credential) = credential {
-        if !crate::llm::auth::trusted_provider_endpoint(provider, endpoint) {
+        if !credential.permits_endpoint(provider, endpoint) {
             return Vec::new();
         }
-        request = request.bearer_auth(credential.bearer_token().expose_secret());
+        if matches!(backend_type, "anthropic" | "anthropic_sdk") {
+            request = request
+                .header("x-api-key", credential.bearer_token().expose_secret())
+                .header("anthropic-version", "2023-06-01");
+        } else {
+            request = request.bearer_auth(credential.bearer_token().expose_secret());
+        }
     }
-    if provider == "OpenRouter" {
+    if matches!(provider, "OpenRouter" | "OpenRouter OAuth") {
         request = request
             .header("HTTP-Referer", "https://github.com/jp/TermChatUI")
             .header("X-Title", "TermChatUI");
+    }
+    if provider == "OpenCode Go" {
+        request = request.header("User-Agent", concat!("tcui/", env!("CARGO_PKG_VERSION")));
     }
 
     match request.send().await {
@@ -147,17 +158,33 @@ async fn fetch_codex_models(credential: Option<&Credential>) -> Vec<ModelInfo> {
     if !credential.is_codex_oauth() {
         return Vec::new();
     }
-    let client = reqwest::Client::builder()
+    let Ok(client) = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-    let mut request = client
-        .get(CODEX_MODELS_ENDPOINT)
-        .query(&[("client_version", codex_client_version())])
-        .bearer_auth(credential.bearer_token().expose_secret());
-    if let Some(account_id) = credential.account_id() {
-        request = request.header("ChatGPT-Account-ID", account_id);
-    }
+    else {
+        return Vec::new();
+    };
+    let Some(account_id) = credential.account_id().filter(|id| !id.trim().is_empty()) else {
+        return Vec::new();
+    };
+    let Ok(endpoint) = crate::llm::codex_responses::codex_api_base() else {
+        return Vec::new();
+    };
+    let Ok(headers) = crate::llm::codex_responses::codex_client_headers(
+        credential.bearer_token().expose_secret(),
+        account_id,
+    ) else {
+        return Vec::new();
+    };
+    let request = client
+        .get(format!("{endpoint}/models"))
+        .query(&[(
+            "client_version",
+            crate::llm::codex_responses::CODEX_CLIENT_VERSION,
+        )])
+        .headers(headers)
+        .header(reqwest::header::ACCEPT, "application/json");
 
     match request.send().await {
         Ok(response) if response.status().is_success() => match response.text().await {
@@ -168,36 +195,6 @@ async fn fetch_codex_models(credential: Option<&Credential>) -> Vec<ModelInfo> {
     }
 }
 
-pub(crate) fn codex_client_version() -> String {
-    let Some(home) = dirs::home_dir() else {
-        return env!("CARGO_PKG_VERSION").to_string();
-    };
-    let candidates = [
-        (home.join(".codex").join("version.json"), "/latest_version"),
-        (
-            home.join(".codex").join("models_cache.json"),
-            "/client_version",
-        ),
-    ];
-    candidates
-        .into_iter()
-        .find_map(|(path, pointer)| {
-            let content = std::fs::read_to_string(path).ok()?;
-            serde_json::from_str::<serde_json::Value>(&content)
-                .ok()?
-                .pointer(pointer)
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|version| !version.is_empty())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
-}
-
-fn default_true() -> bool {
-    true
-}
-
 fn parse_codex_models(text: &str) -> Vec<ModelInfo> {
     let Ok(mut response) = serde_json::from_str::<CodexModelsResponse>(text) else {
         return Vec::new();
@@ -205,7 +202,9 @@ fn parse_codex_models(text: &str) -> Vec<ModelInfo> {
     response.models.sort_by_key(|model| model.priority);
     let mut models = Vec::new();
     for model in response.models {
-        if !model.supported_in_api || matches!(model.visibility.as_str(), "hide" | "hidden") {
+        // `supported_in_api` limits public API-key users, not ChatGPT OAuth.
+        // https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/protocol/src/openai_models.rs
+        if model.slug.trim().is_empty() || matches!(model.visibility.as_str(), "hide" | "hidden") {
             continue;
         }
         if models
@@ -308,32 +307,38 @@ pub async fn refresh_provider_models(
     endpoint: &str,
     env_var: &str,
     backend_type: &str,
-) {
+) -> Result<Vec<ModelInfo>, &'static str> {
     let request = CredentialRequest::new(name, env_var, endpoint);
-    let credential = resolve_provider_credential(request).await.ok().flatten();
-    let mut models = fetch_models(name, endpoint, credential.as_ref(), backend_type).await;
+    let credential = resolve_provider_credential(request)
+        .await
+        .map_err(|_| "Unlock the credential vault or reconnect the provider.")?;
+    let models = fetch_models(name, endpoint, credential.as_ref(), backend_type).await;
     if models.is_empty() {
-        models = provider_model_fallback(name);
+        return Err("No model catalog received. Check the connection and refresh models again.");
     }
-    if !models.is_empty() {
-        let db_models: Vec<crate::storage::db::ModelRow> = models
-            .into_iter()
-            .map(|m| {
-                (
-                    m.id,
-                    m.input_price,
-                    m.output_price,
-                    m.context_window,
-                    m.default_reasoning_effort,
-                    m.supported_reasoning_efforts,
-                )
-            })
-            .collect();
-        let _ = storage.save_models(name, &db_models);
-    }
+    let db_models: Vec<crate::storage::db::ModelRow> = models
+        .iter()
+        .map(|m| {
+            (
+                m.id.clone(),
+                m.input_price,
+                m.output_price,
+                m.context_window,
+                m.default_reasoning_effort.clone(),
+                m.supported_reasoning_efforts.clone(),
+            )
+        })
+        .collect();
+    storage
+        .save_models(name, &db_models)
+        .map_err(|_| "Could not save the refreshed model catalog.")?;
+    Ok(models)
 }
 
-pub async fn refresh_all_models(storage: &crate::storage::Storage) {
+pub async fn refresh_all_models(
+    storage: &crate::storage::Storage,
+    mut on_refresh: impl FnMut(String, Vec<ModelInfo>),
+) {
     let providers = match storage.get_providers() {
         Ok(p) => p,
         Err(_) => return,
@@ -358,73 +363,12 @@ pub async fn refresh_all_models(storage: &crate::storage::Storage) {
             continue;
         }
 
-        let request = CredentialRequest::new(&name, &env_var, &endpoint);
-        let credential = resolve_provider_credential(request).await.ok().flatten();
-        let mut models = fetch_models(&name, &endpoint, credential.as_ref(), &backend_type).await;
-        if models.is_empty() {
-            models = provider_model_fallback(&name);
-        }
-        if models.is_empty() {
-            continue;
-        }
-
-        let db_models: Vec<crate::storage::db::ModelRow> = models
-            .into_iter()
-            .map(|m| {
-                (
-                    m.id,
-                    m.input_price,
-                    m.output_price,
-                    m.context_window,
-                    m.default_reasoning_effort,
-                    m.supported_reasoning_efforts,
-                )
-            })
-            .collect();
-        let _ = storage.save_models(&name, &db_models);
-    }
-}
-
-pub(crate) fn provider_model_fallback(provider: &str) -> Vec<ModelInfo> {
-    match crate::llm::auth::canonical_provider_name(provider).as_str() {
-        "Codex" => codex_model_fallback(),
-        _ => Vec::new(),
-    }
-}
-
-fn codex_model_fallback() -> Vec<ModelInfo> {
-    let mut model_ids = Vec::new();
-
-    if let Some(home) = dirs::home_dir() {
-        if let Ok(config) = std::fs::read_to_string(home.join(".codex").join("config.toml")) {
-            if let Ok(parsed) = config.parse::<toml::Value>() {
-                if let Some(model) = parsed.get("model").and_then(toml::Value::as_str) {
-                    let model = model.trim();
-                    if !model.is_empty() {
-                        model_ids.push(model.to_string());
-                    }
-                }
-            }
+        if let Ok(models) =
+            refresh_provider_models(storage, &name, &endpoint, &env_var, &backend_type).await
+        {
+            on_refresh(name, models);
         }
     }
-
-    for model in ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"] {
-        if !model_ids.iter().any(|existing| existing == model) {
-            model_ids.push(model.to_string());
-        }
-    }
-
-    model_ids
-        .into_iter()
-        .map(|id| ModelInfo {
-            id,
-            input_price: None,
-            output_price: None,
-            context_window: None,
-            default_reasoning_effort: None,
-            supported_reasoning_efforts: Vec::new(),
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -432,24 +376,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codex_fallback_includes_current_public_models() {
-        let models = provider_model_fallback("Codex");
-        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
-
-        assert!(ids.contains(&"gpt-5.5"));
-        assert!(ids.contains(&"gpt-5.4"));
-        assert!(ids.contains(&"gpt-5.4-mini"));
-    }
-
-    #[test]
-    fn codex_catalog_keeps_visible_api_models_in_priority_order() {
+    fn codex_catalog_keeps_visible_oauth_models_in_priority_order() {
         let models = parse_codex_models(
             r#"{
                 "models": [
                     {"slug":"gpt-5.6-sol","visibility":"list","supported_in_api":true,"priority":20,"context_window":272000},
                     {"slug":"hidden-model","visibility":"hide","supported_in_api":true,"priority":0},
                     {"slug":"gpt-5.6-luna","visibility":"list","supported_in_api":true,"priority":10,"context_window":200000},
-                    {"slug":"unsupported-model","visibility":"list","supported_in_api":false,"priority":1}
+                    {"slug":"oauth-only-model","visibility":"list","supported_in_api":false,"priority":1}
                 ]
             }"#,
         );
@@ -460,6 +394,7 @@ mod tests {
                 .map(|model| (model.id.as_str(), model.context_window))
                 .collect::<Vec<_>>(),
             [
+                ("oauth-only-model", None),
                 ("gpt-5.6-luna", Some(200_000)),
                 ("gpt-5.6-sol", Some(272_000))
             ]
@@ -493,31 +428,8 @@ mod tests {
         );
         Ok(())
     }
-
-    #[test]
-    fn codex_client_version_uses_codex_release_metadata() {
-        let _guard = crate::test_support::env_lock()
-            .lock()
-            .expect("env lock poisoned");
-        let root = std::env::temp_dir().join(format!(
-            "tcui-codex-version-{}-{}",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
-        let codex_dir = root.join(".codex");
-        std::fs::create_dir_all(&codex_dir).expect("create codex dir");
-        std::fs::write(
-            codex_dir.join("version.json"),
-            r#"{"latest_version":"0.144.1"}"#,
-        )
-        .expect("write version metadata");
-        std::env::set_var("HOME", &root);
-
-        let version = codex_client_version();
-
-        assert_eq!(version, "0.144.1");
-
-        std::env::remove_var("HOME");
-        std::fs::remove_dir_all(root).expect("cleanup temp dir");
-    }
 }
+
+#[cfg(test)]
+#[path = "model_fetcher_tests.rs"]
+mod discovery_tests;

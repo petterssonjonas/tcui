@@ -3,63 +3,64 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum McpError {
-    #[error("unknown MCP profile '{query}'")]
-    UnknownProfile { query: String },
-    #[error("MCP profile '{name}' is disabled")]
+    #[error("unknown MCP search provider; choose exa, tavily, or firecrawl")]
+    UnknownProfile,
+    #[error("MCP profile '{name}' is disabled; enable it in Settings > Web search > Search API keys or MCP Servers")]
     ProfileDisabled { name: String },
-    #[error("MCP profile '{profile}' needs {env_var}")]
-    MissingVaultPath {
-        profile: &'static str,
-        env_var: &'static str,
-    },
-    #[error(
-        "MCP profile '{profile}' needs {env_var}; store it in the '{key_store_name}' key store or set the environment variable"
-    )]
+    #[error("MCP profile '{profile}' needs a stored API key; add '{key_store_name}' in Settings > Web search > Search API keys")]
     MissingApiKey {
         profile: &'static str,
-        env_var: &'static str,
         key_store_name: &'static str,
     },
-    #[error("command '{program}' is not available on PATH; {hint}")]
-    MissingCommand {
-        program: &'static str,
-        hint: &'static str,
-    },
-    #[error("MCP {operation} timed out after {seconds}s; retry or check the server logs")]
+    #[error("cannot read '{key_store_name}' from TCUI KeyStore; unlock the vault and check Settings > Web search > Search API keys")]
+    CredentialStore { key_store_name: &'static str },
+    #[error("'{key_store_name}' also names a configured chat provider; resolve this credential-name collision in Settings before using MCP search")]
+    CredentialCollision { key_store_name: &'static str },
+    #[error("invalid MCP configuration: {detail}")]
+    Configuration { detail: &'static str },
+    #[error("configured MCP command is not available on PATH; install it or select the hosted streamable_http preset")]
+    MissingCommand,
+    #[error("could not start configured MCP command; check its executable and permissions")]
+    SpawnCommand,
+    #[error(
+        "MCP {operation} timed out after {seconds}s; check connectivity and provider availability"
+    )]
     Timeout {
         operation: &'static str,
         seconds: u64,
     },
-    #[error("MCP tool '{tool}' failed: {detail}")]
-    ToolFailed { tool: String, detail: String },
-    #[error("failed to shut down MCP session: {detail}")]
-    Shutdown { detail: String },
-    #[error("failed to spawn '{program}': {source}")]
-    SpawnCommand {
-        program: &'static str,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error(transparent)]
-    Initialize(Box<ClientInitializeError>),
-    #[error(transparent)]
-    Service(Box<ServiceError>),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    #[error(transparent)]
-    Json(#[from] serde_json::Error),
+    #[error("MCP tool failed; check the stored provider key, account credits, query, and provider availability")]
+    ToolFailed,
+    #[error("MCP server does not expose the supported read-only search tool or its expected argument schema")]
+    UnsupportedSearchTool,
+    #[error("MCP search requires at least {minimum} results; increase Search result limit in Settings > Web search")]
+    SearchLimitTooLow { minimum: usize },
+    #[error("MCP search returned no source URLs")]
+    EmptyResults,
+    #[error("MCP search needs a nonempty query of at most 4096 characters and a result limit from 1 to 20")]
+    InvalidSearch,
+    #[error("failed to shut down MCP session; the session was cancelled")]
+    Shutdown,
+    // Upstream errors may contain credential-bearing URLs, headers, or echoed server content.
+    // Do not retain them as sources: Debug and chained error renderers must be safe too.
+    #[error("MCP initialization failed; check transport, endpoint, stored API key, and provider availability")]
+    Initialize,
+    #[error(
+        "MCP request failed; check the stored API key, account access, and provider availability"
+    )]
+    Service,
 }
 
 pub type McpResult<T> = Result<T, McpError>;
 
 impl From<ClientInitializeError> for McpError {
-    fn from(error: ClientInitializeError) -> Self {
-        Self::Initialize(Box::new(error))
+    fn from(_: ClientInitializeError) -> Self {
+        Self::Initialize
     }
 }
 
 impl From<ServiceError> for McpError {
-    fn from(error: ServiceError) -> Self {
-        Self::Service(Box::new(error))
+    fn from(_: ServiceError) -> Self {
+        Self::Service
     }
 }

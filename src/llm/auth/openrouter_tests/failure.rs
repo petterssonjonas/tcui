@@ -29,7 +29,7 @@ fn grant(
 fn prior_credential() -> Credential {
     Credential::ApiKey(
         ApiKeyCredential::new(
-            "OpenRouter",
+            "OpenRouter OAuth",
             "prior-key-canary",
             ApiKeyCredentialOwnership::Tcui,
             ApiKeyCredentialSource::OpenRouterPkce,
@@ -54,9 +54,15 @@ fn cancelled_after_http_before_persist_preserves_prior_key(
 
     // When
     handle.cancel();
-    let error = persist_exchanged_key(&config, exchanged_key, &cancellation)
-        .expect_err("cancelled persistence must not upsert a credential");
-    let retained = KeyStore::get_credential(&config, "OpenRouter")?;
+    let error = persist_exchanged_key(
+        &config,
+        exchanged_key,
+        &cancellation,
+        "OpenRouter OAuth",
+        None,
+    )
+    .expect_err("cancelled persistence must not upsert a credential");
+    let retained = KeyStore::get_credential(&config, "OpenRouter OAuth")?;
     let retained_bytes = std::fs::read(environment.key_file())?;
 
     // Then
@@ -104,7 +110,7 @@ async fn rejected_exchange_preserves_prior_key_and_redacts_code(
         )
         .await
         .expect_err("rejected authorization code");
-    let retained = KeyStore::get_credential(&config, "OpenRouter")?;
+    let retained = KeyStore::get_credential(&config, "OpenRouter OAuth")?;
     let retained_bytes = std::fs::read(_env.key_file())?;
     let rendered = format!("{error:?} {error}");
     let _ = fixture.finish().await?;
@@ -153,7 +159,7 @@ async fn expired_exchange_code_returns_typed_rejection_without_persisting(
         )
         .await
         .expect_err("expired authorization code");
-    let stored = KeyStore::get_credential(&config, "OpenRouter")?;
+    let stored = KeyStore::get_credential(&config, "OpenRouter OAuth")?;
     let _ = fixture.finish().await?;
 
     // Then
@@ -196,7 +202,7 @@ async fn malformed_exchange_response_preserves_prior_key() -> Result<(), Box<dyn
         )
         .await
         .expect_err("empty exchanged key");
-    let retained = KeyStore::get_credential(&config, "OpenRouter")?;
+    let retained = KeyStore::get_credential(&config, "OpenRouter OAuth")?;
     let _ = fixture.finish().await?;
 
     // Then
@@ -267,7 +273,7 @@ async fn cancelled_exchange_observes_shared_cancellation() -> Result<(), Box<dyn
         .exchange_and_persist(&config, grant(&adapter, "cancelled-code")?, &cancellation)
         .await
         .expect_err("cancelled exchange");
-    let retained = KeyStore::get_credential(&config, "OpenRouter")?;
+    let retained = KeyStore::get_credential(&config, "OpenRouter OAuth")?;
     let retained_bytes = std::fs::read(_env.key_file())?;
 
     // Then

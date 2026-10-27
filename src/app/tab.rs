@@ -37,7 +37,6 @@ impl Tab {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum TabType {
     Chat,
-    Obsidian,
     Settings,
     Logs,
 }

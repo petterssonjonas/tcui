@@ -5,6 +5,7 @@ mod error;
 mod revoke;
 mod store;
 
+use std::future::Future;
 use std::time::Duration;
 
 use crate::config::AppConfig;
@@ -24,6 +25,8 @@ const NATIVE_REVOCATION_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) struct CodexNativeAdapter {
     endpoints: CodexNativeEndpoints,
     revocation_timeout: Duration,
+    connection: String,
+    storage: Option<crate::config::key_store::CredentialStorage>,
 }
 
 impl CodexNativeAdapter {
@@ -31,6 +34,8 @@ impl CodexNativeAdapter {
         Ok(Self {
             endpoints: CodexNativeEndpoints::production()?,
             revocation_timeout: NATIVE_REVOCATION_TIMEOUT,
+            connection: "Codex".into(),
+            storage: None,
         })
     }
 
@@ -49,6 +54,8 @@ impl CodexNativeAdapter {
                 device_token,
             )?,
             revocation_timeout: NATIVE_REVOCATION_TIMEOUT,
+            connection: "Codex".into(),
+            storage: None,
         })
     }
 
@@ -70,7 +77,22 @@ impl CodexNativeAdapter {
                 revocation,
             )?,
             revocation_timeout,
+            connection: "Codex".into(),
+            storage: None,
         })
+    }
+
+    pub(crate) fn for_connection(mut self, connection: &str) -> Self {
+        self.connection = connection.to_owned();
+        self
+    }
+
+    pub(crate) fn with_storage(
+        mut self,
+        storage: crate::config::key_store::CredentialStorage,
+    ) -> Self {
+        self.storage = Some(storage);
+        self
     }
 
     pub(crate) async fn login_browser(
@@ -78,8 +100,11 @@ impl CodexNativeAdapter {
         config: &AppConfig,
         browser: &impl BrowserLauncher,
         cancellation: &OAuthCancellation,
+        input: impl Future<
+            Output = Result<zeroize::Zeroizing<String>, crate::llm::auth::oauth::OAuthError>,
+        >,
     ) -> Result<super::credential::CodexCredential, CodexNativeError> {
-        browser::login(self, config, browser, cancellation).await
+        browser::login(self, config, browser, cancellation, input).await
     }
 
     pub(crate) async fn begin_device(
@@ -102,8 +127,9 @@ impl CodexNativeAdapter {
         &self,
         config: &AppConfig,
         cancellation: &OAuthCancellation,
+        is_current: impl FnOnce() -> bool,
     ) -> Result<super::credential::CodexCredential, CodexNativeError> {
-        store::refresh(self, config, cancellation).await
+        store::refresh(self, config, cancellation, is_current).await
     }
 
     pub(crate) async fn logout(
@@ -111,11 +137,12 @@ impl CodexNativeAdapter {
         config: &AppConfig,
         cancellation: &OAuthCancellation,
     ) -> Result<CodexNativeLogout, CodexNativeError> {
-        let Some(credential) = crate::config::KeyStore::get_oauth(config, "Codex")? else {
+        let Some(credential) = crate::config::KeyStore::get_oauth(config, &self.connection)? else {
             return Ok(CodexNativeLogout::NoNativeCredential);
         };
         let outcome = revoke::revoke(self, &credential, cancellation).await;
-        let removed = crate::config::KeyStore::remove_oauth(config, "Codex")?;
+        crate::llm::auth::invalidate_provider_refreshes(&self.connection);
+        let removed = crate::config::KeyStore::remove_oauth(config, &self.connection)?;
         if !removed {
             return Err(CodexNativeError::LocalRemoval);
         }

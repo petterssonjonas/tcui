@@ -29,13 +29,22 @@ impl BrowserLauncher for RecordingBrowser {
 }
 
 #[tokio::test]
+async fn browser_loopback_flow_uses_hardened_callback_then_persists_exchange(
+) -> Result<(), Box<dyn std::error::Error>> {
+    browser_round_trip(false).await
+}
+
+#[tokio::test]
+async fn pasted_callback_uses_original_pkce_then_persists_exchange(
+) -> Result<(), Box<dyn std::error::Error>> {
+    browser_round_trip(true).await
+}
+
 #[expect(
     clippy::await_holding_lock,
     reason = "The process-wide environment fixture must remain isolated through async cleanup."
 )]
-async fn browser_loopback_flow_uses_hardened_callback_then_persists_exchange(
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Given
+async fn browser_round_trip(paste: bool) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("env lock poisoned");
@@ -55,12 +64,34 @@ async fn browser_loopback_flow_uses_hardened_callback_then_persists_exchange(
     };
     flow.open_browser(&browser)?;
     let redirect = flow.redirect_uri().clone();
+    let challenge = flow
+        .authorization_url()
+        .query_pairs()
+        .find(|(key, _)| key == "code_challenge")
+        .map(|(_, value)| value.into_owned())
+        .ok_or("PKCE challenge missing")?;
     let (cancellation, _) = oauth_cancellation();
     let receiver_cancellation = cancellation.clone();
-    let receiver = tokio::spawn(async move { flow.receive_code(&receiver_cancellation).await });
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    let receiver = tokio::spawn(async move {
+        flow.receive_code_with_redirect(&receiver_cancellation, async {
+            response_rx.await.map_err(|_| OAuthError::Cancelled)
+        })
+        .await
+    });
 
     // When
-    send_callback(&redirect, "browser-code").await?;
+    if paste {
+        let mut response = redirect.as_url().clone();
+        response
+            .query_pairs_mut()
+            .append_pair("code", "browser-code");
+        assert!(response_tx
+            .send(zeroize::Zeroizing::new(response.to_string()))
+            .is_ok());
+    } else {
+        send_callback(&redirect, "browser-code").await?;
+    }
     let grant = receiver.await??;
     fixture
         .adapter
@@ -71,6 +102,18 @@ async fn browser_loopback_flow_uses_hardened_callback_then_persists_exchange(
     // Then
     assert!(browser.opened.get());
     assert!(requests[0].contains("\"code\":\"browser-code\""));
+    let body: serde_json::Value = serde_json::from_str(
+        requests[0]
+            .split_once("\r\n\r\n")
+            .ok_or("exchange body missing")?
+            .1,
+    )?;
+    let verifier = crate::llm::auth::oauth::PkceVerifier::parse(
+        body["code_verifier"]
+            .as_str()
+            .ok_or("PKCE verifier missing")?,
+    )?;
+    assert_eq!(verifier.s256_challenge().as_str(), challenge);
     Ok(())
 }
 

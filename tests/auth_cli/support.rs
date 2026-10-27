@@ -31,6 +31,7 @@ impl CliEnvironment {
             .env("HOME", &self.root)
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("XDG_DATA_HOME", self.root.join("data"))
+            .env("XDG_CACHE_HOME", self.root.join("cache"))
             .env("PATH", self.root.join("bin"))
             .env(
                 "TCUI_AUTH_TEST_SIGNAL_READY",
@@ -52,7 +53,7 @@ impl CliEnvironment {
     }
 
     pub(super) fn key_path(&self) -> PathBuf {
-        self.root.join("data/tcui/keys.toml")
+        self.root.join("data/tcui/tcui.db")
     }
 
     pub(super) fn marker_path(&self) -> PathBuf {
@@ -110,6 +111,46 @@ impl JsonEndpoint {
             worker: Some(worker),
             shutdown,
         })
+    }
+
+    pub(super) fn respond_once_gated(
+        body: &'static str,
+    ) -> std::io::Result<(Self, mpsc::Sender<()>)> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}", listener.local_addr()?);
+        let (request_sender, request_seen) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = shutdown.clone();
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = accept_until(&listener, &worker_shutdown)?;
+            let mut request = [0_u8; 4_096];
+            let _ = stream.read(&mut request)?;
+            let _ = request_sender.send(());
+            loop {
+                match released.recv_timeout(Duration::from_millis(50)) {
+                    Ok(()) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                        if !worker_shutdown.load(Ordering::Relaxed) => {}
+                    Err(_) => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "gated response cancelled",
+                        ))
+                    }
+                }
+            }
+            write_response(&mut stream, "200 OK", body)
+        });
+        Ok((
+            Self {
+                url,
+                request_seen,
+                worker: Some(worker),
+                shutdown,
+            },
+            release,
+        ))
     }
 
     /// Responds to the first connection immediately, then accepts a second

@@ -75,7 +75,7 @@ pub fn local_provider_entry(
     (
         LOCAL_PROVIDER_NAME.to_string(),
         config.chat_endpoint(),
-        config.api_token_env.clone().unwrap_or_default(),
+        String::new(),
         backend_type_label(detected.unwrap_or(config.server_type)).to_string(),
         "none".to_string(),
     )

@@ -1,13 +1,12 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 
 use rusqlite::{params, OptionalExtension};
 
 use super::embedding::{as_blob, embed_many};
 use super::index::MemoryIndex;
 use super::markdown::MemoryChunk;
-use super::paths::MemoryPaths;
-use super::store::{is_memory_document_path, MemoryDocument, MemoryError};
+use super::metadata::{machine_cache_key, MemoryScope};
+use super::store::{is_memory_document_path, MemoryError, MemoryStore};
 
 static SYNC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -18,6 +17,8 @@ struct SourceFile {
     fingerprint: i64,
     content: String,
     chunks: Vec<MemoryChunk>,
+    scope: MemoryScope,
+    machine_key: Option<String>,
 }
 
 struct ExistingFile {
@@ -31,12 +32,25 @@ struct PreparedFile {
     embeddings: Vec<Vec<f32>>,
 }
 
-pub(super) fn synchronize(paths: &MemoryPaths, database: &Path) -> Result<(), MemoryError> {
+pub(super) fn synchronize(store: &MemoryStore) -> Result<(), MemoryError> {
+    synchronize_inner(store, false)
+}
+
+pub(super) fn rebuild(store: &MemoryStore) -> Result<(), MemoryError> {
+    synchronize_inner(store, true)
+}
+
+fn synchronize_inner(store: &MemoryStore, rebuilding: bool) -> Result<(), MemoryError> {
+    crate::protection::require(crate::protection::Domain::Memories)?;
     let _guard = SYNC_LOCK
         .lock()
         .map_err(|_| MemoryError::Invalid("memory synchronization lock failed".to_string()))?;
-    let sources = scan_sources(paths)?;
-    let mut index = MemoryIndex::open(database)?;
+    let sources = scan_sources(store)?;
+    let mut index = if rebuilding {
+        MemoryIndex::fresh(&store.database)?
+    } else {
+        MemoryIndex::open(&store.database)?
+    };
     let existing = existing_files(&index)?;
     let source_names = sources
         .iter()
@@ -64,7 +78,7 @@ pub(super) fn synchronize(paths: &MemoryPaths, database: &Path) -> Result<(), Me
         }
     }
 
-    let transaction = index.conn.transaction()?;
+    let transaction = index.connection_mut()?.transaction()?;
     for name in existing.keys().filter(|name| !source_names.contains(*name)) {
         delete_file(&transaction, name)?;
     }
@@ -73,18 +87,22 @@ pub(super) fn synchronize(paths: &MemoryPaths, database: &Path) -> Result<(), Me
         delete_vectors(&transaction, &name)?;
         let file_id = transaction.query_row(
             "INSERT INTO memory_files(
-                rel_path, modified_ns, size_bytes, content_fingerprint
-             ) VALUES (?1, ?2, ?3, ?4)
+                rel_path, modified_ns, size_bytes, content_fingerprint, scope, machine_key
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(rel_path) DO UPDATE SET
                 modified_ns = excluded.modified_ns,
                 size_bytes = excluded.size_bytes,
-                content_fingerprint = excluded.content_fingerprint
+                content_fingerprint = excluded.content_fingerprint,
+                scope = excluded.scope,
+                machine_key = excluded.machine_key
              RETURNING id",
             params![
                 name,
                 file.source.modified_ns,
                 file.source.size_bytes,
                 file.source.fingerprint,
+                file.source.scope.cache_value(),
+                file.source.machine_key,
             ],
             |row| row.get::<_, i64>(0),
         )?;
@@ -110,14 +128,24 @@ pub(super) fn synchronize(paths: &MemoryPaths, database: &Path) -> Result<(), Me
         }
     }
     transaction.commit()?;
+    index.persist()?;
+    if rebuilding {
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut path = store.database.as_os_str().to_os_string();
+            path.push(suffix);
+            match std::fs::remove_file(std::path::PathBuf::from(path)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
     Ok(())
 }
 
-fn scan_sources(paths: &MemoryPaths) -> Result<Vec<SourceFile>, MemoryError> {
-    let key = crate::storage::crypto::SharedKey::load_or_create_default(
-        &crate::storage::paths::TcuiDataPaths::discover(),
-    )?
-    .key;
+fn scan_sources(store: &MemoryStore) -> Result<Vec<SourceFile>, MemoryError> {
+    crate::protection::require(crate::protection::Domain::Memories)?;
+    let paths = &store.paths;
     let mut sources = Vec::new();
     for entry in walkdir::WalkDir::new(paths.root()).follow_links(false) {
         let entry = entry.map_err(|error| MemoryError::Walk(error.to_string()))?;
@@ -131,17 +159,28 @@ fn scan_sources(paths: &MemoryPaths) -> Result<Vec<SourceFile>, MemoryError> {
             continue;
         }
         let physical_name = entry.file_name().to_string_lossy().to_string();
-        let document: MemoryDocument =
-            crate::storage::crypto::read_encrypted_document(entry.path(), &key, "memory")?;
+        let document = store.read_document_at(entry.path())?;
         let parsed = super::markdown::parse_memory(&document.markdown, &document.title);
         let metadata = std::fs::metadata(entry.path())?;
+        let scope = document
+            .metadata
+            .as_ref()
+            .map_or(MemoryScope::Unspecified, |metadata| metadata.scope);
+        let machine_key = document
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.machine.as_ref())
+            .map(|machine| machine_cache_key(&machine.id));
+        let content_fingerprint = fingerprint(&serde_json::to_vec(&document)?);
         sources.push(SourceFile {
             physical_name,
             modified_ns: modified_ns(&metadata),
             size_bytes: i64::try_from(metadata.len()).unwrap_or(i64::MAX),
-            fingerprint: fingerprint(document.markdown.as_bytes()),
+            fingerprint: content_fingerprint,
             content: document.markdown,
             chunks: parsed.chunks,
+            scope,
+            machine_key,
         });
     }
     sources.sort_by(|left, right| left.physical_name.cmp(&right.physical_name));
@@ -149,7 +188,7 @@ fn scan_sources(paths: &MemoryPaths) -> Result<Vec<SourceFile>, MemoryError> {
 }
 
 fn existing_files(index: &MemoryIndex) -> Result<HashMap<String, ExistingFile>, MemoryError> {
-    let mut statement = index.conn.prepare(
+    let mut statement = index.connection()?.prepare(
         "SELECT rel_path, modified_ns, size_bytes, content_fingerprint FROM memory_files",
     )?;
     let rows = statement.query_map([], |row| {

@@ -31,7 +31,8 @@ impl ImageBlockState {
             return None;
         }
         let path = resolve_local_path(source)?;
-        let image = image::ImageReader::open(path).ok()?.decode().ok()?;
+        let bytes = crate::vault::read_artifact_path(&path).ok()?;
+        let image = image::load_from_memory(&bytes).ok()?;
         let picker = picker_for(image_protocol, caps)?;
         Some(Self {
             image,
@@ -155,6 +156,7 @@ mod tests {
 
     #[test]
     fn local_png_encodes_a_kitty_image_block() {
+        let _guard = crate::test_support::env_lock().lock().expect("env lock");
         // Given
         let path =
             std::env::temp_dir().join(format!("tcui-image-block-{}.png", rand::random::<u64>()));
@@ -190,6 +192,7 @@ mod tests {
 
     #[test]
     fn sliced_render_handles_top_clipping() {
+        let _guard = crate::test_support::env_lock().lock().expect("env lock");
         let path =
             std::env::temp_dir().join(format!("tcui-sliced-image-{}.png", rand::random::<u64>()));
         DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 4, Rgba([255, 0, 0, 255])))
@@ -224,6 +227,7 @@ mod tests {
 
     #[test]
     fn image_source_expands_home_directory() {
+        let _guard = crate::test_support::env_lock().lock().expect("env lock");
         let resolved = resolve_local_path("~/Pictures/example.png").expect("resolved home path");
 
         assert_eq!(

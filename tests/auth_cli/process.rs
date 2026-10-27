@@ -32,9 +32,9 @@ impl ProcessGuard {
             .ok_or_else(|| std::io::Error::other("child stdout unavailable"))
     }
 
-    pub(super) fn wait(mut self) -> std::io::Result<std::process::ExitStatus> {
-        let mut child = self.child.take().expect("child already consumed");
-        child.wait()
+    #[cfg(target_os = "linux")]
+    pub(super) fn kill(&mut self) -> std::io::Result<()> {
+        self.child.as_mut().expect("child already consumed").kill()
     }
 
     pub(super) fn wait_with_output(mut self) -> std::io::Result<std::process::Output> {

@@ -3,93 +3,91 @@ name: release
 on:
   release:
     types: [published]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Existing release tag to upload assets to"
-        required: true
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   linux:
-    runs-on: ubuntu-latest
+    name: Validate and release
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    environment: release
+    permissions:
+      contents: write
     env:
-      # Cross-compilation toolchain for aarch64-unknown-linux-gnu.
-      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-      CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
-      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      RELEASE_ID: ${{ github.event.release.id }}
+      RELEASE_SHA: ${{ github.sha }}
+      MISE_EXEC_AUTO_INSTALL: "false"
     steps:
+      - name: Require a published stable release
+        env:
+          RELEASE_DRAFT: ${{ github.event.release.draft }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          test "$GITHUB_EVENT_NAME" = release
+          test "$RELEASE_DRAFT" = false
+          test "$RELEASE_PRERELEASE" = false
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - id: meta
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate exact release commit
+        id: release
+        shell: bash
         run: |
-          echo "version=$(python3 - <<'PY'
-          import tomllib
-          with open('Cargo.toml', 'rb') as fh:
-              cargo = tomllib.load(fh)
-          print(cargo['package']['version'])
-          PY
-          )" >> "$GITHUB_OUTPUT"
-      - run: rustup toolchain install 1.96.0 --profile minimal
-      - run: rustup default 1.96.0
-      - run: rustup target add aarch64-unknown-linux-gnu
-      # Native C/C++ cross-compiler needed by the bundled SQLite, oniguruma,
-      # and sqlite-vec build scripts when targeting aarch64.
-      - run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-      # x86_64 release binary (used by the .deb amd64, .rpm, and x86 tarball).
-      - run: cargo build --release
-      # aarch64 release binary (used by the .deb arm64 and arm64 tarball).
-      - run: cargo build --release --target aarch64-unknown-linux-gnu
-      - run: cargo install cargo-deb cargo-generate-rpm
-      - run: cargo deb --no-build --output target/release/tcui_${{ steps.meta.outputs.version }}_amd64.deb
-      - run: cargo deb --no-build --target aarch64-unknown-linux-gnu --output target/release/tcui_${{ steps.meta.outputs.version }}_arm64.deb
-      - run: cargo generate-rpm --output target/release/tcui-${{ steps.meta.outputs.version }}-1.x86_64.rpm
-      - run: tar -C target/release -czf target/release/tcui-x86_64-unknown-linux-gnu.tar.gz tcui
-      - run: tar -C target/aarch64-unknown-linux-gnu/release -czf target/release/tcui-aarch64-unknown-linux-gnu.tar.gz tcui
-      - run: git archive --format=tar.gz --output target/release/tcui-${{ steps.meta.outputs.version }}-source.tar.gz HEAD
-      - run: cp scripts/install.sh target/release/install.sh
-      - run: cp LICENSE target/release/LICENSE
-      - run: cp assets/models/potion-base-8M/LICENSE target/release/potion-base-8M-LICENSE
-      - name: Generate release PKGBUILD from packaging/PKGBUILD
-        run: |
-          VERSION="${{ steps.meta.outputs.version }}"
-          cp packaging/PKGBUILD target/release/PKGBUILD
-          sed -i "s|^pkgver=.*|pkgver=${VERSION}|" target/release/PKGBUILD
-      - run: |
-          cd target/release
-          # Extract binary checksums into PKGBUILD before checksumming it.
-          X86_SUM="$(sha256sum tcui-x86_64-unknown-linux-gnu.tar.gz | awk '{print $1}')"
-          ARM_SUM="$(sha256sum tcui-aarch64-unknown-linux-gnu.tar.gz | awk '{print $1}')"
-          sed -i \
-            -e "s|^sha256sums_x86_64=('[0-9a-f]*')|sha256sums_x86_64=('${X86_SUM}')|" \
-            -e "s|^sha256sums_aarch64=('[0-9a-f]*')|sha256sums_aarch64=('${ARM_SUM}')|" \
-            PKGBUILD
-          sha256sum \
-            tcui-x86_64-unknown-linux-gnu.tar.gz \
-            tcui-aarch64-unknown-linux-gnu.tar.gz \
-            tcui-${{ steps.meta.outputs.version }}-source.tar.gz \
-            tcui_${{ steps.meta.outputs.version }}_amd64.deb \
-            tcui_${{ steps.meta.outputs.version }}_arm64.deb \
-            tcui-${{ steps.meta.outputs.version }}-1.x86_64.rpm \
-            install.sh \
-            LICENSE \
-            potion-base-8M-LICENSE \
-            PKGBUILD > SHA256SUMS
-      - env:
+          sha="$(bash scripts/release-ref.sh "$RELEASE_TAG" "$RELEASE_SHA")"
+          # Release events load their workflow from the tag, not current main.
+          # Refuse a stale release definition before building or uploading.
+          git show "$sha:.github/workflows/release.yml" | cmp - .github/workflows/release.yml
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ steps.release.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          version: 2026.10.17
+          install: false
+          cache: false
+      - name: Install package inspection tools
+        run: sudo apt-get update && sudo apt-get install -y binutils rpm cpio
+      - run: bash scripts/setup-ci.sh full
+      - name: Run full CI and package smoke
+        run: mise exec -- bash scripts/ci.sh full
+      - name: Smoke release payload on glibc 2.34
+        run: bash scripts/smoke-oldest-runtime.sh
+      - name: Scan release history for secrets
+        run: bash scripts/scan-secrets.sh
+      - name: Upload validated assets to the published release
+        env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
-          gh release upload "${RELEASE_TAG}" \
-            target/release/tcui-x86_64-unknown-linux-gnu.tar.gz \
-            target/release/tcui-aarch64-unknown-linux-gnu.tar.gz \
-            target/release/tcui-${{ steps.meta.outputs.version }}-source.tar.gz \
-            target/release/tcui_${{ steps.meta.outputs.version }}_amd64.deb \
-            target/release/tcui_${{ steps.meta.outputs.version }}_arm64.deb \
-            target/release/tcui-${{ steps.meta.outputs.version }}-1.x86_64.rpm \
-            target/release/install.sh \
-            target/release/LICENSE \
-            target/release/potion-base-8M-LICENSE \
-            target/release/SHA256SUMS \
-            target/release/PKGBUILD \
-            --clobber
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          bash scripts/release-ref.sh "$RELEASE_TAG" "$RELEASE_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)" = "$RELEASE_SHA"
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RUNNER_TEMP/release.json"
+          python3 - "$RUNNER_TEMP/release.json" <<'PY'
+          import json, os, sys
+          with open(sys.argv[1]) as source:
+              release = json.load(source)
+          assert str(release["id"]) == os.environ["RELEASE_ID"]
+          assert release["tag_name"] == os.environ["RELEASE_TAG"]
+          assert not release["draft"] and not release["prerelease"] and release["published_at"]
+          PY
+          for asset in "${CARGO_TARGET_DIR:-target}"/dist/*; do
+            name="$(basename "$asset")"
+            [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]]
+            # The release ID fixes the upload destination; duplicate names fail.
+            gh api --method POST \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$name" \
+              -H 'Content-Type: application/octet-stream' --input "$asset"
+          done

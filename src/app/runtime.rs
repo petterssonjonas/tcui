@@ -1,5 +1,4 @@
 use futures::StreamExt;
-use secrecy::ExposeSecret;
 use std::io::IsTerminal;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -16,7 +15,15 @@ impl TuiApp {
     }
 
     pub(crate) fn quit_action(&self) -> Action {
-        if self.quit_requires_confirmation() {
+        if self.quit_requires_confirmation()
+            || self.has_pending_documents()
+            || self.ui.terminals.has_running()
+            || self
+                .ui
+                .resource_editor
+                .as_ref()
+                .is_some_and(|editor| editor.is_dirty())
+        {
             Action::ShowQuitConfirm
         } else {
             Action::Quit
@@ -26,6 +33,7 @@ impl TuiApp {
     pub async fn run(
         &mut self,
         terminal: &mut ratatui::Terminal<crate::Backend>,
+        reader: &mut crossterm::event::EventStream,
     ) -> color_eyre::Result<()> {
         if !std::io::stdin().is_terminal() {
             terminal.draw(|f| {
@@ -34,23 +42,39 @@ impl TuiApp {
             return Ok(());
         }
 
-        let mut reader = crossterm::event::EventStream::new();
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(33));
 
         loop {
+            if self.security_restart.is_some() {
+                crate::clear_terminal_surface(terminal)?;
+                break;
+            }
             terminal.draw(|f| {
                 self.ui.render(f);
             })?;
 
             tokio::select! {
                 _ = tick.tick() => {
+                    self.poll_credential_login().await;
+                    if self.security_restart.is_some() {
+                        continue;
+                    }
+                    self.poll_terminals();
+                    for notice in self.ui.vault_workspaces.reconcile_tick() {
+                        self.ui.show_toast(notice);
+                    }
+                    let active_app_tab_id = self.ui.app_tabs.active_id();
+                    let _ = self
+                        .ui
+                        .vault_workspaces
+                        .poll_editor(active_app_tab_id);
                     if let Some(editor) = self.ui.editor_popup.as_mut() {
                         let done = editor.poll_output();
                         if done {
-                            let chat_draft_path = editor.take_chat_draft_path();
+                            let chat_draft = editor.take_chat_draft();
                             self.ui.editor_popup = None;
-                            if let Some(path) = chat_draft_path {
-                                self.apply_chat_draft_from_path(&path);
+                            if let Some(draft) = chat_draft {
+                                self.apply_chat_draft_from_path(draft.path());
                             }
                         }
                     }
@@ -63,23 +87,57 @@ impl TuiApp {
                                     if matches!(action, Action::Quit) {
                                         break;
                                     }
-                                    let _ = self.dispatch(action).await;
+                                    if let Err(error) = self.dispatch(action).await {
+                                        self.ui.show_toast(format!("Action failed: {error}"));
+                                    }
                                 }
                             }
                         }
                         Some(Ok(crossterm::event::Event::Mouse(mouse))) => {
+                            self.cancel_escape = None;
                             if let Some(action) = self.handle_mouse(mouse) {
                                 if matches!(action, Action::Quit) {
                                     break;
                                 }
-                                let _ = self.dispatch(action).await;
+                                if let Err(error) = self.dispatch(action).await {
+                                    self.ui.show_toast(format!("Action failed: {error}"));
+                                }
                             }
                         }
                         Some(Ok(crossterm::event::Event::FocusGained)) => {
                             self.terminal_has_focus.store(true, Ordering::Relaxed);
                         }
                         Some(Ok(crossterm::event::Event::FocusLost)) => {
+                            self.cancel_escape = None;
                             self.terminal_has_focus.store(false, Ordering::Relaxed);
+                        }
+                        Some(Ok(crossterm::event::Event::Paste(text))) => {
+                            self.cancel_escape = None;
+                            if let Some(manager) = self.ui.credential_manager.as_mut() {
+                                manager.paste(&text);
+                            } else if self.ui.command_review.is_some() || self.ui.terminals.close_pending.is_some()
+                                || self.ui.active_modal.is_some() || self.ui.editor_popup.is_some()
+                                || self.ui.artifact_viewer.is_some() || self.ui.save_file_dialog.is_some()
+                                || self.ui.export_dialog.is_some()
+                                || self.ui.pending_vault_mutation.is_some() || self.ui.list_popup.is_some()
+                                || self.ui.delete_confirm.is_some() || self.ui.show_keybinds || self.ui.show_session_list
+                            {
+                                // Modal input must never reach a hidden PTY or chat composer.
+                            } else if let Some(editor) = self.ui.resource_editor.as_mut() {
+                                editor.insert(&text);
+                            } else if let Some(settings) = self.ui.settings_v2.as_mut() {
+                                for character in text.chars().filter(|character| !character.is_control()) {
+                                    settings.insert_char(character);
+                                }
+                            } else if let Some(palette) = self.ui.palette.as_mut() {
+                                for character in text.chars().filter(|character| !character.is_control()) {
+                                    palette.insert_char(character);
+                                }
+                            } else if self.ui.app_tabs.active_view() == crate::ui::app_tabs::AppView::Settings {
+                                self.ui.settings_workspace.paste(&text);
+                            } else if !self.terminal_paste(&text) && self.ui.app_tabs.active_view().is_chat() {
+                                self.insert_input_text(&text);
+                            }
                         }
                         Some(Ok(crossterm::event::Event::Resize(_, _))) => {}
                         _ => {}
@@ -90,28 +148,139 @@ impl TuiApp {
                         if matches!(action, Action::Quit) {
                             break;
                         }
-                        let _ = self.dispatch(action).await;
+                        if let Err(error) = self.dispatch(action).await {
+                            self.ui.show_toast(format!("Action failed: {error}"));
+                        }
                     }
                 }
             }
         }
+        self.quiesce_for_security_restart().await
+    }
+
+    pub(crate) async fn quiesce_for_security_restart(&mut self) -> color_eyre::Result<()> {
+        // Producers must be joined before draining their final events or revoking shared keys.
+        self.stop_credential_login().await;
+        self.stop_background_tasks().await;
+        crate::llm::auth::cancel_all_refreshes().await;
+        let mut result = Ok(());
+        while let Ok(action) = self.action_rx.try_recv() {
+            let event_result = match action {
+                Action::StreamResponse(id, content) => {
+                    self.append_request_content(id, &content, false)
+                }
+                Action::StreamThinking(id, content) => {
+                    self.append_request_content(id, &content, true)
+                }
+                #[cfg(feature = "memory")]
+                Action::SetMemoryActivities(id, activities) => {
+                    self.set_request_memory_activities(id, &activities)
+                }
+                Action::FinalizeAssistantMessage(completion) => {
+                    self.finalize_assistant_message(completion)
+                }
+                Action::StopStream(id) => self.finish_request(id),
+                Action::PersistHostActionReceipts(id) => self.persist_host_action_receipts(id),
+                _ => Ok(()),
+            };
+            result = result.and(event_result);
+        }
+        let ids: Vec<_> = self.requests.keys().copied().collect();
+        for id in ids {
+            result = result.and(self.cancel_request(id));
+        }
+        // Ordinary save failures retain the application, keys, and every remaining snapshot.
+        result?;
+        self.close_ephemeral()?;
+        self.shutdown_terminals();
         Ok(())
     }
 
     pub async fn dispatch(&mut self, action: Action) -> color_eyre::Result<()> {
+        if self.security_restart.is_some() {
+            return Err(color_eyre::eyre::eyre!(
+                "Application protection transition is pending."
+            ));
+        }
         match action {
+            Action::OpenSecurity => {
+                self.request_security_restart(crate::protection::ui::SecurityRestart::Configure);
+                Ok(())
+            }
+            Action::UnlockApplication => {
+                self.request_security_restart(crate::protection::ui::SecurityRestart::Unlock);
+                Ok(())
+            }
+            Action::OpenNativeTransfer(domain) => {
+                self.request_security_restart(crate::protection::ui::SecurityRestart::Transfer(
+                    domain,
+                ));
+                Ok(())
+            }
+            Action::SaveResourceEditor => {
+                self.save_resource_editor();
+                Ok(())
+            }
+            Action::CopyResourceEditor => {
+                self.copy_resource_editor();
+                Ok(())
+            }
+            Action::CopyArtifact(handle) => {
+                self.copy_artifact(handle);
+                Ok(())
+            }
+            Action::ConfirmProtectedContext => self.confirm_protected_context(),
+            Action::LockApplication => self
+                .lock_application()
+                .map_err(color_eyre::eyre::Error::msg),
+            Action::OpenProviders => {
+                self.open_credential_manager(false);
+                Ok(())
+            }
+            Action::OpenCredentialVault => {
+                self.open_credential_manager(true);
+                Ok(())
+            }
+            Action::OpenSearchCredentials => {
+                self.open_search_credentials();
+                Ok(())
+            }
+            Action::OpenPushoverCredential { application } => {
+                self.open_pushover_credential(application);
+                Ok(())
+            }
+            Action::SetManualModel(model) => {
+                self.open_manual_model(&model);
+                Ok(())
+            }
             Action::Quit => Ok(()),
             Action::ConfirmQuit => {
+                self.discard_pending_documents();
                 self.action_tx.send(Action::Quit).ok();
                 Ok(())
             }
             Action::CancelModal => {
                 self.ui.active_modal = None;
+                self.ui.pending_protected_context = None;
+                self.cancel_pending_document_discard();
                 self.ctrl_c_count = 0;
                 Ok(())
             }
             Action::ShowQuitConfirm => {
-                if self.quit_requires_confirmation() {
+                if self.has_pending_documents() {
+                    self.request_pending_document_discard(
+                        crate::app::pending_documents::PendingDocumentDiscardAction::Quit,
+                    );
+                    self.ctrl_c_count = 1;
+                    self.last_ctrl_c = Some(std::time::Instant::now());
+                } else if self.quit_requires_confirmation()
+                    || self.has_security_process_close_risk()
+                    || self
+                        .ui
+                        .resource_editor
+                        .as_ref()
+                        .is_some_and(|editor| editor.is_dirty())
+                {
                     self.ui.active_modal = Some(crate::ui::Modal::QuitConfirm);
                     self.ctrl_c_count = 1;
                     self.last_ctrl_c = Some(std::time::Instant::now());
@@ -184,6 +353,9 @@ impl TuiApp {
                 Ok(())
             }
             Action::ToggleArtifactSidebar => {
+                if self.ui.ephemeral.is_some() {
+                    return self.close_ephemeral();
+                }
                 self.ui.panel_state.toggle_right();
                 self.ui.artifact_sidebar_open =
                     self.ui.panel_state.right != crate::tui::shell::PanelMode::Closed;
@@ -193,38 +365,68 @@ impl TuiApp {
                 self.refresh_artifact_sidebar_catalogs();
                 Ok(())
             }
-            Action::ShowSettings => {
+            Action::ShowSettings | Action::OpenSettingsPanel => {
+                self.ui.settings_v2 = None;
                 self.ui.palette = None;
-                self.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
+                self.open_settings_page(None);
+                Ok(())
+            }
+            Action::OpenSettingsPage(id) => {
+                self.ui.settings_v2 = None;
+                self.ui.palette = None;
+                self.open_settings_page(Some(&id));
+                Ok(())
+            }
+            Action::ApplySetting { id, value } => {
+                if let Err(error) = self.apply_settings_value(&id, &value).await {
+                    self.ui
+                        .show_toast(format!("Setting was not saved: {error}"));
+                }
+                Ok(())
+            }
+            Action::SaveSettings { draft } => {
+                if let Err(error) = self.save_settings(draft).await {
+                    self.ui
+                        .show_toast(format!("Settings were not saved: {error}"));
+                }
                 Ok(())
             }
             Action::CloseSettings => {
                 self.ui.settings_v2 = None;
+                self.ui.app_tabs.select(0);
                 Ok(())
             }
             Action::ToggleSettings => {
                 self.ui.palette = None;
-                if self.ui.settings_v2.is_some() {
-                    self.ui.settings_v2 = None;
+                self.ui.settings_v2 = None;
+                if self.ui.app_tabs.active_view() == crate::ui::app_tabs::AppView::Settings {
+                    self.ui.app_tabs.select(0);
                 } else {
-                    self.ui.settings_v2 =
-                        Some(crate::tui::settings_panel::SettingsPanelState::new());
+                    self.open_settings_page(None);
                 }
                 Ok(())
             }
-            Action::NewChat => self.new_conversation(self.ui.active_tab),
-            Action::CloseChat => {
+            Action::NewChat => {
+                self.focus_chat_pane(self.ui.main_chat_index());
                 let tab_id = self.ui.active_tab;
-                let active_conversation = self
-                    .ui
-                    .tabs
-                    .get(tab_id)
-                    .map(|tab| tab.active_conversation)
-                    .unwrap_or(0);
-                if active_conversation != 0 {
-                    self.storage.delete_conversation(active_conversation)?;
+                if self.request_pending_document_discard(
+                    crate::app::pending_documents::PendingDocumentDiscardAction::NewConversation(
+                        tab_id,
+                    ),
+                ) {
+                    Ok(())
+                } else {
+                    self.new_conversation(tab_id)
                 }
-                self.ensure_tab_has_active_conversation(tab_id)
+            }
+            Action::CloseChat => {
+                if self.request_pending_document_discard(
+                    crate::app::pending_documents::PendingDocumentDiscardAction::CloseConversation,
+                ) {
+                    Ok(())
+                } else {
+                    self.close_active_conversation()
+                }
             }
             Action::ToggleConversationPinned(conversation_id) => {
                 self.toggle_conversation_pinned(conversation_id)
@@ -232,59 +434,121 @@ impl TuiApp {
             Action::DeleteConversation(conversation_id) => {
                 self.delete_conversation_by_id(conversation_id)
             }
-            Action::SendMessage(msg) => self.send_message(msg),
-            Action::StreamResponse(tab_id, message_idx, content) => {
-                self.ui.add_stream_content(tab_id, message_idx, content);
-                self.sync_message_media(tab_id);
+            Action::SendMessage(msg) => self.send_message(msg).await,
+            Action::ForkConversation => self.fork_active_conversation(),
+            Action::OpenEphemeral => self.open_ephemeral(),
+            Action::CloseEphemeral => self.close_ephemeral(),
+            Action::FocusChatPane(index) => {
+                self.focus_chat_pane(index);
                 Ok(())
             }
-            Action::StreamThinking(tab_id, message_idx, content) => {
-                self.ui.add_stream_thinking(tab_id, message_idx, content);
+            Action::CancelRequest => self.cancel_active_request(),
+            Action::SteerRequest(instruction) => {
+                if let Err(error) = self.steer_active_request(instruction) {
+                    self.ui.show_toast(error.to_string());
+                }
                 Ok(())
+            }
+            Action::QueuePendingDocument(input) => self.queue_pending_document(input),
+            Action::InsertArtifactToChat(handle) => {
+                self.insert_artifact_to_chat(handle);
+                Ok(())
+            }
+            Action::RemovePendingDocument(document_id) => {
+                self.remove_pending_document(document_id);
+                Ok(())
+            }
+            Action::ConfirmPendingDocumentDiscard => self.confirm_pending_document_discard(),
+            Action::ConfirmChatDraftExport => {
+                self.open_chat_draft_editor_after_consent();
+                Ok(())
+            }
+            Action::AwaitSubmissionConfirmation(app_tab_id) => self.transition_submission(
+                app_tab_id,
+                crate::app::submission::SubmissionState::await_confirmation,
+            ),
+            Action::ConfirmSubmission(app_tab_id) => self.transition_submission(
+                app_tab_id,
+                crate::app::submission::SubmissionState::confirm,
+            ),
+            Action::CancelVaultMutation => self.cancel_pending_vault_mutation(),
+            Action::ConfirmVaultMutation => self.confirm_pending_vault_mutation().await,
+            Action::SubmissionFailedAfterLaunch(app_tab_id, submission_id) => {
+                if let Some(state) = self.submission_states.remove(&app_tab_id) {
+                    let next = if state.submission_id() == submission_id
+                        && matches!(
+                            &state,
+                            crate::app::submission::SubmissionState::Launched { .. }
+                        ) {
+                        state.fail_after_launch()?
+                    } else {
+                        state
+                    };
+                    self.submission_states.insert(app_tab_id, next);
+                }
+                Ok(())
+            }
+            Action::StreamResponse(request_id, content) => {
+                self.append_request_content(request_id, &content, false)
+            }
+            Action::StreamThinking(request_id, content) => {
+                self.append_request_content(request_id, &content, true)
             }
             #[cfg(feature = "memory")]
-            Action::SetMemoryActivities(tab_id, message_idx, activities) => {
-                if let Some(message) = self
-                    .ui
-                    .tabs
-                    .get_mut(tab_id)
-                    .and_then(|tab| tab.messages.get_mut(message_idx))
-                {
-                    let _ = crate::memory::set_activities(message, &activities);
-                }
-                Ok(())
+            Action::SetMemoryActivities(request_id, activities) => {
+                self.set_request_memory_activities(request_id, &activities)
             }
-            Action::FinalizeAssistantMessage(tab_id, message_idx, message) => {
-                if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
-                    if let Some(existing) = tab.messages.get_mut(message_idx) {
-                        *existing = message;
-                    }
-                    tab.scroll_to_message = Some(message_idx);
-                }
-                self.persist_active_conversation(tab_id)?;
-                self.refresh_tab_conversations(tab_id)?;
-                Ok(())
+            Action::FinalizeAssistantMessage(completion) => {
+                self.finalize_assistant_message(completion)
             }
-            Action::StopStream(tab_id) => {
-                self.ui.finish_stream(tab_id);
-                self.refresh_tab_conversations(tab_id)?;
-                Ok(())
-            }
+            Action::StopStream(request_id) => self.finish_request(request_id),
+            Action::PersistHostActionReceipts(id) => self.persist_host_action_receipts(id),
             Action::AddMessage(tab_id, msg) => {
                 let mut stored = msg;
                 if let Ok(message_id) = self.storage.save_message(&stored) {
                     stored.id = Some(message_id);
                 }
                 self.ui.add_message(tab_id, stored);
-                self.sync_message_media(tab_id);
                 Ok(())
             }
             Action::AddGeneratedFile(tab_id, file) => {
-                self.ui.add_generated_file(tab_id, file);
+                match self.persist_generated_file(tab_id, file) {
+                    Ok(filename) => {
+                        self.ui.connection_status =
+                            crate::ui::status_bar::ConnectionStatus::CloudConnected;
+                        self.ui.connection_message = Some(format!("Saved as {filename}"));
+                    }
+                    Err(error) => {
+                        self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::Failed;
+                        self.ui.connection_message =
+                            Some(format!("Generated file persistence failed: {error}"));
+                    }
+                }
                 Ok(())
             }
-            Action::LoadConversation(conv_id) => self.load_conversation(conv_id),
-            Action::NewConversation(tab_id) => self.new_conversation(tab_id),
+            Action::LoadConversation(conv_id) => {
+                self.focus_chat_pane(self.ui.main_chat_index());
+                if self.request_pending_document_discard(
+                    crate::app::pending_documents::PendingDocumentDiscardAction::LoadConversation(
+                        conv_id,
+                    ),
+                ) {
+                    Ok(())
+                } else {
+                    self.load_conversation(conv_id)
+                }
+            }
+            Action::NewConversation(tab_id) => {
+                if self.request_pending_document_discard(
+                    crate::app::pending_documents::PendingDocumentDiscardAction::NewConversation(
+                        tab_id,
+                    ),
+                ) {
+                    Ok(())
+                } else {
+                    self.new_conversation(tab_id)
+                }
+            }
             Action::UpdateModel(model) => {
                 self.ui.update_model(model);
                 Ok(())
@@ -301,34 +565,44 @@ impl TuiApp {
                 self.set_connection_state(status, message);
                 Ok(())
             }
-            Action::SetTitle(title) => {
-                if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
-                    tab.generated_title = Some(title.clone());
-                    if tab.active_conversation != 0 {
-                        self.storage
-                            .update_conversation_title(tab.active_conversation, &title)?;
-                    }
-                }
-                self.ui.set_title(title);
-                self.refresh_tab_conversations(self.ui.active_tab)?;
-                Ok(())
-            }
             Action::SwitchTab(idx) => {
-                self.ui.active_tab = idx;
-                self.ui.settings_v2 = None;
-                self.refresh_visible_selectors();
-                Ok(())
+                if self.request_pending_document_discard(
+                    crate::app::pending_documents::PendingDocumentDiscardAction::SwitchTab(idx),
+                ) {
+                    Ok(())
+                } else {
+                    self.ui.active_tab = idx;
+                    self.ui.settings_v2 = None;
+                    self.refresh_visible_selectors();
+                    Ok(())
+                }
             }
             Action::AddTab(tab) => {
+                self.close_ephemeral()?;
                 self.ui.add_tab(tab);
                 self.ui.settings_v2 = None;
                 self.refresh_visible_selectors();
                 Ok(())
             }
             Action::RemoveTab(idx) => {
-                self.ui.remove_tab(idx);
-                self.refresh_visible_selectors();
-                Ok(())
+                if self
+                    .ui
+                    .ephemeral
+                    .as_ref()
+                    .is_some_and(|pane| pane.tab_index == idx)
+                {
+                    return self.close_ephemeral();
+                }
+                self.close_ephemeral()?;
+                if self.request_pending_document_discard(
+                    crate::app::pending_documents::PendingDocumentDiscardAction::RemoveTab(idx),
+                ) {
+                    Ok(())
+                } else {
+                    self.ui.remove_tab(idx);
+                    self.refresh_visible_selectors();
+                    Ok(())
+                }
             }
             Action::ToggleSessionList => {
                 self.ui.show_session_list = !self.ui.show_session_list;
@@ -337,7 +611,9 @@ impl TuiApp {
             Action::UpdateTabProvider(tab_id, provider) => {
                 if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
                     tab.tab.provider = provider.clone();
+                    tab.tab.endpoint = None;
                     tab.tab.model.clear();
+                    tab.manual_model_override = false;
                     tab.tab.reasoning_effort = None;
                 }
                 self.refresh_visible_selectors();
@@ -350,6 +626,7 @@ impl TuiApp {
             Action::UpdateTabModel(tab_id, model) => {
                 if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
                     tab.tab.model = model.clone();
+                    tab.manual_model_override = false;
                     tab.tab.reasoning_effort = None;
                 }
                 self.refresh_visible_selectors();
@@ -359,20 +636,10 @@ impl TuiApp {
                     .push_message(format!("Model: {model}"), self.ui.frame_tick);
                 Ok(())
             }
-            Action::SetProviderModels(provider, _models) => {
-                if self
-                    .ui
-                    .tabs
-                    .get(self.ui.active_tab)
-                    .map(|tab| tab.tab.provider == provider)
-                    .unwrap_or(false)
-                {
-                    self.refresh_visible_selectors();
-                }
-
+            Action::SetProviderModels(provider, models) => {
+                self.apply_refreshed_provider_models(&provider, &models);
                 Ok(())
             }
-            Action::SaveApiKey(_provider, _key) => Ok(()),
             Action::MouseClick(action) => self.dispatch_mouse_click(action).await,
             Action::SaveGeneratedFile => self.save_generated_file(),
             Action::SaveExportDialog => self.save_export_dialog(),
@@ -390,24 +657,42 @@ impl TuiApp {
                 Ok(())
             }
             Action::RefreshModels => {
-                let storage = crate::storage::Storage::new()?;
-                tokio::task::spawn_blocking(move || {
-                    let rt = tokio::runtime::Handle::current();
-                    rt.block_on(async {
-                        crate::llm::model_fetcher::refresh_all_models(&storage).await;
-                    });
-                });
+                for (provider, _, _, _, _) in &self.ui.db_providers {
+                    if self
+                        .ui
+                        .visible_providers
+                        .iter()
+                        .any(|entry| entry.0 == *provider)
+                    {
+                        self.refresh_models_for_provider(provider.clone());
+                    }
+                }
                 Ok(())
             }
             Action::OpenCommandPalette => {
                 self.ui.palette = None;
-                self.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
+                self.ui.settings_v2 = Some(self.sidebar_settings_panel());
                 Ok(())
             }
-            Action::OpenSettingsPanel => {
-                let _focus = crate::tui::focus::Focus::SettingsPanel;
-                self.ui.palette = None;
-                self.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
+            Action::OpenTerminal => {
+                self.open_terminal().await;
+                Ok(())
+            }
+            Action::ApproveCommandReview => {
+                self.approve_command_review().await;
+                Ok(())
+            }
+            Action::TransferCommandReview => {
+                self.transfer_command_review();
+                Ok(())
+            }
+            Action::OpenVaultLauncher => {
+                self.open_vault_launcher();
+                Ok(())
+            }
+            #[cfg(feature = "memory")]
+            Action::OpenMemoriesLauncher => {
+                self.open_memories_launcher();
                 Ok(())
             }
             Action::SetPinnedCommands(pinned) => {
@@ -420,44 +705,73 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn send_message(&mut self, content: String) -> color_eyre::Result<()> {
+    pub(crate) async fn send_message(&mut self, content: String) -> color_eyre::Result<()> {
+        if self.active_request_id().is_some() {
+            self.replace_input_content(content);
+            self.ui.show_toast(
+                "This conversation already has an active request. Use /cancel or press Esc twice."
+                    .into(),
+            );
+            return Ok(());
+        }
         if tokio::runtime::Handle::try_current().is_err() {
             return Err(color_eyre::eyre::eyre!(
                 "Cannot send a message without a Tokio runtime"
             ));
         }
-        let mut conversation_id = self
+        let system_prompt = match Self::load_system_prompt() {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                self.replace_input_content(content);
+                return Err(error);
+            }
+        };
+        let completed_vault_result = self
+            .ui
+            .pending_vault_mutation
+            .as_ref()
+            .and_then(crate::app::submission::PendingVaultMutation::completed_submission)
+            .cloned();
+        if self.ui.pending_vault_mutation.is_some() && completed_vault_result.is_none() {
+            return Err(color_eyre::eyre::eyre!(
+                "Confirm or cancel the pending Vault mutation first"
+            ));
+        }
+        let completed_vault_mutation = completed_vault_result.is_some();
+        let app_tab_id = self.input_context_id();
+        let (content, documents) = match self.ui.pending_vault_mutation.as_ref() {
+            Some(pending) if completed_vault_mutation => (
+                pending.submission.instruction().to_owned(),
+                pending.submission.documents().clone(),
+            ),
+            Some(_) | None => (
+                content,
+                self.pending_documents
+                    .get(&app_tab_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            ),
+        };
+        let submission = crate::app::submission::InputSubmission::new(&content, documents);
+        let prepared_turn = crate::app::submission::PreparedUserTurn::prepare(&submission)?;
+        let canonical_content = prepared_turn.content().to_owned();
+        let ephemeral_context = match self.ephemeral_context_for_request(&content) {
+            Ok(context) => context,
+            Err(error) => {
+                self.replace_input_content(content);
+                return Err(error);
+            }
+        };
+        let preparing =
+            crate::app::submission::SubmissionState::draft(submission.clone()).begin_preparing()?;
+        self.submission_states.insert(app_tab_id, preparing);
+
+        let conversation_id = self
             .ui
             .tabs
             .get(self.ui.active_tab)
             .map(|t| t.active_conversation)
             .unwrap_or(0);
-        if conversation_id == 0 {
-            conversation_id = self
-                .storage
-                .create_conversation(self.ui.active_tab as i64)?;
-            if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
-                tab.active_conversation = conversation_id;
-            }
-        }
-        let role = "user".to_string();
-
-        let mut msg = Message::new(conversation_id, role, content.clone());
-        if let Ok(message_id) = self.storage.save_message(&msg) {
-            msg.id = Some(message_id);
-        }
-        self.ui.add_message(self.ui.active_tab, msg.clone());
-
-        // On first message, create a conversation entry and generate title
-        if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
-            if tab.messages.len() == 1 && tab.generated_title.is_none() {
-                let title = Self::generate_title(&content);
-                tab.generated_title = Some(title.clone());
-                self.storage
-                    .update_conversation_title(tab.active_conversation, &title)?;
-            }
-        }
-        self.refresh_tab_conversations(self.ui.active_tab)?;
 
         let tab_id = self.ui.active_tab;
         let Some(tab_state) = self.ui.tabs.get(tab_id) else {
@@ -474,24 +788,44 @@ impl TuiApp {
             .find(|entry| entry.id == model)
             .map(|entry| entry.supported_reasoning_efforts.clone())
             .unwrap_or_default();
-        let messages = tab_state.messages.clone();
-        let config_snapshot = self
-            .config
-            .try_read()
-            .map(|config| config.clone())
-            .unwrap_or_default();
-        if let Some(response) = crate::reminders::maybe_handle_request(&config_snapshot, &content) {
-            let mut assistant = Message::new(conversation_id, "assistant".to_string(), response);
-            if let Ok(message_id) = self.storage.save_message(&assistant) {
-                assistant.id = Some(message_id);
+        let mut messages = prepared_turn.expand_messages(&tab_state.messages, conversation_id);
+        if let Some(context) = &ephemeral_context {
+            if let Some(message) = messages.last_mut() {
+                message.content.push_str(context);
             }
-            self.ui.add_message(tab_id, assistant);
+        }
+        let tab_endpoint = tab_state.tab.endpoint.clone();
+        let config_snapshot = self.config.read().await.clone();
+        if provider.is_empty()
+            || !self
+                .ui
+                .visible_providers
+                .iter()
+                .any(|entry| entry.0 == provider)
+        {
+            self.transition_submission(
+                app_tab_id,
+                crate::app::submission::SubmissionState::return_to_draft,
+            )?;
+            self.replace_input_content(content);
+            self.open_credential_manager(false);
+            self.ui
+                .show_toast("Add a provider with /connect before sending.".into());
             return Ok(());
+        }
+        if model.trim().is_empty() {
+            self.transition_submission(
+                app_tab_id,
+                crate::app::submission::SubmissionState::return_to_draft,
+            )?;
+            self.ui
+                .show_toast("Choose a model, or enter its ID with /model <id>.".into());
+            return Err(color_eyre::eyre::eyre!("Choose a model before sending."));
         }
         let endpoint = if is_local_provider {
             Some(config_snapshot.local_inference.chat_endpoint())
         } else {
-            tab_state.tab.endpoint.clone().or_else(|| {
+            tab_endpoint.or_else(|| {
                 self.provider_config(&provider)
                     .map(|(endpoint, _, _)| endpoint)
             })
@@ -507,12 +841,9 @@ impl TuiApp {
                 .unwrap_or_else(|| "openai".to_string())
         };
         let local_api_key = if is_local_provider {
-            config_snapshot
-                .local_inference
-                .api_token_env
-                .as_deref()
-                .and_then(|env_var| std::env::var(env_var).ok())
-                .filter(|value| !value.trim().is_empty())
+            crate::config::KeyStore::get(&config_snapshot, crate::config::LOCAL_PROVIDER_NAME)
+                .ok()
+                .flatten()
         } else {
             None
         };
@@ -520,33 +851,192 @@ impl TuiApp {
             .as_ref()
             .map(|(_, env_var, _)| env_var.clone());
         let action_tx = self.action_tx.clone();
-        let system_prompt = self.system_prompt.clone();
         let user_request = content.clone();
+        let save_requested = crate::skills::mentions(&content)
+            .iter()
+            .any(|mention| mention == "save");
         let terminal_has_focus = Arc::clone(&self.terminal_has_focus);
 
-        let assistant_msg = Message::new(conversation_id, "assistant".to_string(), String::new());
-        self.ui.add_message(tab_id, assistant_msg);
-        let assistant_idx = self
-            .ui
-            .tabs
-            .get(tab_id)
-            .map(|tab| tab.messages.len().saturating_sub(1))
-            .unwrap_or(0);
-        if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
-            tab.streaming = true;
-        }
-
         let Some(endpoint) = endpoint else {
+            self.transition_submission(
+                app_tab_id,
+                crate::app::submission::SubmissionState::return_to_draft,
+            )?;
             self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::Failed;
             self.ui.connection_message = Some(format!("Missing endpoint for {provider}"));
-            let _ = action_tx.send(Action::StreamResponse(
-                tab_id,
-                assistant_idx,
-                format!("No endpoint configured for {provider}."),
+            return Err(color_eyre::eyre::eyre!(
+                "No endpoint configured for {provider}."
             ));
-            let _ = action_tx.send(Action::StopStream(tab_id));
-            return Ok(());
         };
+        let preparation = crate::app::submission_runtime::RequestPreparation {
+            conversation_id,
+            history: self.storage.chat_reader(),
+            provider: provider.clone(),
+            endpoint,
+            model: model.clone(),
+            reasoning_effort,
+            supported_reasoning_efforts,
+            backend_type,
+            local_api_key,
+            credential_env_var,
+            system_prompt,
+            messages,
+            config: config_snapshot.clone(),
+            user_request: content.clone(),
+            #[cfg(feature = "memory")]
+            memory_instruction: content,
+            is_local_provider,
+            vault_result: completed_vault_result,
+        };
+        enum LaunchWork {
+            Ready(Box<crate::app::submission_runtime::PreparedLaunch>),
+            Deferred(Box<crate::app::submission_runtime::RequestPreparation>),
+        }
+        impl LaunchWork {
+            async fn prepare(
+                self,
+            ) -> color_eyre::Result<crate::app::submission_runtime::PreparedLaunch> {
+                match self {
+                    Self::Ready(prepared) => Ok(*prepared),
+                    Self::Deferred(preparation) => {
+                        match crate::app::submission_runtime::prepare_launch(*preparation).await? {
+                            crate::app::submission_runtime::PreparationOutcome::Ready(prepared) => {
+                                Ok(*prepared)
+                            }
+                            crate::app::submission_runtime::PreparationOutcome::VaultMutation(
+                                _,
+                            ) => Err(color_eyre::eyre::eyre!(
+                                "Use a separate @vault request to confirm Vault mutations"
+                            )),
+                        }
+                    }
+                }
+            }
+        }
+        let host_execution = crate::skill_runtime::host_execution::requested(&user_request);
+        let work = if host_execution {
+            // Own cancellation before agent tool decisions or host actions begin.
+            LaunchWork::Deferred(Box::new(preparation))
+        } else {
+            let preparation_outcome =
+                match crate::app::submission_runtime::prepare_launch(preparation).await {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        self.transition_submission(
+                            app_tab_id,
+                            crate::app::submission::SubmissionState::return_to_draft,
+                        )?;
+                        return Err(error);
+                    }
+                };
+            match preparation_outcome {
+                crate::app::submission_runtime::PreparationOutcome::Ready(prepared) => {
+                    LaunchWork::Ready(prepared)
+                }
+                crate::app::submission_runtime::PreparationOutcome::VaultMutation(kind) => {
+                    let pending = match crate::app::submission::PendingVaultMutation::new(
+                        prepared_turn,
+                        kind,
+                    ) {
+                        Ok(pending) => pending,
+                        Err(error) => {
+                            self.transition_submission(
+                                app_tab_id,
+                                crate::app::submission::SubmissionState::return_to_draft,
+                            )?;
+                            return Err(error.into());
+                        }
+                    };
+                    self.transition_submission(
+                        app_tab_id,
+                        crate::app::submission::SubmissionState::await_confirmation,
+                    )?;
+                    self.ui.pending_vault_mutation = Some(pending);
+                    return Ok(());
+                }
+            }
+        };
+        self.transition_submission(
+            app_tab_id,
+            crate::app::submission::SubmissionState::finish_preparing,
+        )?;
+
+        let created_conversation = conversation_id == 0;
+        let conversation_id = if created_conversation {
+            match self.storage.create_conversation(tab_id as i64) {
+                Ok(conversation_id) => conversation_id,
+                Err(error) => {
+                    self.transition_submission(
+                        app_tab_id,
+                        crate::app::submission::SubmissionState::return_to_draft,
+                    )?;
+                    return Err(error);
+                }
+            }
+        } else {
+            conversation_id
+        };
+        let mut user_message = Message::new(
+            conversation_id,
+            "user".to_string(),
+            canonical_content.clone(),
+        );
+        if let Some(context) = &ephemeral_context {
+            user_message.content.push_str(context);
+        }
+        match crate::app::vault_mutation_execute::persist_user_message(
+            &self.storage,
+            &user_message,
+            completed_vault_mutation,
+        ) {
+            Ok(message_id) => user_message.id = Some(message_id),
+            Err(error) => {
+                if created_conversation {
+                    let _ = self.storage.delete_conversation(conversation_id);
+                }
+                self.transition_submission(
+                    app_tab_id,
+                    crate::app::submission::SubmissionState::return_to_draft,
+                )?;
+                return Err(error);
+            }
+        }
+        self.transition_submission(app_tab_id, crate::app::submission::SubmissionState::commit)?;
+        if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
+            tab.active_conversation = conversation_id;
+        }
+        self.ui.add_message(tab_id, user_message);
+        if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
+            if tab.messages.len() == 1 && tab.generated_title.is_none() {
+                let title = Self::generate_title(&canonical_content);
+                tab.generated_title = Some(title.clone());
+                if let Err(error) = self
+                    .storage
+                    .update_conversation_title(conversation_id, &title)
+                {
+                    let _ = action_tx.send(Action::UpdateStatus(format!(
+                        "Conversation title update failed: {error}"
+                    )));
+                }
+            }
+        }
+        if let Err(error) = self.refresh_tab_conversations(tab_id) {
+            let _ = action_tx.send(Action::UpdateStatus(format!(
+                "Conversation list refresh failed: {error}"
+            )));
+        }
+
+        let submission_id = prepared_turn.submission_id();
+        let route = crate::app::requests::RequestRoute {
+            request_id: submission_id,
+            origin_conversation_id: conversation_id,
+            destination_conversation_id: conversation_id,
+        };
+        let history = self.ui.tabs[tab_id].messages.clone();
+        self.register_request(route, tab_id, history)?;
+        if let Some(request) = self.requests.get_mut(&submission_id) {
+            request.hide_answer = save_requested;
+        }
         if is_local_provider {
             self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::LocalConnected;
             self.ui.connection_message = Some("Connected to Local LLM".to_string());
@@ -554,315 +1044,117 @@ impl TuiApp {
             self.ui.connection_status = crate::ui::status_bar::ConnectionStatus::CloudConnected;
             self.ui.connection_message = Some(format!("{provider} / {model}"));
         }
-
-        tokio::spawn(async move {
-            let api_key = if is_local_provider {
-                local_api_key
-            } else {
-                match credential_env_var {
-                    Some(env_var) => {
-                        let credential_request = crate::llm::auth::CredentialRequest::new(
-                            &provider, &env_var, &endpoint,
-                        );
-                        match crate::llm::auth::resolve_provider_credential(credential_request)
-                            .await
-                        {
-                            Ok(Some(credential)) => {
-                                Some(credential.bearer_token().expose_secret().to_owned())
-                            }
-                            Ok(None) => None,
-                            Err(error) => {
-                                let _ = action_tx.send(Action::StreamResponse(
-                                    tab_id,
-                                    assistant_idx,
-                                    format!("Credential unavailable: {error}"),
-                                ));
-                                let _ = action_tx.send(Action::StopStream(tab_id));
-                                return;
-                            }
-                        }
-                    }
-                    None => None,
+        let host_receipts = self
+            .requests
+            .get(&submission_id)
+            .map(|request| request.host_receipts.clone())
+            .ok_or_else(|| color_eyre::eyre::eyre!("Request disappeared before agent launch"))?;
+        let completion = crate::app::requests::StreamCompletion {
+            request_id: submission_id,
+            sender: action_tx.clone(),
+        };
+        let handle = tokio::spawn(async move {
+            // Capture the guard before spawning so even an unpolled abort reports termination.
+            let _completion = completion;
+            let prepared = match crate::skill_runtime::host_receipts::capture(
+                host_receipts,
+                submission_id,
+                action_tx.clone(),
+                work.prepare(),
+            )
+            .await
+            {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let message = format!("Request preparation failed: {error}");
+                    let _ = action_tx.send(Action::UpdateStatus(message.clone()));
+                    let _ = action_tx.send(Action::FinalizeAssistantMessage(
+                        crate::app::action::AssistantFinalization {
+                            request_id: submission_id,
+                            message: Message::new(conversation_id, "assistant".to_owned(), message),
+                            generated_file:
+                                crate::app::action::GeneratedFileFinalization::NotRequested,
+                        },
+                    ));
+                    let _ = action_tx.send(Action::SubmissionFailedAfterLaunch(
+                        app_tab_id,
+                        submission_id,
+                    ));
+                    return;
                 }
             };
-            if !is_local_provider && !provider.eq_ignore_ascii_case("Ollama") && api_key.is_none() {
-                let _ = action_tx.send(Action::StreamResponse(
-                    tab_id,
-                    assistant_idx,
-                    format!("No API key or OAuth token found for {provider}. Open Settings > Providers or set the provider env var."),
-                ));
-                let _ = action_tx.send(Action::StopStream(tab_id));
-                return;
-            }
-            let event_tx = action_tx.clone();
-            let mut runtime_system_prompt = system_prompt.clone();
-            let mut request = crate::llm::chat::ChatRequest {
-                provider,
-                endpoint,
-                model,
-                reasoning_effort,
-                supported_reasoning_efforts,
-                backend_type,
-                api_key,
-                system_prompt: runtime_system_prompt.clone(),
-                messages,
-            };
-            let skills =
-                crate::skill_runtime::prepare(&config_snapshot, &user_request, &request).await;
-            runtime_system_prompt.push_str(&skills.context);
-            let now = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
-            runtime_system_prompt.push_str(&format!(
-                "\n\nCurrent date and time: {now}. Use this when referencing relative dates like 'today' or 'yesterday'."
-            ));
-            request.messages.extend(skills.messages);
-            for notice in skills.notices {
+            for notice in prepared.notices {
                 let _ = action_tx.send(Action::UpdateStatus(notice));
             }
-            match crate::search::maybe_search(&config_snapshot, &user_request, false).await {
-                Ok(Some(context)) => {
-                    request
-                        .messages
-                        .push(crate::search::untrusted_context_message(&context));
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    let _ = action_tx.send(Action::UpdateStatus(format!(
-                        "Web search unavailable: {err}"
-                    )));
-                }
+            #[cfg(feature = "memory")]
+            let memory_activities = prepared.memory_activities;
+            #[cfg(feature = "memory")]
+            if memory_activities.iter().any(|activity| {
+                matches!(
+                    activity,
+                    crate::memory::MemoryActivity::Saved { .. }
+                        | crate::memory::MemoryActivity::Removed { .. }
+                )
+            }) {
+                let _ = action_tx.send(Action::RefreshArtifactSidebar);
             }
             #[cfg(feature = "memory")]
-            let mut memory_activities = Vec::new();
-            #[cfg(feature = "memory")]
-            if config_snapshot.memory.enabled {
-                memory_activities.push(crate::memory::MemoryActivity::Recalling);
-                let _ = action_tx.send(Action::SetMemoryActivities(
-                    tab_id,
-                    assistant_idx,
-                    memory_activities.clone(),
-                ));
-                let recall_config = config_snapshot.clone();
-                let recall_query = user_request.clone();
-                match tokio::task::spawn_blocking(move || {
-                    crate::memory::recall(&recall_config, &recall_query)
-                })
-                .await
-                {
-                    Ok(Ok(recall)) if !recall.context.is_empty() => {
-                        memory_activities.clear();
-                        memory_activities.push(crate::memory::MemoryActivity::Recalled {
-                            titles: recall.titles,
-                        });
-                        crate::memory::append_recall(&mut request.messages, &recall.context);
-                    }
-                    Ok(Ok(_)) => memory_activities.clear(),
-                    Ok(Err(error)) => {
-                        memory_activities.clear();
-                        memory_activities.push(crate::memory::MemoryActivity::Failed {
-                            message: error.to_string(),
-                        });
-                    }
-                    Err(error) => {
-                        memory_activities.clear();
-                        memory_activities.push(crate::memory::MemoryActivity::Failed {
-                            message: error.to_string(),
-                        });
-                    }
-                }
-                let _ = action_tx.send(Action::SetMemoryActivities(
-                    tab_id,
-                    assistant_idx,
-                    memory_activities.clone(),
-                ));
-                let operation_config = config_snapshot.clone();
-                let operation_request = user_request.clone();
-                match tokio::task::spawn_blocking(move || {
-                    crate::memory::run_skill_operation(&operation_config, &operation_request)
-                })
-                .await
-                {
-                    Ok(Ok(Some(operation))) => {
-                        if !operation.context.is_empty() {
-                            request.messages.push(Message::new(
-                                conversation_id,
-                                "user".to_string(),
-                                operation.context,
-                            ));
-                        }
-                        if let Some(activity) = operation.activity {
-                            let refresh =
-                                matches!(activity, crate::memory::MemoryActivity::Saved { .. });
-                            memory_activities.push(activity);
-                            let _ = action_tx.send(Action::SetMemoryActivities(
-                                tab_id,
-                                assistant_idx,
-                                memory_activities.clone(),
-                            ));
-                            if refresh {
-                                let _ = action_tx.send(Action::RefreshArtifactSidebar);
+            let _ = action_tx.send(Action::SetMemoryActivities(
+                submission_id,
+                memory_activities.clone(),
+            ));
+            let event_tx = action_tx.clone();
+            let redactions = prepared.redactions;
+            let private_output = !redactions.is_empty();
+            let request = prepared.request;
+            let mut visible_answer = String::new();
+            let provider_future =
+                crate::llm::chat::stream_prepared_chat(request, |event| match event {
+                    crate::llm::chat::ChatStreamEvent::Answer(content) => {
+                        if !content.is_empty() {
+                            visible_answer.push_str(&content);
+                            if !private_output {
+                                let _ =
+                                    event_tx.send(Action::StreamResponse(submission_id, content));
                             }
                         }
                     }
-                    Ok(Ok(None)) => {}
-                    Ok(Err(error)) => {
-                        memory_activities.push(crate::memory::MemoryActivity::Failed {
-                            message: error.to_string(),
-                        });
-                        let _ = action_tx.send(Action::SetMemoryActivities(
-                            tab_id,
-                            assistant_idx,
-                            memory_activities.clone(),
-                        ));
+                    crate::llm::chat::ChatStreamEvent::Thinking(content) => {
+                        if !private_output {
+                            let _ = event_tx.send(Action::StreamThinking(submission_id, content));
+                        }
                     }
-                    Err(error) => {
-                        memory_activities.push(crate::memory::MemoryActivity::Failed {
-                            message: error.to_string(),
-                        });
-                        let _ = action_tx.send(Action::SetMemoryActivities(
-                            tab_id,
-                            assistant_idx,
-                            memory_activities.clone(),
-                        ));
-                    }
-                }
-                if config_snapshot.memory.auto_capture {
-                    runtime_system_prompt.push_str(crate::memory::AUTO_CAPTURE_POLICY);
-                }
+                });
+            let result = if host_execution {
+                crate::diagnostics::sensitive_provider_round(provider_future).await
+            } else {
+                provider_future.await
             }
-            request.system_prompt = runtime_system_prompt;
-            let mut visible_answer = String::new();
-            #[cfg(feature = "memory")]
-            let mut remember_filter = crate::memory::RememberFilter::default();
-            let result = crate::llm::chat::stream_chat(request, |event| match event {
-                crate::llm::chat::ChatStreamEvent::Answer(content) => {
-                    let visible = {
-                        #[cfg(feature = "memory")]
-                        {
-                            remember_filter.push(&content)
-                        }
-                        #[cfg(not(feature = "memory"))]
-                        {
-                            content
-                        }
-                    };
-                    if !visible.is_empty() {
-                        visible_answer.push_str(&visible);
-                        let _ =
-                            event_tx.send(Action::StreamResponse(tab_id, assistant_idx, visible));
+            .map(|mut response| {
+                if private_output {
+                    // Buffer sensitive replies so keys split across chunks cannot reach the UI.
+                    visible_answer = redactions.redact(&visible_answer);
+                    response.thinking = redactions.redact(&response.thinking);
+                    let _ = event_tx.send(Action::StreamResponse(
+                        submission_id,
+                        visible_answer.clone(),
+                    ));
+                    if !response.thinking.is_empty() {
+                        let _ = event_tx.send(Action::StreamThinking(
+                            submission_id,
+                            response.thinking.clone(),
+                        ));
                     }
                 }
-                crate::llm::chat::ChatStreamEvent::Thinking(content) => {
-                    let _ = event_tx.send(Action::StreamThinking(tab_id, assistant_idx, content));
-                }
-                crate::llm::chat::ChatStreamEvent::Title(title) => {
-                    let _ = event_tx.send(Action::SetTitle(title));
-                }
-            })
-            .await;
-
-            #[cfg(feature = "memory")]
-            let remembered = {
-                let filtered = remember_filter.finish();
-                if !filtered.visible.is_empty() {
-                    visible_answer.push_str(&filtered.visible);
-                    let _ = action_tx.send(Action::StreamResponse(
-                        tab_id,
-                        assistant_idx,
-                        filtered.visible,
-                    ));
-                }
-                for issue in filtered.issues {
-                    let message = match issue {
-                        crate::memory::RememberDirectiveIssue::UnterminatedOpen => {
-                            "Memory was not saved: <tcui:remember> was started but never closed."
-                        }
-                        crate::memory::RememberDirectiveIssue::ClosingWithoutOpening => {
-                            "Memory was not saved: </tcui:remember> appeared without a matching start tag."
-                        }
-                    };
-                    let _ = action_tx.send(Action::UpdateStatus(message.to_string()));
-                }
-                filtered.memory
-            };
+                response
+            });
 
             match result {
-                Ok(response) if !visible_answer.is_empty() || !response.thinking.is_empty() => {
-                    let file_id = rand::random();
-                    let mut generated_file = crate::app::GeneratedFile::from_skill_response(
-                        file_id,
-                        conversation_id,
-                        &user_request,
-                        &visible_answer,
-                    );
-                    if let Some(file) = generated_file.take() {
-                        let configured = config_snapshot
-                            .artifact_save_dir
-                            .as_deref()
-                            .map(std::path::Path::new)
-                            .map(|path| {
-                                crate::app::generated_file::expand_user_path(
-                                    path,
-                                    dirs::home_dir().as_deref(),
-                                )
-                            })
-                            .unwrap_or_else(|| {
-                                dirs::data_dir()
-                                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                                    .join("tcui/artifacts")
-                            });
-                        match file.clone().save_to(&configured) {
-                            Ok(saved) => generated_file = Some(saved),
-                            Err(error) => {
-                                generated_file = Some(file);
-                                let _ = action_tx.send(Action::UpdateStatus(format!(
-                                    "Artifact save failed: {error}"
-                                )));
-                            }
-                        }
-                    }
-                    #[cfg(feature = "memory")]
-                    if let Some(fact) = remembered {
-                        memory_activities.push(crate::memory::MemoryActivity::Saving);
-                        let _ = action_tx.send(Action::SetMemoryActivities(
-                            tab_id,
-                            assistant_idx,
-                            memory_activities.clone(),
-                        ));
-                        let capture_config = config_snapshot.clone();
-                        let capture = tokio::task::spawn_blocking(move || {
-                            crate::memory::capture(&capture_config, &fact)
-                        })
-                        .await;
-                        memory_activities.retain(|activity| {
-                            !matches!(activity, crate::memory::MemoryActivity::Saving)
-                        });
-                        match capture {
-                            Ok(Ok(crate::memory::WriteOutcome::Saved { title, path })) => {
-                                memory_activities
-                                    .push(crate::memory::MemoryActivity::Saved { title, path });
-                                let _ = action_tx.send(Action::RefreshArtifactSidebar);
-                            }
-                            Ok(Ok(crate::memory::WriteOutcome::AlreadyKnown { title })) => {
-                                memory_activities
-                                    .push(crate::memory::MemoryActivity::AlreadyKnown { title });
-                            }
-                            Ok(Err(error)) => {
-                                memory_activities.push(crate::memory::MemoryActivity::Failed {
-                                    message: error.to_string(),
-                                });
-                            }
-                            Err(error) => {
-                                memory_activities.push(crate::memory::MemoryActivity::Failed {
-                                    message: error.to_string(),
-                                });
-                            }
-                        }
-                        let _ = action_tx.send(Action::SetMemoryActivities(
-                            tab_id,
-                            assistant_idx,
-                            memory_activities.clone(),
-                        ));
-                    }
+                Ok(response)
+                    if save_requested
+                        || !visible_answer.is_empty()
+                        || !response.thinking.is_empty() =>
+                {
                     let assistant_content = visible_answer.clone();
                     let mut msg =
                         Message::new(conversation_id, "assistant".to_string(), assistant_content);
@@ -871,12 +1163,29 @@ impl TuiApp {
                     msg.token_count = response.total_tokens;
                     #[cfg(feature = "memory")]
                     let _ = crate::memory::set_activities(&mut msg, &memory_activities);
+                    let generated_file = if save_requested {
+                        crate::app::GeneratedFile::from_skill_response(
+                            rand::random(),
+                            conversation_id,
+                            &user_request,
+                            &visible_answer,
+                        )
+                        .map_or(
+                            crate::app::action::GeneratedFileFinalization::Invalid,
+                            crate::app::action::GeneratedFileFinalization::Ready,
+                        )
+                    } else {
+                        crate::app::action::GeneratedFileFinalization::NotRequested
+                    };
                     let _ = action_tx.send(Action::FinalizeAssistantMessage(
-                        tab_id,
-                        assistant_idx,
-                        msg,
+                        crate::app::action::AssistantFinalization {
+                            request_id: submission_id,
+                            message: msg,
+                            generated_file,
+                        },
                     ));
-                    if !terminal_has_focus.load(Ordering::Relaxed) {
+                    let _ = action_tx.send(Action::StopStream(submission_id));
+                    if !save_requested && !terminal_has_focus.load(Ordering::Relaxed) {
                         let _ = crate::notifications::notify_finished(
                             &config_snapshot,
                             &user_request,
@@ -884,21 +1193,162 @@ impl TuiApp {
                         )
                         .await;
                     }
-                    if let Some(file) = generated_file {
-                        let _ = action_tx.send(Action::AddGeneratedFile(tab_id, file));
-                    }
                 }
                 Ok(_) => {}
                 Err(err) => {
-                    let message = format!("Provider request failed: {err}");
+                    let message = redactions.redact(&format!("Provider request failed: {err}"));
                     let _ = action_tx.send(Action::UpdateStatus(message.clone()));
-                    let _ = action_tx.send(Action::StreamResponse(tab_id, assistant_idx, message));
+                    let final_message =
+                        Message::new(conversation_id, "assistant".to_string(), message);
+                    #[cfg(feature = "memory")]
+                    let final_message = {
+                        let mut message = final_message;
+                        let _ = crate::memory::set_activities(&mut message, &memory_activities);
+                        message
+                    };
+                    let _ = action_tx.send(Action::FinalizeAssistantMessage(
+                        crate::app::action::AssistantFinalization {
+                            request_id: submission_id,
+                            message: final_message,
+                            generated_file:
+                                crate::app::action::GeneratedFileFinalization::NotRequested,
+                        },
+                    ));
+                    let _ = action_tx.send(Action::SubmissionFailedAfterLaunch(
+                        app_tab_id,
+                        submission_id,
+                    ));
                 }
             }
-            let _ = action_tx.send(Action::StopStream(tab_id));
         });
+        if let Some(request) = self.requests.get_mut(&submission_id) {
+            request.abort = Some(handle.abort_handle());
+        }
+        self.track_background_task(handle);
+
+        self.transition_submission(app_tab_id, crate::app::submission::SubmissionState::launch)?;
+        self.discard_pending_documents();
+        if completed_vault_mutation {
+            self.ui.pending_vault_mutation = None;
+        }
 
         Ok(())
+    }
+
+    pub(crate) fn cancel_pending_vault_mutation(&mut self) -> color_eyre::Result<()> {
+        let Some(pending) = self.ui.pending_vault_mutation.take() else {
+            return Ok(());
+        };
+        if !pending.can_cancel() {
+            self.ui.pending_vault_mutation = Some(pending);
+            return Err(color_eyre::eyre::eyre!(
+                "confirmed Vault mutation cannot be cancelled"
+            ));
+        }
+        if pending.is_workspace() {
+            return Ok(());
+        }
+        let app_tab_id = self.input_context_id();
+        self.transition_submission(
+            app_tab_id,
+            crate::app::submission::SubmissionState::return_to_draft,
+        )?;
+        self.pending_documents
+            .insert(app_tab_id, pending.submission.documents().clone());
+        self.replace_input_content(pending.submission.instruction().to_owned());
+        Ok(())
+    }
+
+    pub(crate) async fn confirm_pending_vault_mutation(&mut self) -> color_eyre::Result<()> {
+        use crate::app::submission::VaultMutationConfirmationState;
+        use crate::app::vault_mutation_execute::VaultMutationExecutionError;
+
+        let mut pending = self
+            .ui
+            .pending_vault_mutation
+            .take()
+            .ok_or_else(|| color_eyre::eyre::eyre!("Vault mutation preview is unavailable"))?;
+        match &pending.state {
+            VaultMutationConfirmationState::CompletedAwaitingChat { .. } => {
+                let instruction = pending.submission.instruction().to_owned();
+                self.ui.pending_vault_mutation = Some(pending);
+                return self.send_message(instruction).await;
+            }
+            VaultMutationConfirmationState::RecoveryRequired {
+                recovery_status, ..
+            } => {
+                let error = color_eyre::eyre::eyre!(recovery_status.clone());
+                self.ui.pending_vault_mutation = Some(pending);
+                return Err(error);
+            }
+            VaultMutationConfirmationState::Reviewing { .. }
+            | VaultMutationConfirmationState::ReadyForExecution
+            | VaultMutationConfirmationState::ExecutionFailed { .. } => {}
+        }
+        let data_root = crate::storage::paths::TcuiDataPaths::discover().root;
+        if matches!(
+            pending.state,
+            VaultMutationConfirmationState::Reviewing { .. }
+        ) {
+            if let Err(error) = pending.confirm(&data_root) {
+                self.ui.pending_vault_mutation = Some(pending);
+                return Err(error.into());
+            }
+            if !pending.is_workspace() {
+                let app_tab_id = self.input_context_id();
+                self.transition_submission(
+                    app_tab_id,
+                    crate::app::submission::SubmissionState::confirm,
+                )?;
+            }
+        }
+        let changes = crate::app::vault_mutation_execute::affected_paths(&pending.kind);
+        let targets = match self.ui.vault_workspaces.mutation_targets(&changes) {
+            Ok(targets) => targets,
+            Err(error) => {
+                let message = error.to_string();
+                pending.state = VaultMutationConfirmationState::ExecutionFailed {
+                    error: message.clone(),
+                };
+                self.ui.pending_vault_mutation = Some(pending);
+                return Err(color_eyre::eyre::eyre!(message));
+            }
+        };
+        match crate::app::vault_mutation_execute::execute(&pending.kind, &data_root) {
+            Ok(submission) => {
+                let _ = self.ui.vault_workspaces.refresh_mutation_targets(&targets);
+                if pending.is_workspace() {
+                    self.ui.show_toast("Vault file moved".to_string());
+                    return Ok(());
+                }
+                let operation_id = submission.operation_id().to_owned();
+                pending.state = VaultMutationConfirmationState::CompletedAwaitingChat {
+                    operation_id,
+                    submission,
+                };
+                let instruction = pending.submission.instruction().to_owned();
+                self.ui.pending_vault_mutation = Some(pending);
+                self.send_message(instruction).await
+            }
+            Err(VaultMutationExecutionError::Failed { message }) => {
+                pending.state = VaultMutationConfirmationState::ExecutionFailed {
+                    error: message.to_owned(),
+                };
+                self.ui.pending_vault_mutation = Some(pending);
+                Err(color_eyre::eyre::eyre!(message))
+            }
+            Err(VaultMutationExecutionError::RecoveryRequired { operation_id }) => {
+                let recovery_status = format!(
+                    "Recovery required for operation {operation_id}; restart TCUI to retry native recovery"
+                );
+                pending.state = VaultMutationConfirmationState::RecoveryRequired {
+                    operation_id,
+                    recovery_status: recovery_status.clone(),
+                };
+                self.ui.pending_vault_mutation = Some(pending);
+                Err(color_eyre::eyre::eyre!(recovery_status))
+            }
+        }
     }
 
     async fn dispatch_mouse_click(&mut self, action: MouseClickAction) -> color_eyre::Result<()> {
@@ -919,22 +1369,31 @@ impl TuiApp {
                 Ok(())
             }
             MouseClickAction::ToggleRightHandle => {
+                if self.ui.ephemeral.is_some() {
+                    return self.close_ephemeral();
+                }
                 self.ui.panel_state.toggle_right();
                 self.ui.artifact_sidebar_open =
                     self.ui.panel_state.right != crate::tui::shell::PanelMode::Closed;
                 Ok(())
             }
             MouseClickAction::CloseRightSidebar => {
+                self.close_ephemeral()?;
                 self.ui.panel_state.right = crate::tui::shell::PanelMode::Closed;
                 self.ui.artifact_sidebar_open = false;
                 Ok(())
             }
             MouseClickAction::SetRightSidebarThin => {
+                self.close_ephemeral()?;
                 self.ui.panel_state.right = crate::tui::shell::PanelMode::Thin;
                 self.ui.artifact_sidebar_open = true;
                 Ok(())
             }
             MouseClickAction::OpenProviderDropdown => {
+                if self.ui.visible_providers.is_empty() {
+                    self.open_credential_manager(false);
+                    return Ok(());
+                }
                 if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
                     tab.provider_dropdown_open = !tab.provider_dropdown_open;
                     tab.model_dropdown_open = false;
@@ -960,17 +1419,10 @@ impl TuiApp {
             return Ok(());
         };
         settings.select(index, &catalog);
-        let selected_id = settings
-            .selected_setting(&catalog)
-            .map(|setting| setting.id);
         match settings.enter(&catalog) {
-            crate::tui::settings_panel::EnterResult::OpenKeybind {
-                action_id,
-                action_label,
-            } => {
-                self.ui.keybind_capture = Some(
-                    crate::tui::keybind_capture::KeybindCaptureState::new(action_id, action_label),
-                );
+            crate::tui::settings_panel::EnterResult::NavigateSetting(id) => {
+                self.ui.settings_v2 = None;
+                self.open_settings_page(Some(id));
             }
             crate::tui::settings_panel::EnterResult::RunCommand(id) => {
                 if let Some(action) = crate::tui::settings_panel::command_action(id) {
@@ -978,32 +1430,7 @@ impl TuiApp {
                     self.action_tx.send(action).ok();
                 }
             }
-            crate::tui::settings_panel::EnterResult::SelectTheme(theme) => {
-                self.apply_theme_selection(theme)?;
-            }
-            crate::tui::settings_panel::EnterResult::SelectToastPosition(position) => {
-                self.apply_toast_position_selection(position)?;
-            }
-            crate::tui::settings_panel::EnterResult::ToggledBool => match selected_id {
-                Some("web_search") => {
-                    self.toggle_web_search().await?;
-                    let state = if self.ui.web_search_enabled {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    };
-                    self.ui
-                        .toast_stack
-                        .push_message(format!("Web Search {state}"), self.ui.frame_tick);
-                }
-                Some("collapse_thinking") => {
-                    self.toggle_collapse_thinking()?;
-                }
-                _ => {}
-            },
-            crate::tui::settings_panel::EnterResult::Nothing
-            | crate::tui::settings_panel::EnterResult::EnteredSubsection
-            | crate::tui::settings_panel::EnterResult::RequestConfirm => {}
+            crate::tui::settings_panel::EnterResult::Nothing => {}
         }
         Ok(())
     }

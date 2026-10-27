@@ -1,3 +1,5 @@
+use std::future::Future;
+
 use tokio::net::TcpListener;
 use tokio::time::Instant;
 
@@ -74,6 +76,40 @@ impl LoopbackCallback {
 
     pub(crate) fn redirect_uri(&self) -> &RedirectUri {
         &self.redirect_uri
+    }
+
+    /// Accepts a browser callback or a pasted final redirect URL under the same deadline.
+    pub(crate) async fn receive_with_redirect(
+        self,
+        cancellation: &OAuthCancellation,
+        input: impl Future<Output = Result<zeroize::Zeroizing<String>, OAuthError>>,
+    ) -> Result<AuthorizationCode, OAuthError> {
+        let redirect_uri = self.redirect_uri.clone();
+        let state = self.expected_state.clone();
+        let deadline = OperationDeadline::new(self.deadline, OAuthError::CallbackTimeout);
+        let pasted = async {
+            let value = input.await?;
+            if value.len() > 4096 {
+                return Err(OAuthError::HeadlessInputTooLarge);
+            }
+            match state {
+                Some(state) => {
+                    super::headless::parse_redirect_url(value.trim(), &redirect_uri, &state)
+                }
+                None => {
+                    super::headless::parse_redirect_url_without_state(value.trim(), &redirect_uri)
+                }
+            }
+        };
+        deadline
+            .race(cancellation, async {
+                tokio::select! {
+                    biased;
+                    result = pasted => result,
+                    result = self.receive(cancellation) => result,
+                }
+            })
+            .await?
     }
 
     pub(crate) async fn receive(

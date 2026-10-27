@@ -2,6 +2,11 @@ use super::*;
 use ratatui::layout::Rect;
 use std::sync::Mutex;
 
+mod chat_file_sidebar;
+mod insert_to_chat;
+mod model_catalog;
+mod vault_workspace_ui;
+
 fn env_lock() -> &'static Mutex<()> {
     crate::test_support::env_lock()
 }
@@ -14,32 +19,78 @@ fn unique_temp_dir(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("tcui-{label}-{}-{nanos}", std::process::id()))
 }
 
-pub(super) fn with_test_app(label: &str, test: impl FnOnce(&mut TuiApp)) {
-    with_test_app_config(label, AppConfig::default(), test);
+pub(crate) fn with_test_app(label: &str, test: impl FnOnce(&mut TuiApp)) {
+    let mut config = AppConfig {
+        providers: crate::config::app_config::provider_presets(),
+        ..AppConfig::default()
+    };
+    config.providers.push(crate::config::ProviderConfig {
+        name: "Ollama".into(),
+        endpoint: "http://127.0.0.1:9".into(),
+        env_var: String::new(),
+        backend_type: "openai".into(),
+        auth_type: "api_key".into(),
+    });
+    with_test_app_config(label, config, test);
 }
 
-fn with_test_app_config(label: &str, config: AppConfig, test: impl FnOnce(&mut TuiApp)) {
+struct AppFixtureEnvironment {
+    root: std::path::PathBuf,
+    previous: [(&'static str, Option<std::ffi::OsString>); 4],
+}
+
+impl Drop for AppFixtureEnvironment {
+    fn drop(&mut self) {
+        let _ = crate::protection::lock();
+        for (name, value) in &self.previous {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+pub(crate) fn with_test_app_config(label: &str, config: AppConfig, test: impl FnOnce(&mut TuiApp)) {
     let _guard = env_lock().lock().expect("env lock poisoned");
     let root = unique_temp_dir(label);
     let data_home = root.join("data-home");
     let config_home = root.join("config-home");
+    let cache_home = root.join("cache-home");
+    let home = root.join("home");
+    let _environment = AppFixtureEnvironment {
+        root,
+        previous: ["XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "HOME"]
+            .map(|name| (name, std::env::var_os(name))),
+    };
     std::fs::create_dir_all(&data_home).expect("create data dir");
     std::fs::create_dir_all(&config_home).expect("create config dir");
+    std::fs::create_dir_all(&cache_home).expect("create cache dir");
+    std::fs::create_dir_all(&home).expect("create home dir");
     std::env::set_var("XDG_DATA_HOME", &data_home);
     std::env::set_var("XDG_CONFIG_HOME", &config_home);
+    std::env::set_var("XDG_CACHE_HOME", &cache_home);
+    std::env::set_var("HOME", &home);
 
     let storage = Storage::new().expect("create storage");
+    if !config.providers.is_empty() {
+        crate::config::KeyStore::set_storage_preference(
+            &config,
+            crate::config::key_store::CredentialStorage::Plaintext,
+        )
+        .expect("select fixture credential storage");
+        for provider in &config.providers {
+            crate::config::KeyStore::set(&config, &provider.name, "fixture-api-key")
+                .expect("save fixture provider credential");
+        }
+    }
     let mut app = TuiApp::new(
         storage,
         Arc::new(tokio::sync::RwLock::new(config)),
         Arc::new(LlmClient::new()),
-        None,
     );
     test(&mut app);
-
-    std::fs::remove_dir_all(&root).expect("cleanup temp dir");
-    std::env::remove_var("XDG_DATA_HOME");
-    std::env::remove_var("XDG_CONFIG_HOME");
 }
 
 #[test]
@@ -149,55 +200,9 @@ fn mouse_wheel_over_sidebar_reaches_bottom_conversation() {
 }
 
 #[test]
-fn top_bar_add_control_opens_placeholder_tab() {
-    with_test_app("app-tab-add", |app| {
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24))
-            .expect("test terminal");
-        terminal
-            .draw(|frame| app.ui.render(frame))
-            .expect("render top bar");
-        let add_area = app
-            .ui
-            .mouse_hit_areas
-            .iter()
-            .find_map(|(area, action)| {
-                matches!(action, crate::ui::MouseAction::AppTabAdd).then_some(*area)
-            })
-            .expect("app tab add hit area");
-
-        let action = app.handle_mouse_click(add_area.x, add_area.y);
-
-        assert!(action.is_none());
-        assert_eq!(
-            app.ui.app_tabs.active_view(),
-            crate::ui::app_tabs::AppView::Placeholder { number: 1 }
-        );
-    });
-}
-
-#[test]
-fn ctrl_t_creates_visible_placeholder_without_changing_chat_sessions() {
-    with_test_app("app-tab-shortcut", |app| {
-        let chat_session_count = app.ui.tabs.len();
-
-        let action = app.handle_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('t'),
-            crossterm::event::KeyModifiers::CONTROL,
-        ));
-
-        assert!(action.is_none());
-        assert_eq!(app.ui.tabs.len(), chat_session_count);
-        assert_eq!(
-            app.ui.app_tabs.active_view(),
-            crate::ui::app_tabs::AppView::Placeholder { number: 1 }
-        );
-    });
-}
-
-#[test]
 fn ctrl_w_closes_placeholder_but_never_chat_app_tab() {
     with_test_app("app-tab-close-shortcut", |app| {
-        app.ui.app_tabs.add_placeholder();
+        app.ui.app_tabs.add_launcher();
 
         app.handle_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char('w'),
@@ -268,7 +273,7 @@ fn focus_input_command_restores_chat_focus_from_sidebar() {
 #[test]
 fn focus_input_command_returns_placeholder_to_chat() {
     with_test_app("focus-input-placeholder", |app| {
-        app.ui.app_tabs.add_placeholder();
+        app.ui.app_tabs.add_launcher();
         app.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
         for c in "focus input".chars() {
             app.handle_key(crossterm::event::KeyEvent::new(
@@ -347,10 +352,10 @@ fn mouse_wheel_moves_open_list_popup_before_settings() {
 }
 
 #[test]
-fn slash_routes_keep_vault_and_remove_local() {
+fn slash_routes_keep_vault_search_and_remove_local() {
     with_test_app("slash-routes", |app| {
         // Given
-        app.ui.tabs[0].input_content = "/vault release notes".to_string();
+        app.ui.tabs[0].input_content = "/vault-search release notes".to_string();
 
         // When
         let vault_action = app.handle_key(crossterm::event::KeyEvent::new(
@@ -388,7 +393,7 @@ fn skills_popup_labels_description_and_origin_but_inserts_only_name() {
             .iter()
             .find(|item| item.label.starts_with("@save "))
             .expect("save skill");
-        assert!(save.label.contains("Markdown artifact"));
+        assert!(save.label.contains("persistent Markdown"));
         assert!(save.label.contains("[built-in]"));
         assert_eq!(
             save.action,
@@ -425,6 +430,13 @@ fn settings_panel_search_accepts_space_key() {
 fn settings_panel_tab_toggles_descriptions_without_changing_search() {
     with_test_app("settings-description-toggle", |app| {
         app.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
+        let area = Rect::new(0, 0, 100, 40);
+        let before = app
+            .ui
+            .settings_v2
+            .as_ref()
+            .expect("settings panel")
+            .popup_area(area);
 
         let action = app.handle_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Tab,
@@ -433,7 +445,7 @@ fn settings_panel_tab_toggles_descriptions_without_changing_search() {
 
         assert!(action.is_none());
         let panel = app.ui.settings_v2.as_ref().expect("settings panel");
-        assert!(panel.descriptions_visible());
+        assert!(panel.popup_area(area).width > before.width);
         assert_eq!(panel.query(), "");
     });
 }
@@ -559,69 +571,6 @@ fn local_media_sources_finds_file_links_and_skips_duplicates() {
 }
 
 #[test]
-fn find_artifact_searches_all_catalogs() {
-    with_test_app("find-artifact", |app| {
-        // Given
-        let root = unique_temp_dir("artifact-catalog");
-        let saved = root.join("saved.md");
-        let memory = root.join("memory.md");
-        let vault_root = root.join("vault");
-        let vault_file = vault_root.join("notes/vault.md");
-        std::fs::create_dir_all(vault_file.parent().expect("vault parent"))
-            .expect("create vault dirs");
-        std::fs::write(&saved, "# Saved").expect("write saved artifact");
-        std::fs::write(&memory, "# Memory").expect("write memory artifact");
-        std::fs::write(&vault_file, "# Vault").expect("write vault artifact");
-
-        let temporary = crate::ui::artifact_sidebar::ArtifactEntry::temp_markdown(
-            42,
-            "temp.md".to_string(),
-            "# Temp".to_string(),
-        );
-        let saved_entry = crate::ui::artifact_sidebar::ArtifactEntry::saved_file(saved.clone());
-        let memory_entry = crate::ui::artifact_sidebar::ArtifactEntry::memory_file(
-            std::path::PathBuf::from("memory.md"),
-            "Memory note".to_string(),
-            "# Memory".to_string(),
-            memory,
-        );
-        let vault_entry =
-            crate::ui::artifact_sidebar::ArtifactEntry::vault_file(&vault_root, &vault_file);
-
-        app.ui.tabs[app.ui.active_tab]
-            .temporary_artifacts
-            .push(temporary.clone());
-        app.ui.saved_artifacts.push(saved_entry.clone());
-        app.ui.memory_artifacts.push(memory_entry.clone());
-        app.ui.vault_artifacts.push(vault_entry.clone());
-
-        // When / Then
-        assert_eq!(
-            app.find_artifact(&temporary.handle)
-                .map(|artifact| artifact.name),
-            Some("temp.md".to_string())
-        );
-        assert_eq!(
-            app.find_artifact(&saved_entry.handle)
-                .map(|artifact| artifact.name),
-            Some("saved.md".to_string())
-        );
-        assert_eq!(
-            app.find_artifact(&memory_entry.handle)
-                .map(|artifact| artifact.name),
-            Some("Memory note".to_string())
-        );
-        assert_eq!(
-            app.find_artifact(&vault_entry.handle)
-                .map(|artifact| artifact.name),
-            Some("notes/vault.md".to_string())
-        );
-
-        std::fs::remove_dir_all(root).expect("cleanup artifact catalog");
-    });
-}
-
-#[test]
 fn startup_uses_saved_default_provider_and_model() {
     let _guard = env_lock().lock().expect("env lock poisoned");
     let root = unique_temp_dir("startup-defaults");
@@ -644,26 +593,31 @@ default_model = "deepseek-v4-flash"
     .expect("write config");
 
     let storage = Storage::new().expect("create storage");
+    let mut config = AppConfig::load().expect("load config");
+    config.providers = crate::config::app_config::provider_presets();
+    crate::config::KeyStore::set_storage_preference(
+        &config,
+        crate::config::key_store::CredentialStorage::Plaintext,
+    )
+    .expect("select fixture credential storage");
+    crate::config::KeyStore::set(&config, "OpenCode Go", "fixture-api-key")
+        .expect("save configured provider credential");
 
     let mut app = TuiApp::new(
         storage,
-        Arc::new(tokio::sync::RwLock::new(
-            AppConfig::load().expect("load config"),
-        )),
+        Arc::new(tokio::sync::RwLock::new(config)),
         Arc::new(LlmClient::new()),
-        None,
     );
 
     assert_eq!(app.ui.tabs[0].tab.provider, "OpenCode Go");
     assert_eq!(app.ui.tabs[0].tab.model, "deepseek-v4-flash");
     app.ui.settings_v2 = Some(crate::tui::settings_panel::SettingsPanelState::new());
-    assert!(matches!(
-        app.handle_key(crossterm::event::KeyEvent::new(
+    assert!(app
+        .handle_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Esc,
             crossterm::event::KeyModifiers::NONE,
-        )),
-        None
-    ));
+        ))
+        .is_none());
     assert!(app.ui.settings_v2.is_none());
 
     std::fs::remove_dir_all(&root).expect("cleanup temp dir");
@@ -673,7 +627,10 @@ default_model = "deepseek-v4-flash"
 
 #[test]
 fn startup_uses_migrated_codex_provider_from_storage() {
-    let mut config = AppConfig::default();
+    let mut config = AppConfig {
+        providers: crate::config::app_config::provider_presets(),
+        ..AppConfig::default()
+    };
     let codex = config
         .providers
         .iter_mut()
@@ -731,7 +688,6 @@ selected_model = "llama3.1"
             AppConfig::load().expect("load config"),
         )),
         Arc::new(LlmClient::new()),
-        None,
     );
 
     assert!(app
@@ -751,54 +707,53 @@ selected_model = "llama3.1"
 }
 
 #[test]
-fn startup_expands_tilde_vault_path_with_spaces_and_trailing_slash() {
+fn startup_ignores_legacy_external_vault_path_without_importing_or_mutating_notes() {
     let _guard = env_lock().lock().expect("env lock poisoned");
-    let root = unique_temp_dir("startup-vault-tilde");
+    let root = unique_temp_dir("startup-native-vault");
     let home = root.join("home");
     let data_home = root.join("data-home");
     let config_home = root.join("config-home");
-    let vault = home.join("Documents/Obsidian Vault");
-    std::fs::create_dir_all(&vault).expect("create vault dir");
-    std::fs::create_dir_all(&data_home).expect("create data dir");
-    std::fs::create_dir_all(&config_home).expect("create config dir");
-    std::fs::create_dir_all(config_home.join("tcui")).expect("create tcui config dir");
-    std::fs::write(vault.join("index.md"), "# Index").expect("write vault note");
-    std::env::set_var("HOME", &home);
-    std::env::set_var("XDG_DATA_HOME", &data_home);
-    std::env::set_var("XDG_CONFIG_HOME", &config_home);
-
+    let cache_home = root.join("cache-home");
+    let _environment = AppFixtureEnvironment {
+        root,
+        previous: ["XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "HOME"]
+            .map(|name| (name, std::env::var_os(name))),
+    };
+    let external = home.join("Documents/External Vault");
+    std::fs::create_dir_all(&external).expect("create external directory");
+    std::fs::create_dir_all(config_home.join("tcui")).expect("create config directory");
+    std::fs::create_dir_all(&data_home).expect("create data directory");
+    std::fs::create_dir_all(&cache_home).expect("create cache directory");
+    std::fs::write(external.join("index.md"), b"external note").expect("write external sentinel");
+    for (name, path) in [
+        ("HOME", &home),
+        ("XDG_DATA_HOME", &data_home),
+        ("XDG_CONFIG_HOME", &config_home),
+        ("XDG_CACHE_HOME", &cache_home),
+    ] {
+        std::env::set_var(name, path);
+    }
     std::fs::write(
-        config_home.join("tcui").join("config.toml"),
-        "vault_path = \"~/Documents/Obsidian Vault/\"\n",
+        config_home.join("tcui/config.toml"),
+        "vault_path = \"~/Documents/External Vault/\"\n",
     )
-    .expect("write config");
+    .expect("write legacy config");
 
-    let storage = Storage::new().expect("create storage");
-    let config = AppConfig::load().expect("load config");
-    let vault_handle = config.vault_path.as_ref().and_then(|path| {
-        let expanded = crate::app::generated_file::expand_user_path(
-            std::path::Path::new(path),
-            dirs::home_dir().as_deref(),
-        );
-        let vault = crate::obsidian::Vault::new(expanded);
-        vault.exists().then(|| Arc::new(vault))
-    });
-
+    let config = AppConfig::load().expect("load migrated config");
     let app = TuiApp::new(
-        storage,
+        Storage::new().expect("create storage"),
         Arc::new(tokio::sync::RwLock::new(config)),
         Arc::new(LlmClient::new()),
-        vault_handle,
     );
 
-    assert!(app.vault.is_some());
-    assert_eq!(app.ui.vault_artifacts.len(), 1);
-    assert_eq!(app.ui.vault_artifacts[0].name, "index.md");
-
-    std::fs::remove_dir_all(&root).expect("cleanup temp dir");
-    std::env::remove_var("HOME");
-    std::env::remove_var("XDG_DATA_HOME");
-    std::env::remove_var("XDG_CONFIG_HOME");
+    assert_eq!(
+        std::fs::read(external.join("index.md")).expect("external note retained"),
+        b"external note"
+    );
+    assert!(!crate::protection::internal_vault_root()
+        .join("index.md")
+        .exists());
+    drop(app);
 }
 
 #[test]
@@ -1047,7 +1002,7 @@ fn send_message_without_tokio_runtime_returns_error_without_persisting_or_queuei
 
         // When
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            app.send_message("Hello from test".to_string())
+            futures::executor::block_on(app.send_message("Hello from test".to_string()))
         }));
 
         // Then
@@ -1070,11 +1025,18 @@ fn send_message_creates_conversation_and_saves_user_message() {
     with_test_app("send-message", |app| {
         // Given
         let initial_conversation = app.ui.tabs[0].active_conversation;
+        app.ui.tabs[0].tab.provider = "Ollama".to_string();
+        app.ui.tabs[0].tab.endpoint = Some("http://127.0.0.1:9".to_string());
+        app.ui.tabs[0].tab.model = "send-message-test".to_string();
+        #[cfg(feature = "memory")]
+        {
+            app.config.blocking_write().memory.enabled = false;
+        }
         let runtime = tokio::runtime::Runtime::new().expect("create runtime");
 
         // When
         runtime
-            .block_on(async { app.send_message("Hello from test".to_string()) })
+            .block_on(async { app.send_message("Hello from test".to_string()).await })
             .expect("send message");
 
         // Then
@@ -1098,25 +1060,34 @@ fn send_message_creates_conversation_and_saves_user_message() {
 }
 
 #[test]
-fn slash_remindme_is_handled_without_model_streaming() {
-    with_test_app("slash-remindme", |app| {
-        std::env::set_var("TCUI_REMINDER_SYSTEMD_RUN", "true");
-        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+fn generate_title_preserves_word_and_length_limits() {
+    for (content, expected) in [
+        (" \t\n ", "New Chat"),
+        ("  one \t two\nthree  ", "one two three"),
+        ("a b c d e", "a b c d e"),
+        ("a b c d e f", "a b c d e..."),
+        ("1234567890123456", "1234567890123456"),
+        ("12345678901234567", "1234567890123456..."),
+    ] {
+        assert_eq!(TuiApp::generate_title(content), expected, "{content:?}");
+    }
+}
 
-        runtime
-            .block_on(async { app.send_message("/remindme in 10m | Stretch".to_string()) })
-            .expect("schedule reminder");
-
-        let tab = &app.ui.tabs[0];
-        assert_eq!(tab.messages.len(), 2);
-        assert_eq!(tab.messages[0].role, "user");
-        assert_eq!(tab.messages[1].role, "assistant");
-        assert!(tab.messages[1]
-            .content
-            .contains("Scheduled one-shot reminder"));
-
-        std::env::remove_var("TCUI_REMINDER_SYSTEMD_RUN");
-    });
+#[test]
+fn generate_title_truncates_unicode_only_at_character_boundaries() {
+    for (content, expected) in [
+        ("東京の会話", "東京の会話"),
+        ("123456789012345é", "123456789012345é"),
+        ("123456789012345éx", "123456789012345é..."),
+        ("東京 你好 café naïve", "東京 你好 café naïve"),
+        (
+            "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+            "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀...",
+        ),
+        ("一 二 三 四 五 六", "一 二 三 四 五..."),
+    ] {
+        assert_eq!(TuiApp::generate_title(content), expected, "{content:?}");
+    }
 }
 
 #[test]
@@ -1163,7 +1134,6 @@ fn startup_loads_persisted_conversation_history() {
         storage,
         Arc::new(tokio::sync::RwLock::new(AppConfig::default())),
         Arc::new(LlmClient::new()),
-        None,
     );
 
     assert_eq!(app.ui.tabs[0].active_conversation, conversation_id);
@@ -1221,7 +1191,6 @@ fn closing_active_chat_deletes_it_and_loads_the_next_persisted_conversation() {
         storage,
         Arc::new(tokio::sync::RwLock::new(AppConfig::default())),
         Arc::new(LlmClient::new()),
-        None,
     );
     assert_eq!(app.ui.tabs[0].active_conversation, second);
 
@@ -1573,27 +1542,25 @@ fn move_input_cursor_respects_content_bounds() {
 }
 
 #[test]
-fn refresh_vault_artifacts_uses_configured_path_without_runtime_vault() {
+fn refresh_vault_artifacts_uses_only_native_vault() {
     let _guard = env_lock().lock().expect("env lock poisoned");
     let root = unique_temp_dir("configured-vault-sidebar");
     let data_home = root.join("data-home");
     let config_home = root.join("config-home");
-    let vault = root.join("My Vault");
     std::fs::create_dir_all(&data_home).expect("create data dir");
     std::fs::create_dir_all(&config_home).expect("create config dir");
-    std::fs::create_dir_all(&vault).expect("create vault dir");
-    std::fs::write(vault.join("note.md"), "# Note").expect("write vault note");
     std::env::set_var("XDG_DATA_HOME", &data_home);
     std::env::set_var("XDG_CONFIG_HOME", &config_home);
+    let vault = crate::protection::internal_vault_root();
+    std::fs::create_dir_all(&vault).expect("create native Vault");
+    std::fs::write(vault.join("note.md"), "# Note").expect("write native note");
 
-    let mut config = AppConfig::default();
-    config.vault_path = Some(vault.to_string_lossy().to_string());
+    let config = AppConfig::default();
     let storage = Storage::new().expect("create storage");
     let mut app = TuiApp::new(
         storage,
         Arc::new(tokio::sync::RwLock::new(config)),
         Arc::new(crate::llm::LlmClient::new()),
-        None,
     );
 
     app.refresh_vault_artifacts();
@@ -1608,24 +1575,32 @@ fn refresh_vault_artifacts_uses_configured_path_without_runtime_vault() {
 
 #[cfg(feature = "memory")]
 #[test]
-fn refresh_memory_artifacts_expands_tilde_vault_path() {
+fn refresh_memory_artifacts_uses_independent_store_and_preserves_external_files() {
     let _guard = env_lock().lock().expect("env lock poisoned");
-    let root = unique_temp_dir("memory-tilde-vault");
+    let root = unique_temp_dir("memory-independent-vault");
     let home = root.join("home");
     let data_home = root.join("data-home");
     let config_home = root.join("config-home");
+    let cache_home = root.join("cache-home");
+    let previous = ["HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"]
+        .map(|name| (name, std::env::var_os(name)));
     let vault = home.join("Documents/My Vault");
     std::fs::create_dir_all(&vault).expect("create vault dir");
+    std::fs::write(
+        vault.join("preferences.md"),
+        b"external note is not a memory",
+    )
+    .expect("external sentinel");
     std::fs::create_dir_all(&data_home).expect("create data dir");
     std::fs::create_dir_all(&config_home).expect("create config dir");
     std::fs::create_dir_all(config_home.join("tcui")).expect("create tcui config dir");
     std::env::set_var("HOME", &home);
     std::env::set_var("XDG_DATA_HOME", &data_home);
     std::env::set_var("XDG_CONFIG_HOME", &config_home);
+    std::env::set_var("XDG_CACHE_HOME", &cache_home);
 
     let mut config = AppConfig::default();
     config.memory.enabled = true;
-    config.vault_path = Some("~/Documents/My Vault/".to_string());
     config.save().expect("save config");
 
     let storage = Storage::new().expect("create storage");
@@ -1633,77 +1608,46 @@ fn refresh_memory_artifacts_expands_tilde_vault_path() {
         storage,
         Arc::new(tokio::sync::RwLock::new(config)),
         Arc::new(crate::llm::LlmClient::new()),
-        None,
     );
 
-    let store =
-        crate::memory::MemoryStore::open(&vault, &crate::memory::MemoryStore::default_cache_path())
-            .expect("open memory store");
+    let store = crate::memory::MemoryStore::open_default().expect("open independent memory store");
     store
-        .remember("User prefers dark mode for coding.")
+        .write(
+            std::path::Path::new("preferences.md"),
+            "User prefers dark mode for coding.",
+            false,
+        )
         .expect("save memory");
 
-    app.refresh_memory_artifacts();
-
-    assert_eq!(app.ui.memory_artifacts.len(), 1);
+    app.refresh_memory_artifacts()
+        .expect("refresh memory catalog");
+    let entry = &app.ui.memory_artifacts[0];
+    let handle = entry.handle.clone();
+    app.insert_artifact_to_chat(handle);
+    let snapshot = app
+        .pending_documents_mut()
+        .iter()
+        .next()
+        .expect("selected native memory");
+    assert!(matches!(
+        snapshot.context_reference(),
+        Some(crate::app::submission::ContextReference::Memory(_))
+    ));
+    assert!(snapshot
+        .content()
+        .contains("User prefers dark mode for coding."));
     assert_eq!(
-        app.ui.memory_artifacts[0].content.as_deref(),
-        Some("User prefers dark mode for coding.")
+        std::fs::read(vault.join("preferences.md")).expect("external file unchanged"),
+        b"external note is not a memory"
     );
+    drop(store);
+    drop(app);
 
     std::fs::remove_dir_all(&root).expect("cleanup temp dir");
-    std::env::remove_var("HOME");
-    std::env::remove_var("XDG_DATA_HOME");
-    std::env::remove_var("XDG_CONFIG_HOME");
-}
-
-#[cfg(feature = "memory")]
-#[tokio::test]
-async fn refresh_artifact_sidebar_action_populates_memory_artifacts() {
-    let _guard = env_lock().lock().expect("env lock poisoned");
-    let root = unique_temp_dir("memory-sidebar");
-    let data_home = root.join("data-home");
-    let config_home = root.join("config-home");
-    let vault = root.join("vault");
-    std::fs::create_dir_all(&data_home).expect("create data dir");
-    std::fs::create_dir_all(&config_home).expect("create config dir");
-    std::fs::create_dir_all(&vault).expect("create vault dir");
-    std::env::set_var("XDG_DATA_HOME", &data_home);
-    std::env::set_var("XDG_CONFIG_HOME", &config_home);
-
-    let mut config = AppConfig::default();
-    config.memory.enabled = true;
-    config.vault_path = Some(vault.to_string_lossy().to_string());
-    config.save().expect("save config");
-
-    let storage = Storage::new().expect("create storage");
-    let mut app = TuiApp::new(
-        storage,
-        Arc::new(tokio::sync::RwLock::new(config)),
-        Arc::new(crate::llm::LlmClient::new()),
-        Some(Arc::new(crate::obsidian::Vault::new(vault.clone()))),
-    );
-
-    let store =
-        crate::memory::MemoryStore::open(&vault, &crate::memory::MemoryStore::default_cache_path())
-            .expect("open memory store");
-    store
-        .remember("User prefers Rust for systems work.")
-        .expect("save memory");
-
-    assert!(app.ui.memory_artifacts.is_empty());
-
-    app.dispatch(Action::RefreshArtifactSidebar)
-        .await
-        .expect("dispatch refresh");
-
-    assert_eq!(app.ui.memory_artifacts.len(), 1);
-    assert_eq!(
-        app.ui.memory_artifacts[0].content.as_deref(),
-        Some("User prefers Rust for systems work.")
-    );
-
-    std::fs::remove_dir_all(&root).expect("cleanup temp dir");
-    std::env::remove_var("XDG_DATA_HOME");
-    std::env::remove_var("XDG_CONFIG_HOME");
+    for (name, previous) in previous {
+        match previous {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
 }

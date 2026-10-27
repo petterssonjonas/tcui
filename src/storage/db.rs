@@ -3,10 +3,8 @@ use crate::app::message::Message;
 use color_eyre::Result;
 use rusqlite::{params, types::Type, Connection};
 
-use crate::storage::chat_store::{ChatDocument, ChatStore};
-use crate::storage::crypto::{
-    decrypt_shared_text_with_key, encrypt_shared_text_with_key, SharedKey,
-};
+use crate::storage::chat_store::{ChatDocument, ChatLineage, ChatStore};
+use crate::storage::crypto::SharedKey;
 use crate::storage::paths::TcuiDataPaths;
 
 pub type ProviderRow = (String, String, String, String, String);
@@ -26,17 +24,8 @@ pub struct Storage {
 }
 
 impl Storage {
-    pub(crate) fn encrypt_shared_text(plaintext: &str) -> Result<String> {
-        let shared_key = SharedKey::load_or_create_default(&TcuiDataPaths::discover())?;
-        Ok(encrypt_shared_text_with_key(&shared_key.key, plaintext)?)
-    }
-
-    pub(crate) fn decrypt_shared_text(stored: &str) -> Result<String> {
-        let shared_key = SharedKey::load_or_create_default(&TcuiDataPaths::discover())?;
-        Ok(decrypt_shared_text_with_key(&shared_key.key, stored)?)
-    }
-
     pub fn new() -> Result<Self> {
+        crate::protection::require(crate::protection::Domain::Chats)?;
         let paths = TcuiDataPaths::discover();
         paths.ensure_layout()?;
         let conn = Connection::open(&paths.database)?;
@@ -59,11 +48,17 @@ impl Storage {
             "ALTER TABLE models ADD COLUMN supported_reasoning_efforts TEXT NOT NULL DEFAULT '[]'",
             [],
         );
-        let shared_key = SharedKey::load_or_create_default(&paths)?;
-        Self::from_parts(conn, paths, shared_key.key, shared_key.created_default_key)
+        let (shared_key, created_default_key) = if crate::protection::configured()? {
+            (None, false)
+        } else {
+            let loaded = SharedKey::load_or_create_default(&paths)?;
+            (Some(loaded.key), loaded.created_default_key)
+        };
+        Self::from_parts(conn, paths, shared_key, created_default_key)
     }
 
     pub fn new_with_key(shared_key: SharedKey) -> Result<Self> {
+        crate::protection::require(crate::protection::Domain::Chats)?;
         let paths = TcuiDataPaths::discover();
         paths.ensure_layout()?;
         let conn = Connection::open(&paths.database)?;
@@ -86,23 +81,25 @@ impl Storage {
             "ALTER TABLE models ADD COLUMN supported_reasoning_efforts TEXT NOT NULL DEFAULT '[]'",
             [],
         );
-        Self::from_parts(conn, paths, shared_key, false)
+        Self::from_parts(conn, paths, Some(shared_key), false)
     }
 
     fn from_parts(
         mut conn: Connection,
         paths: TcuiDataPaths,
-        shared_key: SharedKey,
+        shared_key: Option<SharedKey>,
         created_default_key: bool,
     ) -> Result<Self> {
-        let chat_store = ChatStore::new(paths.clone(), shared_key.clone());
+        let chat_store = match shared_key {
+            Some(key) => ChatStore::new(paths, key),
+            None => ChatStore::managed(paths),
+        };
         chat_store.archive_legacy_chats(&mut conn)?;
         let storage = Self {
             conn,
             chat_store,
             created_default_key,
         };
-        storage.seed_providers()?;
         if let Ok(config) = crate::config::AppConfig::load() {
             let _ = storage.sync_providers(&config.providers);
         }
@@ -115,18 +112,6 @@ impl Storage {
 
     pub fn chat_key_path() -> std::path::PathBuf {
         TcuiDataPaths::discover().chat_key
-    }
-
-    fn seed_providers(&self) -> Result<()> {
-        for (name, endpoint, env_var, backend_type, auth_type) in
-            crate::config::AppConfig::default().provider_entries()
-        {
-            self.conn.execute(
-                "INSERT OR IGNORE INTO providers (name, endpoint, env_var, backend_type, auth_type) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![name, endpoint, env_var, backend_type, auth_type],
-            )?;
-        }
-        Ok(())
     }
 
     pub fn save_message(&self, msg: &Message) -> Result<i64> {
@@ -143,6 +128,57 @@ impl Storage {
 
     pub fn create_conversation(&self, tab_id: i64) -> Result<i64> {
         self.chat_store.create_conversation(tab_id)
+    }
+
+    pub(crate) fn chat_reader(&self) -> ChatStore {
+        self.chat_store.clone()
+    }
+
+    pub(crate) fn read_chat_document(&self, conversation_id: i64) -> Result<ChatDocument> {
+        self.chat_store.read_document(conversation_id)
+    }
+
+    pub(crate) fn conversation_exists(&self, conversation_id: i64) -> Result<bool> {
+        self.chat_store.conversation_exists(conversation_id)
+    }
+
+    pub(crate) fn create_conversation_snapshot(
+        &self,
+        tab_id: i64,
+        title: &str,
+        messages: &[Message],
+    ) -> Result<i64> {
+        Ok(self
+            .chat_store
+            .create_snapshot(tab_id, title, messages, None)?
+            .id)
+    }
+
+    pub(crate) fn create_ephemeral_conversation(
+        &self,
+        tab_id: i64,
+        parent_id: i64,
+        title: &str,
+        messages: &[Message],
+    ) -> Result<i64> {
+        self.chat_store.create_ephemeral_snapshot(
+            tab_id,
+            title,
+            messages,
+            ChatLineage::from_messages(parent_id, messages),
+        )
+    }
+
+    pub(crate) fn fork_conversation(
+        &self,
+        tab_id: i64,
+        source_conversation_id: i64,
+        title: &str,
+        messages: &[Message],
+    ) -> Result<ChatDocument> {
+        let parent = ChatLineage::from_messages(source_conversation_id, messages);
+        self.chat_store
+            .create_snapshot(tab_id, title, messages, Some(parent))
     }
 
     pub fn get_conversations(&self, tab_id: i64) -> Result<Vec<ConversationEntry>> {
@@ -320,6 +356,7 @@ impl Storage {
     }
 
     pub fn get_models(&self, provider: &str) -> Result<Vec<ModelRow>> {
+        // Codex discovery order is backend priority; other catalogs stay alphabetical.
         let mut stmt = self.conn.prepare(
             "SELECT
                 model_id,
@@ -330,7 +367,7 @@ impl Storage {
                 supported_reasoning_efforts
              FROM models
              WHERE provider = ?1
-             ORDER BY model_id",
+             ORDER BY CASE WHEN provider = 'Codex' THEN rowid END, model_id",
         )?;
         let rows = stmt.query_map([provider], |row| {
             let encoded_efforts = row.get::<_, String>(5)?;
@@ -458,7 +495,7 @@ mod tests {
     use super::*;
     use crate::storage::chat_store::ChatDocument;
     use crate::storage::crypto::{read_encrypted_document, SharedKey};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
     fn env_lock() -> &'static Mutex<()> {
@@ -597,10 +634,15 @@ mod tests {
         std::fs::create_dir_all(&data_home).expect("create data dir");
         std::env::set_var("XDG_DATA_HOME", &data_home);
 
+        let key = SharedKey::load_or_create_default(&TcuiDataPaths::discover())
+            .expect("legacy key")
+            .key;
         let encrypted_content =
-            Storage::encrypt_shared_text("hello from sqlite").expect("encrypt legacy content");
+            crate::storage::crypto::encrypt_shared_text_with_key(&key, "hello from sqlite")
+                .expect("encrypt legacy content");
         let encrypted_thinking =
-            Storage::encrypt_shared_text("sqlite thinking").expect("encrypt thinking");
+            crate::storage::crypto::encrypt_shared_text_with_key(&key, "sqlite thinking")
+                .expect("encrypt thinking");
         let database_path = data_home.join("tcui").join("tcui.db");
         if let Some(parent) = database_path.parent() {
             std::fs::create_dir_all(parent).expect("create db parent");
@@ -834,18 +876,20 @@ mod tests {
             chat_store: ChatStore::new(paths, shared_key),
             created_default_key: false,
         };
-        storage.seed_providers().expect("seed providers");
+        storage
+            .sync_providers(&crate::config::app_config::provider_presets())
+            .expect("configure provider fixtures");
         (storage, root)
     }
 
-    fn chat_path(data_home: &PathBuf, conversation_id: i64) -> PathBuf {
+    fn chat_path(data_home: &Path, conversation_id: i64) -> PathBuf {
         data_home
             .join("tcui")
             .join("chats")
             .join(format!("{:016x}.tcui-chat", conversation_id as u64))
     }
 
-    fn trash_chat_path(data_home: &PathBuf, conversation_id: i64) -> PathBuf {
+    fn trash_chat_path(data_home: &Path, conversation_id: i64) -> PathBuf {
         data_home
             .join("tcui")
             .join("chats")
@@ -853,3 +897,7 @@ mod tests {
             .join(format!("{:016x}.tcui-chat", conversation_id as u64))
     }
 }
+
+#[cfg(test)]
+#[path = "ephemeral_tests.rs"]
+mod ephemeral_tests;

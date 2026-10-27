@@ -24,6 +24,11 @@ impl TestEnvironment {
         let original_path = std::env::var_os("PATH");
         std::env::set_var("HOME", &root);
         std::env::set_var("XDG_DATA_HOME", root.join("data"));
+        crate::config::KeyStore::initialize_vault(
+            &crate::config::AppConfig::default(),
+            "codex fixture password",
+        )
+        .map_err(std::io::Error::other)?;
         Ok(Self {
             root,
             original_data_home,

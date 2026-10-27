@@ -2,7 +2,7 @@ use super::{KeyStoreError, CURRENT_STORE_VERSION};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct StoredKeysFile {
     #[serde(default = "current_store_version")]
@@ -32,13 +32,6 @@ pub(super) enum LoadedKeysFile {
 }
 
 impl LoadedKeysFile {
-    pub(super) fn keys(&self) -> &BTreeMap<String, String> {
-        match self {
-            Self::Current(file) => &file.keys,
-            Self::Future(file) => &file.keys,
-        }
-    }
-
     pub(super) fn into_current(self) -> std::result::Result<StoredKeysFile, KeyStoreError> {
         match self {
             Self::Current(file) => Ok(file),
@@ -59,8 +52,6 @@ struct StoreVersion {
 pub(super) struct FutureStoredKeysFile {
     #[serde(default = "current_store_version")]
     version: u32,
-    #[serde(default)]
-    keys: BTreeMap<String, String>,
 }
 
 pub(super) fn parse(content: &str) -> std::result::Result<LoadedKeysFile, KeyStoreError> {

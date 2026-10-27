@@ -18,6 +18,16 @@ use crate::llm::auth::oauth::{oauth_cancellation, BrowserLauncher, OAuthError};
 #[tokio::test]
 async fn native_browser_login_persists_encrypted_account_scoped_credential(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    native_login_round_trip(false).await
+}
+
+#[tokio::test]
+async fn native_pasted_callback_exchanges_pkce_and_persists_without_loopback_request(
+) -> Result<(), Box<dyn std::error::Error>> {
+    native_login_round_trip(true).await
+}
+
+async fn native_login_round_trip(paste: bool) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
         .expect("environment lock poisoned");
@@ -49,14 +59,36 @@ async fn native_browser_login_persists_encrypted_account_scoped_credential(
     };
     let (browser, authorization_url) = RecordingBrowser::new();
     let (cancellation, _) = oauth_cancellation();
+    let (response_tx, response_rx) = oneshot::channel();
     let task = tokio::spawn(async move {
         adapter
-            .login_browser(&config, &browser, &cancellation)
+            .login_browser(&config, &browser, &cancellation, async {
+                response_rx.await.map_err(|_| OAuthError::Cancelled)
+            })
             .await
     });
 
     let authorization_url = authorization_url.await?;
-    send_authorization_callback(&authorization_url).await?;
+    if paste {
+        let mut response = authorization_url
+            .query_pairs()
+            .find(|(key, _)| key == "redirect_uri")
+            .map(|(_, value)| reqwest::Url::parse(&value))
+            .ok_or("missing redirect URI")??;
+        let state = authorization_url
+            .query_pairs()
+            .find(|(key, _)| key == "state")
+            .map(|(_, value)| value.into_owned())
+            .ok_or("missing state")?;
+        response
+            .query_pairs_mut()
+            .extend_pairs([("code", "native-code"), ("state", state.as_str())]);
+        assert!(response_tx
+            .send(zeroize::Zeroizing::new(response.to_string()))
+            .is_ok());
+    } else {
+        send_authorization_callback(&authorization_url).await?;
+    }
     let credential = task.await??;
     let request = token_server.await??;
 
@@ -67,6 +99,26 @@ async fn native_browser_login_persists_encrypted_account_scoped_credential(
         .query_pairs()
         .any(|(key, value)| key == "id_token_add_organizations" && value == "true"));
     assert!(request.contains("grant_type=authorization_code"));
+    let body = request
+        .split_once("\r\n\r\n")
+        .ok_or("token request body missing")?
+        .1;
+    let parameters: std::collections::HashMap<_, _> =
+        reqwest::Url::parse(&format!("http://fixture.invalid/?{body}"))?
+            .query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+    let verifier = super::oauth::PkceVerifier::parse(
+        parameters
+            .get("code_verifier")
+            .ok_or("PKCE verifier missing")?,
+    )?;
+    let challenge = authorization_url
+        .query_pairs()
+        .find(|(key, _)| key == "code_challenge")
+        .map(|(_, value)| value.into_owned())
+        .ok_or("PKCE challenge missing")?;
+    assert_eq!(verifier.s256_challenge().as_str(), challenge);
     assert_eq!(credential.source(), CodexCredentialSource::TcuiNative);
     assert_eq!(credential.account_id(), Some("native-account"));
     let stored = KeyStore::get_oauth(
@@ -89,9 +141,13 @@ async fn native_browser_login_persists_encrypted_account_scoped_credential(
     assert_eq!(stored.account_id.as_deref(), Some("native-account"));
     assert_eq!(stored.ownership, OAuthCredentialOwnership::Tcui);
     assert_eq!(stored.source, OAuthCredentialSource::NativeOAuth);
-    let raw_store = std::fs::read_to_string(environment.root.join("config/tcui/keys.toml"))?;
-    assert!(!raw_store.contains("native-access"));
-    assert!(!raw_store.contains("native-refresh"));
+    let raw_store = std::fs::read(environment.root.join("data/tcui/tcui.db"))?;
+    assert!(!raw_store
+        .windows(b"native-access".len())
+        .any(|window| window == b"native-access"));
+    assert!(!raw_store
+        .windows(b"native-refresh".len())
+        .any(|window| window == b"native-refresh"));
     Ok(())
 }
 

@@ -38,7 +38,7 @@ async fn openrouter_chat_keeps_existing_attribution_headers(
         reasoning_effort: None,
         supported_reasoning_efforts: Vec::new(),
         backend_type: "openrouter".to_owned(),
-        api_key: None,
+        api_key: Some("saved-key".to_owned()),
         system_prompt: String::new(),
         messages: vec![Message::new(1, "user".to_owned(), "hello".to_owned())],
     };
@@ -81,7 +81,8 @@ async fn openrouter_model_fetch_keeps_existing_headers_and_parsing(
     });
 
     // When
-    let models = fetch_models("OpenRouter", &endpoint, None, "openrouter").await;
+    let credential = crate::llm::auth::Credential::api_key_for_test("OpenRouter", "saved-key");
+    let models = fetch_models("OpenRouter", &endpoint, Some(&credential), "openrouter").await;
     let captured = receiver.await?;
     server.await??;
 
@@ -115,4 +116,63 @@ async fn read_http_request(stream: &mut tokio::net::TcpStream) -> io::Result<Str
             });
         }
     }
+}
+
+#[tokio::test]
+async fn model_discovery_never_makes_an_unauthenticated_cloud_request(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("http://{}", listener.local_addr()?);
+    assert!(fetch_models("OpenRouter", &endpoint, None, "openrouter")
+        .await
+        .is_empty());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), listener.accept())
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn anthropic_sdk_model_discovery_uses_console_key_headers(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("http://{}", listener.local_addr()?);
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await?;
+        let captured = read_http_request(&mut stream).await?;
+        let body = r#"{"data":[{"id":"claude-sonnet-4-6"}]}"#;
+        stream.write_all(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len(),
+        ).as_bytes()).await?;
+        Ok::<_, std::io::Error>(captured)
+    });
+    let credential =
+        crate::llm::auth::Credential::api_key_for_test("Anthropic", "saved-console-key");
+    let models = fetch_models("Anthropic", &endpoint, Some(&credential), "anthropic_sdk").await;
+    assert_eq!(models[0].id, "claude-sonnet-4-6");
+    let headers = server.await??.to_ascii_lowercase();
+    assert!(headers.contains("x-api-key: saved-console-key"));
+    assert!(headers.contains("anthropic-version: 2023-06-01"));
+    assert!(!headers.contains("authorization:"));
+    Ok(())
+}
+
+#[test]
+fn cloud_chat_rejects_missing_saved_credentials_before_transport() {
+    let request = ChatRequest {
+        provider: "OpenRouter".to_owned(),
+        endpoint: "https://openrouter.ai/api/v1".to_owned(),
+        model: "example/model".to_owned(),
+        reasoning_effort: None,
+        supported_reasoning_efforts: Vec::new(),
+        backend_type: "openrouter".to_owned(),
+        api_key: None,
+        system_prompt: String::new(),
+        messages: vec![Message::new(1, "user".to_owned(), "hello".to_owned())],
+    };
+    let error = crate::llm::chat::prepare_chat_request(request).unwrap_err();
+    assert!(error.to_string().contains("/connect"));
 }

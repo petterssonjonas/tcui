@@ -33,80 +33,56 @@ impl QuitConfirmModal {
     pub fn render(&self, f: &mut Frame) -> QuitConfirmAreas {
         let theme = crate::theme::active_theme();
         let area = f.area();
-        let popup_area = Self::centered_rect(40, 20, area);
-
-        f.render_widget(
-            Block::default().style(Style::default().bg(Color::Black)),
-            area,
+        let width = area.width.saturating_sub(4).min(76);
+        let height = area.height.min(9);
+        let popup_area = Rect::new(
+            area.x + area.width.saturating_sub(width) / 2,
+            area.y + area.height.saturating_sub(height) / 2,
+            width,
+            height,
         );
-
-        let block = Block::default().style(Style::default().bg(theme.panel));
-
-        let text = vec![
-            Line::from(""),
-            Line::from(self.message.clone()).alignment(Alignment::Center),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled(
-                    " [Y]es ",
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("     "),
-                Span::styled(" [N]o ", Style::default().fg(Color::Red)),
-            ])
-            .alignment(Alignment::Center),
-            Line::from(""),
-        ];
-
         f.render_widget(Clear, popup_area);
-        f.render_widget(block, popup_area);
         f.render_widget(
-            Paragraph::new(Line::from(format!(" {} ", self.title)))
-                .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            Rect::new(popup_area.x, popup_area.y, popup_area.width, 1),
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {} ", self.title))
+                .border_style(Style::default().fg(theme.warning))
+                .style(theme.panel_style()),
+            popup_area,
         );
-
-        let content_area = Rect::new(
-            popup_area.x,
-            popup_area.y + 1,
-            popup_area.width,
-            popup_area.height.saturating_sub(1),
+        let content = popup_area.inner(Margin::new(2, 1));
+        f.render_widget(
+            Paragraph::new(self.message.as_str())
+                .wrap(Wrap { trim: true })
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(theme.foreground)),
+            Rect::new(
+                content.x,
+                content.y,
+                content.width,
+                content.height.saturating_sub(2),
+            ),
         );
-        let paragraph = Paragraph::new(text).alignment(Alignment::Center);
-        f.render_widget(paragraph, content_area);
-
-        let yes_width = 7u16;
-        let no_width = 6u16;
-        let gap = 5u16;
-        let total_width = yes_width + gap + no_width;
-        let start_x = popup_area.x + (popup_area.width.saturating_sub(total_width)) / 2;
-        let button_y = popup_area.y + 4;
-
+        let yes_width = 7_u16;
+        let no_width = 6_u16;
+        let gap = 5_u16;
+        let start_x =
+            popup_area.x + popup_area.width.saturating_sub(yes_width + gap + no_width) / 2;
+        let button_y = popup_area.bottom().saturating_sub(2);
         let yes = Rect::new(start_x, button_y, yes_width, 1);
         let no = Rect::new(start_x + yes_width + gap, button_y, no_width, 1);
-
+        f.render_widget(
+            Paragraph::new(" [Y]es ").style(
+                Style::default()
+                    .fg(theme.warning)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            yes,
+        );
+        f.render_widget(
+            Paragraph::new(" [N]o ").style(Style::default().fg(theme.accent)),
+            no,
+        );
         QuitConfirmAreas { yes, no }
-    }
-
-    fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-        let popup_layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage((100 - percent_y) / 2),
-                Constraint::Percentage(percent_y),
-                Constraint::Percentage((100 - percent_y) / 2),
-            ])
-            .split(r);
-
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage((100 - percent_x) / 2),
-                Constraint::Percentage(percent_x),
-                Constraint::Percentage((100 - percent_x) / 2),
-            ])
-            .split(popup_layout[1])[1]
     }
 }

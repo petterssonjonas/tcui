@@ -2,17 +2,58 @@
 use crate::app::Message;
 
 #[derive(Debug, Clone)]
+pub(crate) enum GeneratedFileFinalization {
+    NotRequested,
+    Ready(crate::app::GeneratedFile),
+    Invalid,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AssistantFinalization {
+    pub(crate) request_id: crate::app::submission::SubmissionId,
+    pub(crate) message: Message,
+    pub(crate) generated_file: GeneratedFileFinalization,
+}
+
+#[derive(Debug, Clone)]
 pub enum Action {
     Quit,
     ConfirmQuit,
     CancelModal,
     SendMessage(String),
-    StreamResponse(usize, usize, String),
-    StreamThinking(usize, usize, String),
+    ForkConversation,
+    OpenEphemeral,
+    CloseEphemeral,
+    FocusChatPane(usize),
+    CancelRequest,
+    SteerRequest(String),
+    QueuePendingDocument(crate::app::submission::PendingDocumentInput),
+    InsertArtifactToChat(crate::ui::artifact_sidebar::ArtifactHandle),
+    RemovePendingDocument(crate::app::submission::PendingDocumentId),
+    ConfirmPendingDocumentDiscard,
+    ConfirmChatDraftExport,
+    ConfirmProtectedContext,
+    SaveResourceEditor,
+    CopyResourceEditor,
+    OpenNativeTransfer(crate::protection::Domain),
+    AwaitSubmissionConfirmation(crate::ui::app_tabs::AppTabId),
+    ConfirmSubmission(crate::ui::app_tabs::AppTabId),
+    CancelVaultMutation,
+    ConfirmVaultMutation,
+    SubmissionFailedAfterLaunch(
+        crate::ui::app_tabs::AppTabId,
+        crate::app::submission::SubmissionId,
+    ),
+    StreamResponse(crate::app::submission::SubmissionId, String),
+    StreamThinking(crate::app::submission::SubmissionId, String),
     #[cfg(feature = "memory")]
-    SetMemoryActivities(usize, usize, Vec<crate::memory::MemoryActivity>),
-    FinalizeAssistantMessage(usize, usize, Message),
-    StopStream(usize),
+    SetMemoryActivities(
+        crate::app::submission::SubmissionId,
+        Vec<crate::memory::MemoryActivity>,
+    ),
+    FinalizeAssistantMessage(AssistantFinalization),
+    StopStream(crate::app::submission::SubmissionId),
+    PersistHostActionReceipts(crate::app::submission::SubmissionId),
     AddMessage(usize, Message),
     AddGeneratedFile(usize, crate::app::GeneratedFile),
     LoadConversation(i64),
@@ -21,7 +62,6 @@ pub enum Action {
     UpdateStatus(String),
     ShowToast(String),
     SetConnectionState(crate::ui::status_bar::ConnectionStatus, Option<String>),
-    SetTitle(String),
     SwitchTab(usize),
     AddTab(crate::app::Tab),
     RemoveTab(usize),
@@ -50,7 +90,16 @@ pub enum Action {
     UpdateTabProvider(usize, String),
     UpdateTabModel(usize, String),
     SetProviderModels(String, Vec<crate::ui::ModelInfo>),
-    SaveApiKey(String, String),
+    OpenProviders,
+    OpenCredentialVault,
+    OpenSecurity,
+    UnlockApplication,
+    LockApplication,
+    OpenSearchCredentials,
+    OpenPushoverCredential {
+        application: bool,
+    },
+    SetManualModel(String),
     MouseClick(MouseClickAction),
     SaveGeneratedFile,
     SaveExportDialog,
@@ -64,8 +113,23 @@ pub enum Action {
     RefreshArtifactSidebar,
     OpenCommandPalette,
     OpenSettingsPanel,
+    OpenSettingsPage(String),
+    ApplySetting {
+        id: String,
+        value: String,
+    },
+    SaveSettings {
+        draft: Option<(String, String)>,
+    },
+    OpenTerminal,
+    ApproveCommandReview,
+    TransferCommandReview,
     SetPinnedCommands(Vec<String>),
     ToggleCollapseThinking,
+    OpenVaultLauncher,
+    #[cfg(feature = "memory")]
+    OpenMemoriesLauncher,
+    CopyArtifact(crate::ui::artifact_sidebar::ArtifactHandle),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

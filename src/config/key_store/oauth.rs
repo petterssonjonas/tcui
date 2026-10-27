@@ -98,17 +98,6 @@ pub enum KeyStoreError {
     Read,
     #[error("credential store path is unsafe")]
     UnsafePath,
-    #[error("credential store parent changed during write")]
-    ParentChanged,
-    #[cfg_attr(
-        unix,
-        expect(
-            dead_code,
-            reason = "The fail-closed persistence path is constructed only on unsupported platforms."
-        )
-    )]
-    #[error("credential store persistence is unsupported on this platform")]
-    UnsupportedPlatform,
     #[error("credential store could not be parsed")]
     Parse,
     #[error("credential store version {version} is unsupported")]
@@ -117,14 +106,10 @@ pub enum KeyStoreError {
     Serialize,
     #[error("credential store could not be written")]
     Write,
-    #[error("credential store could not be synchronized")]
-    Sync,
     #[error("local encryption key is unavailable")]
     KeyAccess,
     #[error("OAuth credential is invalid")]
     InvalidCredential,
-    #[error("OAuth credential could not be encrypted")]
-    OauthEncrypt,
     #[error("OAuth credential could not be decrypted")]
     OauthDecrypt,
     #[error("OAuth credential payload is invalid")]
@@ -137,6 +122,20 @@ pub enum KeyStoreError {
     CredentialDecrypt,
     #[error("credential payload is invalid")]
     InvalidCredentialPayload,
+    #[error("credential vault is locked; unlock it with /vault")]
+    VaultLocked,
+    #[error("credential vault is not initialized")]
+    VaultNotInitialized,
+    #[error("credential vault is already initialized")]
+    VaultAlreadyInitialized,
+    #[error("vault password is empty")]
+    EmptyPassword,
+    #[error("choose a new password that differs from the current password")]
+    PasswordUnchanged,
+    #[error("vault password is incorrect or vault data was modified")]
+    VaultAuthentication,
+    #[error("legacy credential conflicts with an existing credential")]
+    MigrationConflict,
 }
 
 #[derive(Serialize, Deserialize)]

@@ -123,6 +123,7 @@ pub(super) async fn http_error(
     mut response: reqwest::Response,
     provider: &str,
     limits: TransportLimits,
+    token: Option<&str>,
 ) -> CodexTransportError {
     let status = response.status();
     let body = match read_error_body(&mut response, limits).await {
@@ -135,7 +136,7 @@ pub(super) async fn http_error(
     };
     let message = super::sse::response_error_message(&body)
         .unwrap_or_else(|| format!("Provider returned HTTP {status}"));
-    let message = crate::llm::auth::redact_secrets(&message);
+    let message = crate::llm::auth::redact_known_secret(&message, token);
     crate::diagnostics::provider_error(provider, &message);
     CodexTransportError::Http {
         status: status.into(),

@@ -298,6 +298,19 @@ fn push_ansi_color(sequence: &mut String, color: Color, foreground: bool) {
     }
 }
 
+fn tmux_allows_passthrough() -> bool {
+    Command::new("tmux")
+        .args(["show", "-Apv", "allow-passthrough"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|value| {
+            let value = value.trim();
+            value == "on" || value == "all"
+        })
+        .unwrap_or(false)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,18 +392,4 @@ mod tests {
         assert_eq!(sequence.matches("\x1b]66;").count(), 1);
         assert!(sequence.contains(heading));
     }
-}
-
-fn tmux_allows_passthrough() -> bool {
-    Command::new("tmux")
-        .args(["show", "-Apv", "allow-passthrough"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|value| {
-            let value = value.trim();
-            value == "on" || value == "all"
-        })
-        .unwrap_or(false)
 }
