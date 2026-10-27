@@ -25,6 +25,14 @@ pub(super) struct ConfigLock {
     _file: File,
 }
 
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        // A forked child can retain the open description until exec or exit.
+        // End the critical section now, not when every inherited copy closes.
+        let _ = self._file.unlock();
+    }
+}
+
 struct OwnedFile<'a> {
     directory: &'a Dir,
     name: String,
@@ -139,11 +147,12 @@ pub(super) fn acquire_lock(config_root: &Path) -> Result<ConfigLock> {
         }
         Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
     }
-    if !same_file(&directory, OsStr::new(LOCK_FILE), &file)? {
+    let guard = ConfigLock { _file: file };
+    if !same_file(&directory, OsStr::new(LOCK_FILE), &guard._file)? {
         return Err(eyre!("configuration lock changed while opening it"));
     }
     rustix::fs::fsync(&directory)?;
-    Ok(ConfigLock { _file: file })
+    Ok(guard)
 }
 
 fn parent_and_name(path: &Path) -> Result<(&Path, &OsStr)> {
@@ -350,6 +359,28 @@ pub(crate) enum TestFailurePoint {
 mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[test]
+    fn configuration_lock_releases_while_a_duplicated_descriptor_stays_open() {
+        let root = std::env::temp_dir().join(format!(
+            "tcui-config-lock-release-{:032x}",
+            rand::random::<u128>()
+        ));
+        let guard = acquire_lock(&root).expect("initial lock");
+        let inherited = guard._file.try_clone().expect("duplicate open description");
+        assert!(acquire_lock(&root)
+            .err()
+            .expect("a live guard excludes another writer")
+            .downcast_ref::<ConfigError>()
+            .is_some_and(|error| matches!(error, ConfigError::ConfigBusy { .. })));
+        drop(guard);
+        let next = acquire_lock(&root).expect("guard must release before every duplicate closes");
+        drop(inherited);
+        assert!(acquire_lock(&root).is_err());
+        drop(next);
+        assert!(acquire_lock(&root).is_ok());
+        std::fs::remove_dir_all(root).expect("remove lock fixture");
+    }
 
     #[test]
     fn exclusive_private_temporary_cleanup_preserves_a_replaced_path() {

@@ -1098,6 +1098,8 @@ Tests use temporary HOME/XDG directories while preserving Rust's tool and cache 
 Environment-mutating tests retain the shared environment lock until cleanup.
 Run their async work with `Runtime::block_on` from a synchronous test, keeping
 lock acquisition outside the async runtime.
+Configuration locks end with their guarded operation, even if a subprocess
+temporarily retains an inherited descriptor during startup.
 
 The `auth_cli` integration suite clears the inherited environment and uses private
 HOME/XDG directories, temporary provider/browser stand-ins, and loopback HTTP
