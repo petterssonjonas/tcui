@@ -9,6 +9,7 @@ use crate::ui::vault_workspace::VaultInputAction;
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum PendingVaultAction {
     Activate { launcher_id: AppTabId },
+    SelectTab { tab_id: AppTabId },
     CloseTab { tab_id: AppTabId },
 }
 
@@ -24,11 +25,23 @@ impl TuiApp {
             self.show_resource_error(crate::protection::Domain::Vault, error);
             return;
         }
-        if self.ui.app_tabs.active_view() == AppView::Launcher {
-            self.request_vault_action(PendingVaultAction::Activate {
-                launcher_id: self.ui.app_tabs.active_id(),
-            });
+        if let Some(tab_id) = self
+            .ui
+            .app_tabs
+            .tabs()
+            .iter()
+            .find(|tab| tab.view() == &AppView::Vault)
+            .map(|tab| tab.id())
+        {
+            self.request_vault_action(PendingVaultAction::SelectTab { tab_id });
+            return;
         }
+        if self.ui.app_tabs.active_view() != AppView::Launcher {
+            self.ui.app_tabs.add_launcher();
+        }
+        self.request_vault_action(PendingVaultAction::Activate {
+            launcher_id: self.ui.app_tabs.active_id(),
+        });
     }
 
     pub(crate) fn request_app_tab_close(&mut self, tab_id: AppTabId) {
@@ -122,6 +135,9 @@ impl TuiApp {
                 {
                     self.ui.show_toast(error.to_string());
                 }
+            }
+            PendingVaultAction::SelectTab { tab_id } => {
+                let _ = self.ui.app_tabs.select(tab_id);
             }
             PendingVaultAction::CloseTab { tab_id } => {
                 if self.ui.vault_workspaces.get(tab_id).is_some() {

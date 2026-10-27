@@ -327,7 +327,7 @@ fn plaintext_choice_stores_readable_chats_without_a_machine_key() {
     configure(ProtectionPolicy::default(), "").expect("choose plaintext");
     let storage = Storage::new().expect("open unprotected storage");
     let id = storage
-        .create_conversation_snapshot(1, "readable private title", &[])
+        .create_conversation_snapshot(1, "readable private title", &[], None)
         .expect("save chat");
     let path = environment
         .data()
@@ -364,7 +364,7 @@ fn protected_chats_require_password_even_with_the_old_machine_key() {
     .expect("protect chats");
     let storage = Storage::new().expect("open unlocked storage");
     let id = storage
-        .create_conversation_snapshot(2, "password-only title", &[])
+        .create_conversation_snapshot(2, "password-only title", &[], None)
         .expect("save protected chat");
     let path = environment
         .data()
@@ -410,7 +410,7 @@ fn app_entry_lock_blocks_content_even_when_at_rest_chat_protection_is_off() {
     .expect("configure app gate");
     let storage = Storage::new().expect("unlocked storage");
     let id = storage
-        .create_conversation_snapshot(1, "not encrypted at rest", &[])
+        .create_conversation_snapshot(1, "not encrypted at rest", &[], None)
         .expect("save");
     assert!(!is_protected(Domain::Chats).expect("chat policy"));
     lock().expect("lock entry");
@@ -839,7 +839,7 @@ fn password_enrollment_after_plaintext_setup_preserves_data_and_credential_choic
     let config = AppConfig::default();
     let storage = Storage::new().expect("plaintext storage");
     let id = storage
-        .create_conversation_snapshot(0, "keep this plaintext chat", &[])
+        .create_conversation_snapshot(0, "keep this plaintext chat", &[], None)
         .expect("chat");
     let path = environment
         .data()
@@ -1000,7 +1000,7 @@ fn explicit_decryption_can_read_encrypted_copies_after_managed_protection_is_dis
     .expect("protect chats");
     let storage = Storage::new().expect("open chats");
     let id = storage
-        .create_conversation_snapshot(1, "Archived conversation", &[])
+        .create_conversation_snapshot(1, "Archived conversation", &[], None)
         .expect("save chat");
     let archive = environment.root.join("archived.tcui-chat");
     std::fs::copy(

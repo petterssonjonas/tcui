@@ -197,39 +197,59 @@ fn insert_to_chat_remove_tab_waits_for_discard_confirmation() {
 }
 
 #[test]
-fn insert_to_chat_quit_cancel_preserves_and_confirm_drops_snapshots() {
-    let config = AppConfig {
-        quit_confirmation: false,
-        ..AppConfig::default()
-    };
-    with_test_app_config("insert-to-chat-discard-quit", config, |app| {
-        // Given
-        queue_document(app, "one", "one.md", b"discardable");
-        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+fn app_close_cancel_preserves_and_confirm_drops_pending_snapshots() {
+    for hide_document_context in [false, true] {
+        let config = AppConfig {
+            quit_confirmation: false,
+            ..AppConfig::default()
+        };
+        with_test_app_config("insert-to-chat-discard-quit", config, |app| {
+            queue_document(app, "one", "one.md", b"discardable");
+            let document_context = app.input_context_id();
+            if hide_document_context {
+                app.ui.app_tabs.add_launcher();
+            }
+            let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40))
+                .expect("terminal");
+            terminal.draw(|frame| app.ui.render(frame)).expect("render");
+            let close = app
+                .ui
+                .mouse_hit_areas
+                .iter()
+                .find_map(|(area, action)| {
+                    (*action == crate::ui::MouseAction::CloseApp).then_some(*area)
+                })
+                .expect("app close control");
 
-        // When: cancel
-        runtime
-            .block_on(app.dispatch(app.quit_action()))
-            .expect("show quit confirmation");
-        runtime
-            .block_on(app.dispatch(Action::CancelModal))
-            .expect("cancel quit");
+            let action = app.handle_mouse_click(close.x, close.y).expect("close app");
+            runtime
+                .block_on(app.dispatch(action))
+                .expect("show quit confirmation");
+            runtime
+                .block_on(app.dispatch(Action::CancelModal))
+                .expect("cancel quit");
 
-        // Then: snapshots remain
-        assert_eq!(app.pending_documents_mut().len(), 1);
-        assert_eq!(app.ui.tabs[0].pending_document_chips.len(), 1);
+            assert_eq!(app.pending_documents[&document_context].len(), 1);
+            assert_eq!(app.ui.tabs[0].pending_document_chips.len(), 1);
 
-        // When: confirm
-        runtime
-            .block_on(app.dispatch(app.quit_action()))
-            .expect("show quit confirmation again");
-        runtime
-            .block_on(app.dispatch(Action::ConfirmPendingDocumentDiscard))
-            .expect("confirm quit discard");
+            let action = app
+                .handle_mouse_click(close.x, close.y)
+                .expect("close app again");
+            runtime
+                .block_on(app.dispatch(action))
+                .expect("show quit confirmation again");
+            runtime
+                .block_on(app.dispatch(Action::ConfirmPendingDocumentDiscard))
+                .expect("confirm quit discard");
 
-        // Then: snapshots are gone and quit is queued
-        assert!(app.pending_documents_mut().is_empty());
-        assert!(app.ui.tabs[0].pending_document_chips.is_empty());
-        assert!(matches!(app.action_rx.try_recv(), Ok(Action::Quit)));
-    });
+            assert!(app.pending_documents.is_empty());
+            assert!(app
+                .ui
+                .tabs
+                .iter()
+                .all(|tab| tab.pending_document_chips.is_empty()));
+            assert!(matches!(app.action_rx.try_recv(), Ok(Action::Quit)));
+        });
+    }
 }

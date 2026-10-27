@@ -104,10 +104,28 @@ impl Default for TuiConfig {
 }
 
 impl TuiConfig {
-    /// Returns a copy with all numeric fields clamped to valid ranges.
+    /// Migrates legacy status widgets and clamps numeric fields to valid ranges.
     /// Called automatically at the deserialization boundary via
     /// `deserialize_tui` on the `AppConfig.tui` field.
-    pub fn resolve(self) -> Self {
+    pub fn resolve(mut self) -> Self {
+        if self
+            .status_widgets
+            .iter()
+            .any(|widget| widget.id == "web_search")
+        {
+            let mut migrated = false;
+            self.status_widgets
+                .retain_mut(|widget| match widget.id.as_str() {
+                    "provider" => false,
+                    "web_search" if !migrated => {
+                        widget.id = "provider".into();
+                        migrated = true;
+                        true
+                    }
+                    "web_search" => false,
+                    _ => true,
+                });
+        }
         Self {
             left_thin_width: self.left_thin_width.clamp(16, 48),
             left_wide_width: self.left_wide_width.clamp(32, 64),
@@ -137,6 +155,141 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_web_slot_replaces_provider_and_preserves_other_placements() {
+        let config: crate::config::AppConfig = toml::from_str(
+            r#"
+[tui]
+status_bar_rows = 2
+[[tui.status_widgets]]
+id = "provider"
+row = 1
+area = 2
+[[tui.status_widgets]]
+id = "model"
+row = 1
+area = 3
+[[tui.status_widgets]]
+id = "web_search"
+row = 2
+area = 5
+[[tui.status_widgets]]
+id = "context"
+row = 2
+area = 6
+[[tui.status_widgets]]
+id = "web_search"
+row = 1
+area = 1
+"#,
+        )
+        .expect("legacy config");
+        let placements: Vec<_> = config
+            .tui
+            .status_widgets
+            .iter()
+            .map(|widget| (widget.id.as_str(), widget.row, widget.area))
+            .collect();
+        assert_eq!(
+            placements,
+            vec![("model", 1, 3), ("provider", 2, 5), ("context", 2, 6)]
+        );
+        let serialized = toml::to_string(&config).expect("serialize migrated config");
+        assert!(!serialized.contains("id = \"web_search\""));
+        let restored: crate::config::AppConfig =
+            toml::from_str(&serialized).expect("reload migrated config");
+        assert_eq!(restored.tui, config.tui);
+    }
+
+    #[test]
+    fn legacy_web_migration_removes_provider_collisions_regardless_of_order() {
+        for provider_first in [false, true] {
+            let mut widgets = vec![
+                StatusWidgetPlacement {
+                    id: "web_search".into(),
+                    row: 2,
+                    area: 4,
+                },
+                StatusWidgetPlacement {
+                    id: "provider".into(),
+                    row: 2,
+                    area: 4,
+                },
+                StatusWidgetPlacement {
+                    id: "provider".into(),
+                    row: 1,
+                    area: 1,
+                },
+            ];
+            if provider_first {
+                widgets.reverse();
+            }
+            widgets.push(StatusWidgetPlacement {
+                id: "tools".into(),
+                row: 2,
+                area: 6,
+            });
+            let legacy = crate::config::AppConfig {
+                tui: TuiConfig {
+                    status_bar_rows: 2,
+                    status_widgets: widgets,
+                    ..TuiConfig::default()
+                },
+                ..crate::config::AppConfig::default()
+            };
+            let saved = toml::to_string(&legacy).expect("serialize legacy collisions");
+            let restored: crate::config::AppConfig =
+                toml::from_str(&saved).expect("migrate legacy collisions");
+            assert_eq!(
+                restored.tui.status_widgets,
+                vec![
+                    StatusWidgetPlacement {
+                        id: "provider".into(),
+                        row: 2,
+                        area: 4,
+                    },
+                    StatusWidgetPlacement {
+                        id: "tools".into(),
+                        row: 2,
+                        area: 6,
+                    },
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn layout_without_legacy_web_keeps_user_provider_position() {
+        let config: crate::config::AppConfig = toml::from_str(
+            r#"
+[[tui.status_widgets]]
+id = "context"
+row = 1
+area = 1
+[[tui.status_widgets]]
+id = "provider"
+row = 2
+area = 4
+"#,
+        )
+        .expect("custom config");
+        assert_eq!(
+            config.tui.status_widgets,
+            vec![
+                StatusWidgetPlacement {
+                    id: "context".into(),
+                    row: 1,
+                    area: 1,
+                },
+                StatusWidgetPlacement {
+                    id: "provider".into(),
+                    row: 2,
+                    area: 4,
+                },
+            ]
+        );
+    }
 
     #[test]
     fn default_produces_expected_values() {

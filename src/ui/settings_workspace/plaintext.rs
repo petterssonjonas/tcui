@@ -36,6 +36,17 @@ fn unescape(text: &str) -> Result<String, String> {
 pub(super) fn display(config: &Value, setting: &WorkspaceSetting) -> Result<String, String> {
     let value = get_value(config, setting.id);
     match setting.kind {
+        ValueKind::Structured if setting.id == "default_chat" => {
+            let selection: crate::config::ChatSelection =
+                serde_json::from_value(value.cloned().ok_or("Missing default chat selection")?)
+                    .map_err(|error| error.to_string())?;
+            Ok(format!(
+                "provider={}\nmodel={}\neffort={}",
+                selection.provider,
+                selection.model,
+                selection.effort.as_deref().unwrap_or("auto"),
+            ))
+        }
         ValueKind::Lines => Ok(value
             .and_then(Value::as_array)
             .into_iter()
@@ -111,6 +122,28 @@ pub(super) fn display(config: &Value, setting: &WorkspaceSetting) -> Result<Stri
 
 pub(super) fn serialized(setting: &WorkspaceSetting, text: &str) -> Result<String, String> {
     let value = match setting.kind {
+        ValueKind::Structured if setting.id == "default_chat" => {
+            let mut fields = serde_json::Map::new();
+            for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+                let (key, value) = line.split_once('=').ok_or(
+                    "Use provider=connection name, model=model ID and effort=auto, one per line",
+                )?;
+                let key = key.trim();
+                if !["provider", "model", "effort"].contains(&key) {
+                    return Err(format!("Unknown default chat field: {key}"));
+                }
+                let value = value.trim();
+                let value = if key == "effort" && value == "auto" {
+                    Value::Null
+                } else {
+                    Value::String(value.into())
+                };
+                if fields.insert(key.into(), value).is_some() {
+                    return Err(format!("Duplicate default chat field: {key}"));
+                }
+            }
+            Value::Object(fields)
+        }
         ValueKind::Lines if setting.id.starts_with("commands.") => Value::from(
             text.lines()
                 .map(str::trim)

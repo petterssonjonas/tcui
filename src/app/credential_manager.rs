@@ -1022,13 +1022,6 @@ impl TuiApp {
         updated
             .disabled_providers
             .retain(|name| !name.eq_ignore_ascii_case(&provider.name));
-        if !updated
-            .providers
-            .iter()
-            .any(|entry| entry.name.eq_ignore_ascii_case(&updated.default_provider))
-        {
-            updated.default_provider = provider.name.clone();
-        }
         updated
             .save()
             .map_err(|_| "Could not save provider configuration. Retry saving this connection.")?;
@@ -1235,13 +1228,6 @@ impl TuiApp {
                 updated
                     .disabled_providers
                     .retain(|name| name != &provider.name);
-                if updated.default_provider == provider.name {
-                    updated.default_provider = connected_providers(&updated)
-                        .first()
-                        .map(|p| p.name.clone())
-                        .unwrap_or_default();
-                    updated.default_model.clear();
-                }
                 updated
                     .save()
                     .map_err(|_| "Could not save provider removal. Please retry.")?;

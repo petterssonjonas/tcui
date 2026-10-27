@@ -45,6 +45,12 @@ impl TuiApp {
             .is_some_and(|documents| !documents.is_empty())
     }
 
+    pub(crate) fn has_any_pending_documents(&self) -> bool {
+        self.pending_documents
+            .values()
+            .any(|documents| !documents.is_empty())
+    }
+
     pub(crate) fn queue_pending_document(
         &mut self,
         input: PendingDocumentInput,
@@ -150,11 +156,23 @@ impl TuiApp {
         }
     }
 
+    pub(crate) fn discard_all_pending_documents(&mut self) {
+        self.pending_documents.clear();
+        for tab in &mut self.ui.tabs {
+            tab.pending_document_chips.clear();
+            tab.pending_document_chip_hit_areas.clear();
+        }
+    }
+
     pub(crate) fn request_pending_document_discard(
         &mut self,
         action: PendingDocumentDiscardAction,
     ) -> bool {
-        if !self.has_pending_documents() {
+        let has_documents = match action {
+            PendingDocumentDiscardAction::Quit => self.has_any_pending_documents(),
+            _ => self.has_pending_documents(),
+        };
+        if !has_documents {
             return false;
         }
         self.pending_document_discard_action = Some(action);
@@ -170,7 +188,10 @@ impl TuiApp {
         let Some(action) = self.pending_document_discard_action.take() else {
             return Ok(());
         };
-        self.discard_pending_documents();
+        match action {
+            PendingDocumentDiscardAction::Quit => self.discard_all_pending_documents(),
+            _ => self.discard_pending_documents(),
+        }
         self.ui.active_modal = None;
         match action {
             PendingDocumentDiscardAction::SecurityRestart(restart) => {

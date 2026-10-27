@@ -27,7 +27,6 @@ pub struct StatusBar {
     pub reasoning_effort: Option<String>,
     pub show_reasoning_selector: bool,
     pub show_selector: bool,
-    pub web_search_enabled: bool,
     pub context_window: Option<u32>,
     pub context_used_tokens: Option<u32>,
     pub config: StatusBarConfig,
@@ -35,7 +34,6 @@ pub struct StatusBar {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct StatusBarAreas {
-    pub web_search: Option<Rect>,
     pub provider: Option<Rect>,
     pub model: Option<Rect>,
     pub reasoning: Option<Rect>,
@@ -54,9 +52,22 @@ impl StatusBar {
         for placement in &self.config.widgets {
             let row = placement.row.clamp(1, rows);
             let area_idx = placement.area.clamp(1, 6);
-            let Some(slot) = slot_rect(area, row, area_idx) else {
+            let Some(mut slot) = slot_rect(area, row, area_idx) else {
                 continue;
             };
+            if placement.id == "provider" {
+                let next_start = self
+                    .config
+                    .widgets
+                    .iter()
+                    .filter(|next| next.row.clamp(1, rows) == row)
+                    .filter(|next| next.area.clamp(1, 6) > area_idx)
+                    .filter_map(|next| slot_rect(area, row, next.area.clamp(1, 6)))
+                    .map(|next| next.x)
+                    .min()
+                    .unwrap_or(area.right());
+                slot.width = next_start.saturating_sub(slot.x);
+            }
             self.render_widget(f, slot, placement.id.as_str(), &mut areas);
         }
         areas
@@ -70,7 +81,6 @@ impl StatusBar {
         areas: &mut StatusBarAreas,
     ) {
         match widget_id {
-            "web_search" => self.render_web_search(f, area, areas),
             "provider" => self.render_provider(f, area, areas),
             "model" => self.render_model(f, area, areas),
             "reasoning" => self.render_reasoning(f, area, areas),
@@ -80,21 +90,6 @@ impl StatusBar {
             "mcps" | "tools" => self.render_tools(f, area),
             _ => {}
         }
-    }
-
-    fn render_web_search(&self, f: &mut Frame, area: Rect, areas: &mut StatusBarAreas) {
-        let theme = crate::theme::active_theme();
-        let label = if self.web_search_enabled {
-            " web on "
-        } else {
-            " web off "
-        };
-        let color = if self.web_search_enabled {
-            theme.success
-        } else {
-            theme.muted
-        };
-        areas.web_search = render_control(f, area, label, color);
     }
 
     fn render_provider(&self, f: &mut Frame, area: Rect, areas: &mut StatusBarAreas) {

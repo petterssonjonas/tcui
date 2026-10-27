@@ -113,6 +113,7 @@ fn background_output_and_files_never_replace_the_displayed_conversation() {
                     Message::new(0, "user".into(), "unrelated question".into()),
                     Message::new(0, "assistant".into(), "unrelated answer".into()),
                 ],
+                None,
             )
             .expect("create other conversation");
         app.load_conversation_into_tab(0, other)
@@ -177,7 +178,7 @@ fn explicit_destination_is_independent_and_each_chat_allows_one_request() {
         let origin = app.ui.tabs[0].active_conversation;
         let destination = app
             .storage
-            .create_conversation_snapshot(0, "Destination", &[])
+            .create_conversation_snapshot(0, "Destination", &[], None)
             .unwrap();
         let routed = register(app, origin, destination);
         let local = register(app, origin, origin);
@@ -295,6 +296,7 @@ fn removed_tab_recovers_without_using_the_replacement_tab_index() {
                 1,
                 "Other",
                 &[Message::new(0, "user".into(), "keep this".into())],
+                None,
             )
             .unwrap();
         app.load_conversation_into_tab(1, other).unwrap();
@@ -417,6 +419,88 @@ fn missing_destination_is_recovered_without_selecting_it_or_using_the_active_app
             source_before
         );
     });
+}
+
+#[test]
+fn recovered_requests_keep_captured_selection_through_registration_and_repeated_rerouting() {
+    for missing_at_registration in [false, true] {
+        with_test_app(
+            if missing_at_registration {
+                "request-selection-missing-registration"
+            } else {
+                "request-selection-deleted-destination"
+            },
+            |app| {
+                let selection = crate::config::ChatSelection {
+                    provider: "Ollama".into(),
+                    model: "request-only-model".into(),
+                    effort: Some("high".into()),
+                };
+                app.ui.tabs[0].tab.provider = selection.provider.clone();
+                app.ui.tabs[0].tab.model = selection.model.clone();
+                app.ui.tabs[0].tab.reasoning_effort = selection.effort.clone();
+                let origin = app.ui.tabs[0].active_conversation;
+                if missing_at_registration {
+                    app.storage.delete_conversation(origin).unwrap();
+                }
+                let id = register(app, origin, origin);
+                let registered = app.requests[&id].route.destination_conversation_id;
+                if missing_at_registration {
+                    assert_ne!(registered, origin);
+                    assert_eq!(
+                        app.storage
+                            .read_chat_document(registered)
+                            .unwrap()
+                            .selection,
+                        Some(selection.clone())
+                    );
+                }
+                app.append_request_content(id, "partial answer", false)
+                    .unwrap();
+                for replacement_id in [123, 456] {
+                    let previous = app.requests[&id].route.destination_conversation_id;
+                    // Replace the UI owner as well as its selection: recovery must update
+                    // routing identity without replacing the request's captured selection.
+                    app.ui.tabs[0].tab.id = Some(replacement_id);
+                    app.ui.tabs[0].tab.provider = "OpenAI".into();
+                    app.ui.tabs[0].tab.model = "different-visible-model".into();
+                    app.ui.tabs[0].tab.reasoning_effort = Some("low".into());
+                    app.storage.delete_conversation(previous).unwrap();
+                    app.ensure_request_destination(id).unwrap();
+                    let request = &app.requests[&id];
+                    let recovered = request.route.destination_conversation_id;
+                    assert_ne!(recovered, previous);
+                    assert_eq!(request.route.origin_conversation_id, origin);
+                    assert_eq!(request.owner.id, Some(replacement_id));
+                    assert_eq!(request.owner.provider, selection.provider);
+                    assert_eq!(request.owner.model, selection.model);
+                    assert_eq!(request.owner.reasoning_effort, selection.effort);
+                    let reopened = crate::storage::Storage::new().unwrap();
+                    let document = reopened.read_chat_document(recovered).unwrap();
+                    assert_eq!(document.selection.as_ref(), Some(&selection));
+                    assert_eq!(document.messages[1].content, "partial answer");
+                    assert!(document.parent.is_none());
+                    let exported = crate::export::render_chat_document(
+                        &document,
+                        crate::export::OutputFormat::Json,
+                    )
+                    .unwrap();
+                    let exported: serde_json::Value = serde_json::from_str(&exported).unwrap();
+                    assert_eq!(
+                        exported["selection"],
+                        serde_json::to_value(&selection).unwrap()
+                    );
+                }
+                let recovered = app.requests[&id].route.destination_conversation_id;
+                complete(app, id, "complete answer");
+                app.load_conversation_into_tab(0, recovered).unwrap();
+                assert_eq!(app.ui.tabs[0].tab.provider, selection.provider);
+                assert_eq!(app.ui.tabs[0].tab.model, selection.model);
+                assert_eq!(app.ui.tabs[0].tab.reasoning_effort, selection.effort);
+                assert_eq!(app.ui.tabs[0].messages[1].content, "complete answer");
+            },
+        );
+    }
 }
 
 #[cfg(unix)]

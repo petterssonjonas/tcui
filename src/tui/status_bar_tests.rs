@@ -24,7 +24,6 @@ fn base_status() -> StatusBar {
         reasoning_effort: Some("medium".to_string()),
         show_reasoning_selector: true,
         show_selector: true,
-        web_search_enabled: true,
         context_window: Some(256_000),
         context_used_tokens: Some(128_000),
         config: StatusBarConfig::default(),
@@ -40,15 +39,20 @@ fn default_status_widgets_preserve_click_hit_areas() {
     let (screen, areas) = rendered(status, 1);
 
     // Then
-    assert!(screen.contains("web on"));
+    assert!(!screen.contains("web on"));
+    assert!(!screen.contains("web off"));
     assert!(screen.contains("OpenAI"));
     assert!(screen.contains("deepseek-v4-flash"));
     assert!(screen.contains("medium"));
     assert!(screen.contains("Context: 50% used of 256K"));
     assert!(screen.contains("Not connected, check settings"));
-    assert!(areas.web_search.is_some());
-    assert!(areas.provider.is_some());
-    assert!(areas.model.is_some());
+    let provider = areas.provider.expect("provider hit area");
+    let model = areas.model.expect("model hit area");
+    let reasoning = areas.reasoning.expect("reasoning hit area");
+    assert_eq!(provider.x, 0);
+    assert!(provider.width >= 10, "provider label and dropdown fit");
+    assert!(provider.right() <= model.x);
+    assert!(model.right() <= reasoning.x);
     assert!(areas.reasoning.is_some());
 }
 
@@ -102,7 +106,7 @@ fn placement_validation_clamps_row_and_area() {
 }
 
 #[test]
-fn selector_toggle_hides_provider_and_model_but_not_web_search() {
+fn selector_toggle_hides_provider_and_model() {
     // Given
     let mut status = base_status();
     status.show_selector = false;
@@ -111,12 +115,42 @@ fn selector_toggle_hides_provider_and_model_but_not_web_search() {
     let (screen, areas) = rendered(status, 1);
 
     // Then
-    assert!(screen.contains("web on"));
     assert!(!screen.contains("OpenAI"));
     assert!(!screen.contains("deepseek-v4-flash"));
-    assert!(areas.web_search.is_some());
     assert!(areas.provider.is_none());
     assert!(areas.model.is_none());
+}
+
+#[test]
+fn migrated_provider_uses_saved_web_position_without_duplicate_hit_area() {
+    let config: crate::config::AppConfig = toml::from_str(
+        r#"
+[[tui.status_widgets]]
+id = "provider"
+row = 1
+area = 2
+[[tui.status_widgets]]
+id = "web_search"
+row = 2
+area = 1
+[[tui.status_widgets]]
+id = "model"
+row = 2
+area = 3
+"#,
+    )
+    .expect("legacy config");
+    let mut status = base_status();
+    status.config = StatusBarConfig::from_tui(&config.tui);
+    status.config.rows = 2;
+
+    let (screen, areas) = rendered(status, 2);
+
+    assert_eq!(screen.matches("OpenAI").count(), 1);
+    let provider = areas.provider.expect("provider hit area");
+    assert_eq!((provider.x, provider.y), (0, 29));
+    assert!(provider.width >= 10);
+    assert!(provider.right() <= areas.model.expect("model hit area").x);
 }
 
 #[test]

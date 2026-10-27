@@ -52,8 +52,7 @@ pub(super) fn slot_rect(area: Rect, row: u8, slot: u8) -> Option<Rect> {
 
 fn default_status_widgets() -> Vec<crate::config::StatusWidgetPlacement> {
     [
-        ("web_search", 1, 1),
-        ("provider", 1, 2),
+        ("provider", 1, 1),
         ("model", 1, 3),
         ("reasoning", 1, 4),
         ("context", 1, 5),

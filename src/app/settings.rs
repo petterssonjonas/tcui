@@ -14,27 +14,26 @@ impl TuiApp {
 
     /// New conversations use saved defaults without changing loaded conversations.
     pub(crate) fn apply_default_chat_selection(&mut self, tab_index: usize) {
-        let selection = self.config.try_read().ok().and_then(|config| {
-            let provider = self
-                .ui
-                .visible_providers
-                .iter()
-                .find(|(name, _, _, _, _)| name.eq_ignore_ascii_case(&config.default_provider))?;
-            let model = if crate::llm::local::is_local_provider(&provider.0)
-                && config.default_model.is_empty()
+        let selection = self.config.try_read().ok().map(|config| {
+            let mut selection = config.default_chat.clone();
+            selection.provider = config
+                .provider_config(&selection.provider)
+                .map(|provider| provider.name.clone())
+                .unwrap_or_else(|| crate::llm::auth::canonical_provider_name(&selection.provider));
+            if crate::llm::local::is_local_provider(&selection.provider)
+                && selection.model.is_empty()
             {
-                config.local_inference.selected_model.clone()
-            } else {
-                config.default_model.clone()
-            };
-            Some((provider.0.clone(), model))
+                selection.model = config.local_inference.selected_model.clone();
+            }
+            selection
         });
-        if let (Some((provider, model)), Some(tab)) = (selection, self.ui.tabs.get_mut(tab_index)) {
-            tab.tab.provider = provider;
-            tab.tab.model = model;
+        if let (Some(selection), Some(tab)) = (selection, self.ui.tabs.get_mut(tab_index)) {
+            tab.tab.provider = selection.provider;
+            tab.tab.model = selection.model;
             tab.tab.endpoint = None;
-            tab.tab.reasoning_effort = None;
-            tab.manual_model_override = false;
+            tab.tab.reasoning_effort = selection.effort;
+            // Saved selections are explicit, including private/manual models and delayed catalogs.
+            tab.manual_model_override = true;
         }
         if tab_index == self.ui.active_tab {
             self.refresh_visible_selectors();
@@ -136,19 +135,35 @@ impl TuiApp {
         }
         let serialized = serde_json::to_value(&*live)?;
         let candidate = validate_edit(&serialized, id, value).map_err(|error| eyre!(error))?;
-        if id == "default_model" && !candidate.default_model.is_empty() {
-            let provider = candidate
-                .provider_config(&candidate.default_provider)
-                .map_or(candidate.default_provider.as_str(), |provider| {
-                    provider.name.as_str()
-                });
-            let models = self.storage.get_models(provider)?;
-            if !models.is_empty()
-                && !models
-                    .iter()
-                    .any(|entry| entry.0 == candidate.default_model)
+        if id == "default_chat" {
+            let selection = &candidate.default_chat;
+            if !crate::llm::local::is_local_provider(&selection.provider)
+                && !crate::config::KeyStore::has_credential(&candidate, &selection.provider)?
             {
-                return Err(eyre!("Model is not in the saved connection's catalog. Refresh Models and choose an available model."));
+                return Err(eyre!(
+                    "Connect this provider before saving a default chat selection"
+                ));
+            }
+            let models = self.cached_models_for_provider(&selection.provider);
+            let model = models.iter().find(|entry| entry.id == selection.model);
+            let manual_model = self.ui.tabs.iter().any(|tab| {
+                tab.manual_model_override
+                    && tab.tab.provider == selection.provider
+                    && tab.tab.model == selection.model
+            });
+            if model.is_none() && !models.is_empty() && !manual_model {
+                return Err(eyre!("Model is not in this connection's catalog. Refresh Models or select it explicitly through Manual model before saving."));
+            }
+            let options = model
+                .map(|model| Self::reasoning_options_for(&selection.provider, model))
+                .unwrap_or_default();
+            if let Some(effort) = &selection.effort {
+                if !options.contains(effort) {
+                    return Err(eyre!(
+                        "Effort {effort:?} is not supported for this provider/model. Supported: {}. Use effort=auto for a model without reasoning metadata.",
+                        if options.is_empty() { "none".into() } else { options.join(", ") },
+                    ));
+                }
             }
         }
         candidate.save()?;
@@ -257,14 +272,6 @@ impl TuiApp {
             .enabled;
         let config = self.persist_setting("web_search.enabled", &(!enabled).to_string())?;
         self.publish_setting(&config, "web_search.enabled");
-        self.ui.connection_message = Some(format!(
-            "Web {}",
-            if config.web_search.enabled {
-                "on"
-            } else {
-                "off"
-            }
-        ));
         Ok(())
     }
 }
@@ -556,23 +563,31 @@ mod tests {
         for save in [false, true] {
             crate::app::tests::with_test_app("settings-live-provider-draft", |app| {
                 use crossterm::event::{KeyCode, KeyModifiers};
-                app.open_settings_page(Some("default_provider"));
+                app.open_settings_page(Some("default_chat"));
                 app.settings_workspace_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
                 app.settings_workspace_key(KeyEvent::new(
                     KeyCode::Char('u'),
                     KeyModifiers::CONTROL,
                 ));
-                app.ui.settings_workspace.paste("Added while draft open");
+                app.ui
+                    .settings_workspace
+                    .paste("provider=Added while draft open\nmodel=manual-model\neffort=auto");
                 app.config.try_write().expect("live").providers.push(
                     crate::config::ProviderConfig {
                         name: "Added while draft open".into(),
                         ..Default::default()
                     },
                 );
+                crate::config::KeyStore::set(
+                    &app.config.try_read().expect("config"),
+                    "Added while draft open",
+                    "fixture-api-key",
+                )
+                .expect("connect provider");
                 let key = if save {
                     KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)
                 } else {
-                    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+                    KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)
                 };
                 let action = app
                     .settings_workspace_key(key)
@@ -588,7 +603,7 @@ mod tests {
                     _ => panic!("setting intent"),
                 }
                 assert_eq!(
-                    AppConfig::load().expect("reload").default_provider,
+                    AppConfig::load().expect("reload").default_chat.provider,
                     "Added while draft open"
                 );
                 assert!(!app.ui.settings_workspace.has_error);
@@ -758,25 +773,265 @@ mod tests {
     #[test]
     fn saved_defaults_apply_to_new_conversations_without_changing_existing_selection() {
         crate::app::tests::with_test_app("settings-new-chat-defaults", |app| {
-            let previous = app.ui.tabs[0].tab.provider.clone();
+            let previous = crate::config::ChatSelection {
+                provider: app.ui.tabs[0].tab.provider.clone(),
+                model: app.ui.tabs[0].tab.model.clone(),
+                effort: app.ui.tabs[0].tab.reasoning_effort.clone(),
+            };
+            let previous_id = app.ui.tabs[0].active_conversation;
+            let model = "default-reasoner";
+            app.storage
+                .save_models(
+                    "Ollama",
+                    &[(
+                        model.into(),
+                        None,
+                        None,
+                        None,
+                        Some("high".into()),
+                        vec!["low".into(), "medium".into(), "high".into()],
+                    )],
+                )
+                .expect("catalog");
+            let input = format!(r#"{{"provider":"Ollama","model":"{model}","effort":"high"}}"#);
             let config = app
-                .persist_setting("default_provider", "Ollama")
-                .expect("saved connection");
-            app.publish_setting(&config, "default_provider");
-            let model = app
-                .storage
-                .get_models("Ollama")
-                .expect("saved model catalog")
-                .first()
-                .map_or_else(|| "manual-model".to_string(), |entry| entry.0.clone());
-            let config = app
-                .persist_setting("default_model", &model)
-                .expect("model default");
-            app.publish_setting(&config, "default_model");
-            assert_eq!(app.ui.tabs[0].tab.provider, previous);
+                .persist_setting("default_chat", &input)
+                .expect("save combination");
+            app.publish_setting(&config, "default_chat");
+            assert_eq!(app.ui.tabs[0].tab.provider, previous.provider);
+            assert_eq!(app.ui.tabs[0].tab.model, previous.model);
             app.new_conversation(0).expect("new conversation");
             assert_eq!(app.ui.tabs[0].tab.provider, "Ollama");
             assert_eq!(app.ui.tabs[0].tab.model, model);
+            assert_eq!(app.ui.tabs[0].tab.reasoning_effort.as_deref(), Some("high"));
+            let new_id = app.ui.tabs[0].active_conversation;
+            app.load_conversation_into_tab(0, previous_id)
+                .expect("restore existing");
+            assert_eq!(app.ui.tabs[0].tab.provider, previous.provider);
+            assert_eq!(app.ui.tabs[0].tab.model, previous.model);
+            assert_eq!(app.ui.tabs[0].tab.reasoning_effort, previous.effort);
+            app.load_conversation_into_tab(0, new_id)
+                .expect("restore new");
+            assert_eq!(app.ui.tabs[0].tab.reasoning_effort.as_deref(), Some("high"));
+            assert_eq!(
+                AppConfig::load().expect("saved").default_chat,
+                config.default_chat
+            );
+        });
+    }
+
+    fn reasoner_config(effort: Option<&str>) -> AppConfig {
+        AppConfig {
+            default_chat: crate::config::ChatSelection {
+                provider: "Reasoner".into(),
+                model: "preferred-model".into(),
+                effort: effort.map(str::to_string),
+            },
+            providers: vec![crate::config::ProviderConfig {
+                name: "Reasoner".into(),
+                endpoint: "http://127.0.0.1:9/v1".into(),
+                ..Default::default()
+            }],
+            ..AppConfig::default()
+        }
+    }
+
+    fn reasoner_catalog(app: &TuiApp) {
+        app.storage
+            .save_models(
+                "Reasoner",
+                &[
+                    (
+                        "a-unrelated-model".into(),
+                        None,
+                        None,
+                        None,
+                        None,
+                        Vec::new(),
+                    ),
+                    (
+                        "preferred-model".into(),
+                        None,
+                        None,
+                        None,
+                        Some("high".into()),
+                        vec!["low".into(), "medium".into(), "high".into()],
+                    ),
+                ],
+            )
+            .expect("model metadata");
+    }
+
+    #[test]
+    fn startup_and_new_chat_keep_exact_selection_through_delayed_catalog_and_restart() {
+        for effort in [None, Some("high")] {
+            crate::app::tests::with_test_app_config(
+                "default-chat-delayed-catalog",
+                reasoner_config(effort),
+                |app| {
+                    assert_eq!(app.ui.tabs[0].tab.provider, "Reasoner");
+                    assert_eq!(app.ui.tabs[0].tab.model, "preferred-model");
+                    assert_eq!(app.ui.tabs[0].tab.reasoning_effort.as_deref(), effort);
+                    reasoner_catalog(app);
+                    let models = app.cached_models_for_provider("Reasoner");
+                    app.apply_refreshed_provider_models("Reasoner", &models);
+                    let expected = effort.unwrap_or("medium");
+                    assert_eq!(app.ui.tabs[0].tab.model, "preferred-model");
+                    assert_eq!(
+                        app.ui.tabs[0].tab.reasoning_effort.as_deref(),
+                        Some(expected)
+                    );
+                    app.config.try_read().expect("config").save().expect("save");
+                    let existing_id = app.ui.tabs[0].active_conversation;
+                    // Existing chats retain their own effort even after the saved default changes.
+                    let updated = app
+                        .persist_setting(
+                            "default_chat",
+                            r#"{"provider":"Reasoner","model":"preferred-model","effort":"low"}"#,
+                        )
+                        .expect("save next-chat default");
+                    let mut restarted = TuiApp::new(
+                        crate::storage::Storage::new().expect("reopen storage"),
+                        std::sync::Arc::new(tokio::sync::RwLock::new(
+                            AppConfig::load().expect("reload"),
+                        )),
+                        std::sync::Arc::new(crate::llm::LlmClient::new()),
+                    );
+                    assert_eq!(restarted.ui.tabs[0].active_conversation, existing_id);
+                    assert_eq!(restarted.ui.tabs[0].tab.model, "preferred-model");
+                    assert_eq!(
+                        restarted.ui.tabs[0].tab.reasoning_effort.as_deref(),
+                        Some(expected)
+                    );
+                    restarted.new_conversation(0).expect("new chat");
+                    assert_eq!(
+                        restarted.ui.tabs[0].tab.provider,
+                        updated.default_chat.provider
+                    );
+                    assert_eq!(restarted.ui.tabs[0].tab.model, updated.default_chat.model);
+                    assert_eq!(
+                        restarted.ui.tabs[0].tab.reasoning_effort.as_deref(),
+                        Some("low")
+                    );
+                    restarted
+                        .load_conversation_into_tab(0, existing_id)
+                        .expect("restore old chat");
+                    assert_eq!(
+                        restarted.ui.tabs[0].tab.reasoning_effort.as_deref(),
+                        Some(expected)
+                    );
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_default_combinations_and_atomic_save_failure_preserve_live_and_saved_state() {
+        use crate::config::app_config::{inject_private_file_failure, TestFailurePoint};
+        crate::app::tests::with_test_app_config(
+            "default-chat-transaction",
+            reasoner_config(Some("high")),
+            |app| {
+                reasoner_catalog(app);
+                let original = app.config.try_read().expect("config").clone();
+                original.save().expect("initial save");
+                let chat_id = app.ui.tabs[0].active_conversation;
+                let chat_before =
+                    serde_json::to_value(app.storage.read_chat_document(chat_id).expect("chat"))
+                        .expect("serialize");
+                for input in [
+                    r#"{"provider":"Missing","model":"preferred-model","effort":"medium"}"#,
+                    r#"{"provider":"Reasoner","model":"another-providers-model","effort":"medium"}"#,
+                    r#"{"provider":"Reasoner","model":"preferred-model","effort":"xhigh"}"#,
+                    r#"{"provider":"Reasoner","model":"a-unrelated-model","effort":"medium"}"#,
+                ] {
+                    assert!(app.persist_setting("default_chat", input).is_err());
+                    assert_eq!(
+                        app.config.try_read().expect("live").default_chat,
+                        original.default_chat
+                    );
+                    assert_eq!(
+                        AppConfig::load().expect("saved").default_chat,
+                        original.default_chat
+                    );
+                }
+                inject_private_file_failure(TestFailurePoint::Rename);
+                assert!(app
+                    .persist_setting(
+                        "default_chat",
+                        r#"{"provider":"Reasoner","model":"preferred-model","effort":"low"}"#
+                    )
+                    .is_err());
+                assert_eq!(
+                    app.config.try_read().expect("live").default_chat,
+                    original.default_chat
+                );
+                assert_eq!(
+                    AppConfig::load().expect("saved").default_chat,
+                    original.default_chat
+                );
+                assert_eq!(
+                    serde_json::to_value(app.storage.read_chat_document(chat_id).expect("chat"))
+                        .expect("serialize"),
+                    chat_before
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn chat_selection_updates_and_json_exports_preserve_the_complete_document() {
+        crate::app::tests::with_test_app("chat-selection-document-integrity", |app| {
+            let id = app.ui.tabs[0].active_conversation;
+            app.storage
+                .save_message(&crate::app::Message::new(
+                    id,
+                    "user".into(),
+                    "retained history".into(),
+                ))
+                .expect("save message");
+            app.storage
+                .update_conversation_title(id, "Retained title")
+                .expect("title");
+            app.storage.set_conversation_pinned(id, true).expect("pin");
+            let before = app.storage.read_chat_document(id).expect("before");
+            let selection = crate::config::ChatSelection {
+                provider: "Ollama".into(),
+                model: "manual-model".into(),
+                effort: None,
+            };
+            app.storage
+                .set_conversation_selection(id, &selection)
+                .expect("selection");
+            let reopened = crate::storage::Storage::new().expect("reopen storage");
+            let after = reopened.read_chat_document(id).expect("after");
+            assert_eq!(after.selection.as_ref(), Some(&selection));
+            let mut expected = serde_json::to_value(before).expect("before JSON");
+            expected["selection"] = serde_json::to_value(&selection).expect("selection JSON");
+            expected["updated_at_ms"] = after.updated_at_ms.into();
+            assert_eq!(serde_json::to_value(&after).expect("after JSON"), expected);
+            let exported =
+                crate::export::render_chat_document(&after, crate::export::OutputFormat::Json)
+                    .expect("JSON export");
+            let mut exported: serde_json::Value =
+                serde_json::from_str(&exported).expect("export document");
+            assert_eq!(exported, expected);
+            exported
+                .as_object_mut()
+                .expect("document")
+                .remove("selection");
+            let legacy: crate::storage::chat_store::ChatDocument = serde_json::from_value(exported)
+                .expect("legacy chat without selection remains readable");
+            assert!(legacy.selection.is_none());
+            let unchanged = serde_json::to_value(&after).expect("unchanged");
+            app.storage
+                .set_conversation_selection(id, &selection)
+                .expect("same selection");
+            assert_eq!(
+                serde_json::to_value(app.storage.read_chat_document(id).expect("chat"))
+                    .expect("JSON"),
+                unchanged
+            );
         });
     }
 

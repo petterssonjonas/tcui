@@ -26,7 +26,11 @@ fn save_writes_to_xdg_config_dir() {
 
     let config = AppConfig {
         theme: "gruvbox".to_string(),
-        default_model: "repo-model".to_string(),
+        default_chat: super::ChatSelection {
+            provider: "Saved connection".into(),
+            model: "repo-model".into(),
+            effort: Some("medium".into()),
+        },
         ..AppConfig::default()
     };
     config.save().expect("save config");
@@ -34,7 +38,12 @@ fn save_writes_to_xdg_config_dir() {
     let xdg_path = tcui_dir.join("config.toml");
     let xdg_content = std::fs::read_to_string(&xdg_path).expect("read xdg config");
     assert!(xdg_content.contains("theme = \"gruvbox\""));
-    assert!(xdg_content.contains("default_model = \"repo-model\""));
+    assert!(xdg_content.contains("[default_chat]"));
+    assert!(xdg_content.contains("model = \"repo-model\""));
+    assert!(!xdg_content.contains("default_model"));
+    assert!(!xdg_content.contains("default_provider"));
+    let roundtrip: AppConfig = toml::from_str(&xdg_content).expect("deserialize saved selection");
+    assert_eq!(roundtrip.default_chat, config.default_chat);
     assert!(!root.join("config.toml").exists());
 
     std::fs::remove_dir_all(&root).expect("cleanup temp dir");

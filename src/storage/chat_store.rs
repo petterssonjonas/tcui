@@ -30,6 +30,8 @@ pub(crate) struct ChatDocument {
     pub(crate) messages: Vec<Message>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) parent: Option<ChatLineage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) selection: Option<crate::config::ChatSelection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,7 +76,9 @@ impl ChatStore {
     }
 
     pub(crate) fn create_conversation(&self, tab_id: i64) -> Result<i64> {
-        Ok(self.create_snapshot(tab_id, "New Chat", &[], None)?.id)
+        Ok(self
+            .create_snapshot(tab_id, "New Chat", &[], None, None)?
+            .id)
     }
 
     pub(crate) fn create_snapshot(
@@ -83,9 +87,19 @@ impl ChatStore {
         title: &str,
         messages: &[Message],
         parent: Option<ChatLineage>,
+        selection: Option<crate::config::ChatSelection>,
     ) -> Result<ChatDocument> {
         crate::protection::require(crate::protection::Domain::Chats)?;
-        let document = snapshot_document(self.allocate_id(), tab_id, title, messages, parent);
+        let selection = match selection {
+            Some(selection) => Some(selection),
+            None => parent
+                .as_ref()
+                .map(|parent| self.read_document(parent.conversation_id))
+                .transpose()?
+                .and_then(|document| document.selection),
+        };
+        let mut document = snapshot_document(self.allocate_id(), tab_id, title, messages, parent);
+        document.selection = selection;
         self.write_document(&document)?;
         Ok(document)
     }
@@ -103,7 +117,9 @@ impl ChatStore {
         let id = NEXT_EPHEMERAL_ID
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_sub(1))
             .map_err(|_| eyre!("ephemeral conversation IDs exhausted"))?;
-        let document = snapshot_document(id, tab_id, title, messages, Some(parent));
+        let selection = self.read_document(parent.conversation_id)?.selection;
+        let mut document = snapshot_document(id, tab_id, title, messages, Some(parent));
+        document.selection = selection;
         self.ephemeral_documents()?.insert(id, document);
         Ok(id)
     }
@@ -127,6 +143,36 @@ impl ChatStore {
 
     pub(crate) fn get_messages(&self, conversation_id: i64) -> Result<Vec<Message>> {
         Ok(self.read_document(conversation_id)?.messages)
+    }
+
+    pub(crate) fn set_selection(
+        &self,
+        conversation_id: i64,
+        selection: &crate::config::ChatSelection,
+    ) -> Result<()> {
+        crate::protection::require(crate::protection::Domain::Chats)?;
+        if conversation_id < 0 {
+            let mut documents = self.ephemeral_documents()?;
+            if let Some(document) = documents.get_mut(&conversation_id) {
+                if document.selection.as_ref() != Some(selection) {
+                    document.selection = Some(selection.clone());
+                    document.updated_at_ms = now_ms();
+                }
+            }
+            return Ok(());
+        }
+        let mut document = match self.read_document(conversation_id) {
+            Ok(document) => document,
+            Err(error) if missing_document(&error) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        // Avoid rewriting an encrypted chat (and changing its recency) on every UI refresh.
+        if document.selection.as_ref() == Some(selection) {
+            return Ok(());
+        }
+        document.selection = Some(selection.clone());
+        document.updated_at_ms = now_ms();
+        self.write_document(&document)
     }
 
     pub(crate) fn replace_messages(
@@ -376,19 +422,7 @@ impl ChatStore {
         }
         match self.read_document(conversation_id) {
             Ok(_) => Ok(true),
-            Err(error)
-                if error
-                    .downcast_ref::<crate::storage::crypto::StorageCryptoError>()
-                    .is_some_and(|error| {
-                        matches!(error, crate::storage::crypto::StorageCryptoError::Io(io)
-                            if io.kind() == std::io::ErrorKind::NotFound)
-                    })
-                    || error
-                        .downcast_ref::<std::io::Error>()
-                        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
-            {
-                Ok(false)
-            }
+            Err(error) if missing_document(&error) => Ok(false),
             Err(error) => Err(error),
         }
     }
@@ -473,6 +507,18 @@ impl ChatStore {
     }
 }
 
+fn missing_document(error: &color_eyre::Report) -> bool {
+    error
+        .downcast_ref::<crate::storage::crypto::StorageCryptoError>()
+        .is_some_and(|error| {
+            matches!(error, crate::storage::crypto::StorageCryptoError::Io(io)
+                if io.kind() == std::io::ErrorKind::NotFound)
+        })
+        || error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
+
 fn snapshot_document(
     id: i64,
     tab_id: i64,
@@ -501,6 +547,7 @@ fn snapshot_document(
         pinned: false,
         messages,
         parent,
+        selection: None,
     }
 }
 
@@ -613,6 +660,7 @@ fn legacy_conversations(conn: &Connection) -> Result<Vec<ChatDocument>> {
             pinned: false,
             messages,
             parent: None,
+            selection: None,
         });
     }
     Ok(conversations)

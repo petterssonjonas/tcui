@@ -13,6 +13,9 @@ export HOME="$tmp/home with spaces"
 export TCUI_BIN_DIR="$HOME/.local/bin with spaces"
 export TCUI_REPO=fixture/tcui
 export TCUI_VERSION=v1.2.3
+unset TCUI_RELEASE_TAG
+export TMPDIR="$tmp/work"
+mkdir -p -- "$TMPDIR"
 export FIXTURE_DIR="$tmp/release"
 export FIXTURE_BASE='https://github.com/fixture/tcui/releases/download/v1.2.3'
 export FIXTURE_REQUESTS="$tmp/requests"
@@ -77,6 +80,12 @@ assert_data() {
     cmp -s -- "$tmp/chats.original" "$HOME/.local/share/tcui/chats/history.json" || fail 'chats changed'
     cmp -s -- "$tmp/credentials.original" "$HOME/.local/share/tcui/credentials" || fail 'credentials changed'
 }
+assert_clean() {
+    if compgen -G "$TCUI_BIN_DIR/.tcui-install.*" > /dev/null ||
+        compgen -G "$TMPDIR/tcui-install.*" > /dev/null; then
+        fail 'installer left a staging or download directory'
+    fi
+}
 reset_install() { cp -- "$tmp/previous" "$TCUI_BIN_DIR/tcui"; }
 expect_failure() {
     local label="$1"
@@ -86,9 +95,11 @@ expect_failure() {
     fi
     cmp -s -- "$tmp/previous" "$TCUI_BIN_DIR/tcui" || fail "$label changed existing installation"
     assert_data
+    assert_clean
 }
 network_install() { bash "$tmp/network/install.sh"; }
 offline_install() { bash "$tmp/offline release/install.sh" "$@"; }
+embedded_install() { bash -c "$(< "$root/scripts/install.sh")" tcui-updater; }
 
 # Offline install uses a sibling binary, tolerates spaces and does not invoke curl.
 reset_install
@@ -117,6 +128,17 @@ TCUI_VERSION=1.2.3 network_install > "$tmp/output" 2>&1
 TCUI_VERSION=latest FIXTURE_BASE='https://github.com/fixture/tcui/releases/latest/download' network_install > "$tmp/output" 2>&1
 cmp -s -- "$fixture_binary" "$TCUI_BIN_DIR/tcui" || fail 'latest release did not install'
 assert_data
+
+# Exact release pinning preserves the real tag. It takes priority over the
+# compatibility TCUI_VERSION setting, including in the embedded updater route.
+reset_install
+TCUI_RELEASE_TAG=0.8.6 TCUI_VERSION=v0.8.5 FIXTURE_BASE='https://github.com/fixture/tcui/releases/download/0.8.6' embedded_install > "$tmp/output" 2>&1
+cmp -s -- "$fixture_binary" "$TCUI_BIN_DIR/tcui" || fail 'unprefixed exact release did not install'
+TCUI_RELEASE_TAG=v0.8.6 FIXTURE_BASE='https://github.com/fixture/tcui/releases/download/v0.8.6' network_install > "$tmp/output" 2>&1
+cmp -s -- "$fixture_binary" "$TCUI_BIN_DIR/tcui" || fail 'prefixed exact release did not install'
+assert_clean
+reset_install
+expect_failure 'invalid exact release tag' env TCUI_RELEASE_TAG='0.8.6/../../other' bash "$tmp/network/install.sh"
 
 # Missing, incomplete, malformed, duplicate and incorrect checksum manifests fail
 # before any replacement. A tarball with no SHA256SUMS must never be accepted.
@@ -166,6 +188,18 @@ cp -- "$fixture_binary" "$tmp/offline release/tcui"
 printf '\267\000' | dd of="$tmp/offline release/tcui" bs=1 seek=18 conv=notrunc status=none
 expect_failure 'wrong-architecture offline binary' offline_install
 cp -- "$fixture_binary" "$tmp/offline release/tcui"
+
+# Failed copy and rename leave the installed bytes and user data unchanged, and
+# remove both private download storage and destination-filesystem staging.
+cp -- "$fixture_binary" "$payload/tcui"
+archive
+reset_install
+for program in install mv; do
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$tmp/transport/$program"
+    chmod +x -- "$tmp/transport/$program"
+    expect_failure "failed $program" embedded_install
+    rm -- "$tmp/transport/$program"
+done
 
 # Refuse symlinks instead of following them, and never recursively remove targets.
 rm -- "$TCUI_BIN_DIR/tcui"

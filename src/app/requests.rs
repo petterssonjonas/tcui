@@ -127,6 +127,11 @@ impl TuiApp {
                     owner_index as i64,
                     &title,
                     &messages,
+                    Some(crate::config::ChatSelection {
+                        provider: owner.provider.clone(),
+                        model: owner.model.clone(),
+                        effort: owner.reasoning_effort.clone(),
+                    }),
                 )?;
                 recovered = true;
                 title
@@ -254,13 +259,18 @@ impl TuiApp {
             owner_index as i64,
             &title,
             &request.messages,
+            Some(crate::config::ChatSelection {
+                provider: request.owner.provider.clone(),
+                model: request.owner.model.clone(),
+                effort: request.owner.reasoning_effort.clone(),
+            }),
         )?;
         let request = self
             .requests
             .get_mut(&id)
             .ok_or_else(|| eyre!("Request disappeared during recovery"))?;
         request.route.destination_conversation_id = destination;
-        request.owner = self.ui.tabs[owner_index].tab.clone();
+        request.owner.id = self.ui.tabs[owner_index].tab.id;
         request.title = title;
         request.app_tab_id = self
             .ui

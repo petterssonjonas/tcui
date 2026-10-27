@@ -1521,6 +1521,7 @@ impl TuiApp {
                 return None;
             }
             match mouse_action {
+                crate::ui::MouseAction::CloseApp => return Some(self.quit_action()),
                 crate::ui::MouseAction::AppTabSelect(index) => {
                     self.ui.app_tabs.select(index);
                     self.ui.terminals.focused = self.ui.app_tabs.tab(index).is_some_and(|tab| {
@@ -1738,7 +1739,7 @@ impl TuiApp {
                                 if real_idx < self.ui.current_models.len() {
                                     let model = self.ui.current_models[real_idx].id.clone();
                                     tab.tab.model = model.clone();
-                                    tab.manual_model_override = false;
+                                    tab.manual_model_override = !model.trim().is_empty();
                                     tab.tab.reasoning_effort = None;
                                     selected_model = Some(model);
                                 }
@@ -1748,6 +1749,8 @@ impl TuiApp {
                                 if real_idx < self.ui.current_reasoning_options.len() {
                                     tab.tab.reasoning_effort =
                                         Some(self.ui.current_reasoning_options[real_idx].clone());
+                                    tab.manual_model_override = !tab.tab.model.trim().is_empty();
+                                    refresh_models_and_reasoning = true;
                                 }
                                 tab.reasoning_dropdown_open = false;
                             }
@@ -1891,12 +1894,6 @@ impl TuiApp {
                 }
             }
             return None;
-        }
-
-        if let Some(areas) = self.ui.status_bar_areas {
-            if areas.web_search.is_some_and(|area| area.contains(pos)) {
-                return Some(Action::ToggleWebSearch);
-            }
         }
 
         None

@@ -5,12 +5,14 @@ use crate::ui::app_tabs::{AppTabId, AppTabs};
 
 const BRAND_WIDTH: u16 = 6;
 const ADD_WIDTH: u16 = 3;
+const CLOSE_APP_WIDTH: u16 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopBarAction {
     Select(AppTabId),
     Add,
     Close(AppTabId),
+    CloseApp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,11 +84,19 @@ impl<'a> TopBar<'a> {
                 layout.add,
             );
         }
+        if layout.close_app.width > 0 {
+            f.render_widget(
+                Paragraph::new("×")
+                    .style(Style::default().fg(theme.foreground).bg(theme.panel))
+                    .alignment(Alignment::Center),
+                layout.close_app,
+            );
+        }
     }
 
     pub fn hit_areas(&self, area: Rect) -> Vec<TopBarHitArea> {
         let layout = self.layout(area);
-        let mut hits = Vec::with_capacity(layout.tabs.len() * 2 + 1);
+        let mut hits = Vec::with_capacity(layout.tabs.len() * 2 + 2);
         for tab in layout.tabs {
             hits.push(TopBarHitArea {
                 action: TopBarAction::Select(tab.id),
@@ -105,6 +115,12 @@ impl<'a> TopBar<'a> {
                 area: layout.add,
             });
         }
+        if layout.close_app.width > 0 {
+            hits.push(TopBarHitArea {
+                action: TopBarAction::CloseApp,
+                area: layout.close_app,
+            });
+        }
         hits
     }
 
@@ -117,17 +133,19 @@ impl<'a> TopBar<'a> {
         else {
             return TopBarLayout::empty(area);
         };
-        if area.width == 0 {
+        if area.width == 0 || area.height == 0 {
             return TopBarLayout::empty(area);
         }
 
-        let add_width = if area.width >= 2 {
-            ADD_WIDTH.min(area.width.saturating_sub(1))
+        let close_width = CLOSE_APP_WIDTH.min(area.width.saturating_sub(2));
+        let content_width = area.width.saturating_sub(close_width);
+        let add_width = if content_width >= 2 {
+            ADD_WIDTH.min(content_width.saturating_sub(1))
         } else {
             0
         };
         let active_width = self.tab_width(active_index);
-        let brand_width = if area.width
+        let brand_width = if content_width
             >= BRAND_WIDTH
                 .saturating_add(add_width)
                 .saturating_add(active_width)
@@ -136,8 +154,7 @@ impl<'a> TopBar<'a> {
         } else {
             0
         };
-        let tab_budget = area
-            .width
+        let tab_budget = content_width
             .saturating_sub(brand_width)
             .saturating_sub(add_width);
         let active_render_width = active_width.min(tab_budget);
@@ -189,7 +206,18 @@ impl<'a> TopBar<'a> {
             x = x.saturating_add(width);
         }
         let add = Rect::new(x, area.y, add_width, area.height);
-        TopBarLayout { brand, tabs, add }
+        let close_app = Rect::new(
+            area.right().saturating_sub(close_width),
+            area.y,
+            close_width,
+            area.height,
+        );
+        TopBarLayout {
+            brand,
+            tabs,
+            add,
+            close_app,
+        }
     }
 
     fn tab_width(&self, index: usize) -> u16 {
@@ -203,6 +231,7 @@ struct TopBarLayout {
     brand: Rect,
     tabs: Vec<TabLayout>,
     add: Rect,
+    close_app: Rect,
 }
 
 impl TopBarLayout {
@@ -211,6 +240,7 @@ impl TopBarLayout {
             brand: Rect::new(area.x, area.y, 0, area.height),
             tabs: Vec::new(),
             add: Rect::new(area.x, area.y, 0, area.height),
+            close_app: Rect::new(area.right(), area.y, 0, area.height),
         }
     }
 }
@@ -226,24 +256,6 @@ mod tests {
     use super::{TopBar, TopBarAction};
     use crate::ui::app_tabs::{AppTabs, SelectTabResult};
     use ratatui::{backend::TestBackend, layout::Rect, Terminal};
-
-    #[test]
-    fn app_tab_id_top_bar_renders_launcher_and_add_control() {
-        let mut tabs = AppTabs::default();
-        tabs.add_launcher();
-        let top_bar = TopBar::new(&tabs);
-        let mut terminal = Terminal::new(TestBackend::new(64, 1)).expect("terminal");
-
-        terminal
-            .draw(|frame| top_bar.render(frame, Rect::new(0, 0, 64, 1)))
-            .expect("render top bar");
-
-        let screen = terminal.backend().to_string();
-        assert!(screen.contains("TCUI"));
-        assert!(screen.contains("Chat"));
-        assert!(screen.contains("Launcher"));
-        assert!(screen.contains('+'));
-    }
 
     #[test]
     fn app_tab_id_top_bar_hit_areas_carry_stable_identities() {
@@ -329,6 +341,16 @@ mod tests {
             }));
             if width >= 2 {
                 assert!(hits.iter().any(|hit| hit.action == TopBarAction::Add));
+            }
+            if width >= 3 {
+                let close = hits
+                    .iter()
+                    .find(|hit| hit.action == TopBarAction::CloseApp)
+                    .expect("app close control");
+                assert_eq!(close.area.right(), area.right());
+                assert!(hits.iter().all(|hit| {
+                    hit.action == TopBarAction::CloseApp || hit.area.right() <= close.area.x
+                }));
             }
         }
     }

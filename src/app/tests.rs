@@ -1651,3 +1651,117 @@ fn refresh_memory_artifacts_uses_independent_store_and_preserves_external_files(
         }
     }
 }
+
+fn blank_palette_web_action(
+    app: &mut TuiApp,
+    runtime: &tokio::runtime::Runtime,
+    expected_enabled: bool,
+) -> Action {
+    use crate::tui::settings_panel::{all_settings, SettingType};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let open = app
+        .handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+        .expect("Ctrl+P action");
+    runtime.block_on(app.dispatch(open)).expect("open palette");
+    let settings = all_settings();
+    let panel = app.ui.settings_v2.as_mut().expect("real Ctrl+P panel");
+    assert!(panel.query().is_empty());
+    let index = panel
+        .results(&settings)
+        .iter()
+        .position(|(_, setting)| setting.setting_type == SettingType::Command("toggle_web_search"))
+        .expect("web quick setting is visible without a query");
+    panel.select(index, &settings);
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 32)).expect("terminal");
+    terminal
+        .draw(|frame| panel.render(frame, frame.area(), app.ui.web_search_enabled))
+        .expect("render quick setting");
+    let label = format!(
+        "Web search: {}",
+        if expected_enabled { "on" } else { "off" }
+    );
+    assert!(terminal.backend().to_string().contains(&label));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .expect("selected quick setting action")
+}
+
+#[test]
+fn blank_palette_web_toggle_persists_and_reopens_with_actual_state() {
+    with_test_app("palette-web-persistence", |app| {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let initial = app.config.try_read().expect("config").web_search.enabled;
+        let connection_status = app.ui.connection_status;
+        let connection_message = app.ui.connection_message.clone();
+        for previous in [initial, !initial] {
+            let action = blank_palette_web_action(app, &runtime, previous);
+            runtime
+                .block_on(app.dispatch(action))
+                .expect("toggle web search");
+            assert_eq!(app.ui.web_search_enabled, !previous);
+            assert_eq!(app.ui.connection_status, connection_status);
+            assert_eq!(app.ui.connection_message, connection_message);
+            assert_eq!(
+                app.config
+                    .try_read()
+                    .expect("live config")
+                    .web_search
+                    .enabled,
+                !previous
+            );
+            assert_eq!(
+                AppConfig::load().expect("saved config").web_search.enabled,
+                !previous
+            );
+        }
+        let _ = blank_palette_web_action(app, &runtime, initial);
+    });
+}
+
+#[test]
+fn failed_quick_web_toggle_preserves_saved_live_and_displayed_state_until_retry() {
+    with_test_app("palette-web-save-failure", |app| {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        app.config
+            .try_read()
+            .expect("config")
+            .save()
+            .expect("initial save");
+        let initial = app.config.try_read().expect("config").web_search.enabled;
+        let action = blank_palette_web_action(app, &runtime, initial);
+        let message = app.ui.connection_message.clone();
+        let original_home = std::env::var_os("XDG_CONFIG_HOME").expect("config home");
+        let blocked = std::path::PathBuf::from(&original_home).join("blocked");
+        std::fs::write(&blocked, b"not a directory").expect("failure fixture");
+        std::env::set_var("XDG_CONFIG_HOME", &blocked);
+        let result = runtime.block_on(app.dispatch(action));
+        std::env::set_var("XDG_CONFIG_HOME", original_home);
+
+        assert!(result.is_err());
+        assert_eq!(app.ui.web_search_enabled, initial);
+        assert_eq!(app.ui.connection_message, message);
+        assert_eq!(
+            app.config
+                .try_read()
+                .expect("live config")
+                .web_search
+                .enabled,
+            initial
+        );
+        assert_eq!(
+            AppConfig::load().expect("saved config").web_search.enabled,
+            initial
+        );
+
+        let retry = blank_palette_web_action(app, &runtime, initial);
+        runtime
+            .block_on(app.dispatch(retry))
+            .expect("retry web toggle");
+        assert_eq!(app.ui.web_search_enabled, !initial);
+        assert_eq!(
+            AppConfig::load().expect("saved config").web_search.enabled,
+            !initial
+        );
+    });
+}

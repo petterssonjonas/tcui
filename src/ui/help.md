@@ -31,8 +31,11 @@ Type any slash command in the message box:
 
 ## Usage
 
-- Press `Ctrl+P` to search settings and actions. With no query, choose **Settings tab**.
-  Search results navigate to the selected setting; the popup does not edit values.
+- Press `Ctrl+P` to search settings and actions. With no query, choose **Settings tab**,
+  **New Tab**, **Memories** (when enabled), **Vault workspace**, **Open terminal**, **Chat**,
+  or **Web search: on/off**. The web quick toggle saves automatic search and shows
+  its current state. The Vault workspace contains files, not provider credentials.
+  Other setting results navigate to the selected setting.
   Changes persist individually. Click **Save** or press **Ctrl+S** to save all current
   settings and a valid open draft. Failed saves retain the draft. In multiline
   editors, Enter adds a line and Ctrl+Enter applies; Esc cancels.
@@ -44,6 +47,11 @@ Type any slash command in the message box:
   In Keyboard settings, Enter captures a binding and Backspace resets it.
   During capture, Ctrl+S is binding input. After a failed binding write, Ctrl+S
   retries that binding. Finish or cancel capture before clicking Save.
+- Settings → Models → **Default chat selection** saves one combination: enter
+  `provider=connection name`, `model=model ID`, and `effort=medium`, one per line.
+  Ctrl+Enter or Ctrl+S saves all three. `effort=auto` prefers medium when supported.
+  New chats and startup without a recorded selection use it; reopened chats keep
+  their own provider, model, and effort. Changing defaults does not change the active chat.
 - Settings → Chat edits **SOUL.md** (personality) and **AGENTS.md** (working
   preferences) as multiline text. Save writes these files in the TCUI configuration
   directory, normally `~/.config/tcui`. Missing files use bundled defaults; empty
@@ -51,11 +59,14 @@ Type any slash command in the message box:
   changes a file, Save retains your draft instead of overwriting the newer file;
   copy the draft, cancel, and reopen to reconcile it. These plaintext instructions
   are sent to the selected model. Do not put credentials in them.
-- Settings → Web search → **Web search source** chooses native `local` search or
-  an enabled Exa, Tavily, or Firecrawl MCP profile. `@websearch`, `@research`, and
-  automatic search use that choice; failures do not silently switch sources.
-- Click the **provider** or **model** labels in the status bar to change
-  selectors.
+- Settings → Web search → **Automatic web search**, the blank Ctrl+P web toggle,
+  and `/web` control the same saved setting. **Web search source** chooses native
+  `local` search or an enabled Exa, Tavily, or Firecrawl MCP profile. `@websearch`,
+  `@research`, and automatic search use that choice; failures do not switch sources.
+- The **Provider** selector is at the bottom left. Click provider/model labels
+  to change the current chat, not the saved default combination.
+- Click the top-right **×** to close TCUI through the normal quit confirmation
+  and pending-document/running-terminal safeguards.
 - Settings groups include terminal defaults, appearance, layout, chat, web search,
   connections, local inference, notifications, files/vaults, keyboard, MCP, privacy, and memory.
 - Run `/keybinds` to see all keyboard shortcuts, including how to rebind them.
@@ -67,8 +78,8 @@ Type any slash command in the message box:
   on your own device, then paste the complete final response URL into TCUI and
   press Enter. Press `p` to open the masked response field manually. A browser
   localhost connection error does not prevent pasting its address.
-- Outside command review, `Ctrl+R` refreshes provider model catalogs. OpenAI OAuth
-  includes subscription-only models and replaces obsolete selections after refresh.
+- Outside command review, `Ctrl+R` refreshes provider model catalogs, including
+  OpenAI OAuth subscription models. Refresh preserves the selected provider/model.
 - Click the copy icon at the top right of an assistant response to copy its full answer.
 - The copy icon uses Font Awesome/Nerd Fonts. If it is missing in your font, set
   `TCUI_COPY_ICON=unicode` for `⧉`, or `TCUI_COPY_ICON=ascii` for `[c]`, before launch.

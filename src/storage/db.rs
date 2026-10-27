@@ -138,6 +138,14 @@ impl Storage {
         self.chat_store.read_document(conversation_id)
     }
 
+    pub(crate) fn set_conversation_selection(
+        &self,
+        conversation_id: i64,
+        selection: &crate::config::ChatSelection,
+    ) -> Result<()> {
+        self.chat_store.set_selection(conversation_id, selection)
+    }
+
     pub(crate) fn conversation_exists(&self, conversation_id: i64) -> Result<bool> {
         self.chat_store.conversation_exists(conversation_id)
     }
@@ -147,10 +155,11 @@ impl Storage {
         tab_id: i64,
         title: &str,
         messages: &[Message],
+        selection: Option<crate::config::ChatSelection>,
     ) -> Result<i64> {
         Ok(self
             .chat_store
-            .create_snapshot(tab_id, title, messages, None)?
+            .create_snapshot(tab_id, title, messages, None, selection)?
             .id)
     }
 
@@ -178,7 +187,7 @@ impl Storage {
     ) -> Result<ChatDocument> {
         let parent = ChatLineage::from_messages(source_conversation_id, messages);
         self.chat_store
-            .create_snapshot(tab_id, title, messages, Some(parent))
+            .create_snapshot(tab_id, title, messages, Some(parent), None)
     }
 
     pub fn get_conversations(&self, tab_id: i64) -> Result<Vec<ConversationEntry>> {

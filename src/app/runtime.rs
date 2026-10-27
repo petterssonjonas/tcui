@@ -16,7 +16,7 @@ impl TuiApp {
 
     pub(crate) fn quit_action(&self) -> Action {
         if self.quit_requires_confirmation()
-            || self.has_pending_documents()
+            || self.has_any_pending_documents()
             || self.ui.terminals.has_running()
             || self
                 .ui
@@ -255,7 +255,7 @@ impl TuiApp {
             }
             Action::Quit => Ok(()),
             Action::ConfirmQuit => {
-                self.discard_pending_documents();
+                self.discard_all_pending_documents();
                 self.action_tx.send(Action::Quit).ok();
                 Ok(())
             }
@@ -267,7 +267,7 @@ impl TuiApp {
                 Ok(())
             }
             Action::ShowQuitConfirm => {
-                if self.has_pending_documents() {
+                if self.has_any_pending_documents() {
                     self.request_pending_document_discard(
                         crate::app::pending_documents::PendingDocumentDiscardAction::Quit,
                     );
@@ -404,6 +404,11 @@ impl TuiApp {
                 } else {
                     self.open_settings_page(None);
                 }
+                Ok(())
+            }
+            Action::NewTab => {
+                self.ui.app_tabs.add_launcher();
+                self.ui.focus = crate::tui::focus::Focus::Chat;
                 Ok(())
             }
             Action::NewChat => {
@@ -617,6 +622,9 @@ impl TuiApp {
                     tab.tab.reasoning_effort = None;
                 }
                 self.refresh_visible_selectors();
+                if tab_id != self.ui.active_tab {
+                    self.persist_tab_chat_selection(tab_id)?;
+                }
                 self.queue_connection_check_for_active_tab();
                 self.ui
                     .toast_stack
@@ -626,10 +634,13 @@ impl TuiApp {
             Action::UpdateTabModel(tab_id, model) => {
                 if let Some(tab) = self.ui.tabs.get_mut(tab_id) {
                     tab.tab.model = model.clone();
-                    tab.manual_model_override = false;
+                    tab.manual_model_override = !model.trim().is_empty();
                     tab.tab.reasoning_effort = None;
                 }
                 self.refresh_visible_selectors();
+                if tab_id != self.ui.active_tab {
+                    self.persist_tab_chat_selection(tab_id)?;
+                }
                 self.queue_connection_check_for_active_tab();
                 self.ui
                     .toast_stack
@@ -774,6 +785,7 @@ impl TuiApp {
             .unwrap_or(0);
 
         let tab_id = self.ui.active_tab;
+        self.persist_tab_chat_selection(tab_id)?;
         let Some(tab_state) = self.ui.tabs.get(tab_id) else {
             return Ok(());
         };
@@ -781,6 +793,20 @@ impl TuiApp {
         let is_local_provider = crate::llm::local::is_local_provider(&provider);
         let model = tab_state.tab.model.clone();
         let reasoning_effort = tab_state.tab.reasoning_effort.clone();
+        if let Some(entry) = self
+            .ui
+            .current_models
+            .iter()
+            .find(|entry| entry.id == model)
+        {
+            if reasoning_effort.as_ref().is_some_and(|effort| {
+                !Self::reasoning_options_for(&provider, entry).contains(effort)
+            }) {
+                return Err(color_eyre::eyre::eyre!(
+                    "Selected reasoning effort is unsupported for {provider}/{model}; choose a supported effort before sending"
+                ));
+            }
+        }
         let supported_reasoning_efforts = self
             .ui
             .current_models

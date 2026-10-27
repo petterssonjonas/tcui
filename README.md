@@ -204,10 +204,13 @@ remaining memory work.
 
 ## Settings
 
-`Ctrl+P` opens **Settings search**. With no query it offers **Settings tab**;
-typing searches settings and available actions. Selecting a setting opens its
-category on the dedicated Settings tab. `/settings` and the launcher open that
-tab directly.
+`Ctrl+P` opens **Settings search**. With no query it offers **Settings tab**,
+**New Tab**, **Memories** (when enabled), **Vault workspace**, **Open terminal**,
+**Chat**, and a **Web search: on/off** quick toggle. The Vault workspace contains
+files, not provider credentials. The web toggle saves the automatic-search setting
+and shows its current state. Typing searches settings and available actions.
+Selecting a setting opens its category on the dedicated Settings tab.
+`/settings` and the launcher open that tab directly.
 
 Settings are grouped into Appearance, Terminal, Layout, Chat, Web search,
 Connections, Models, Local inference, Notifications, Pushover, Files & vaults,
@@ -222,6 +225,20 @@ Changes still persist individually. The **Save** button and **Ctrl+S** also save
 all current settings, including a valid open draft. A failed save keeps the draft
 and previous saved value. Enter adds a line in multiline fields; Ctrl+Enter applies
 the field. Esc cancels an edit. Global tab/settings shortcuts preserve open drafts.
+
+**Settings → Models → Default chat selection** saves the provider, model, and
+effort together. Enter `provider=connection name`, `model=model ID`, and
+`effort=medium` on separate lines. Use the saved connection name and its model ID.
+`effort=auto` uses medium when supported, otherwise the model's supported default.
+An unsupported explicit effort is rejected without changing the saved combination.
+Use Ctrl+Enter or Ctrl+S to save the whole combination.
+
+Startup without a recorded chat selection and all new chats use this combination.
+Changing it does not change the active chat. Saved chats retain their own
+provider, model, and effort when reopened. Model-list refreshes preserve the
+selected combination instead of replacing it with the first catalog entry.
+Existing separate provider/model defaults migrate to the new `default_chat`
+configuration. Migration preserves the original configuration.
 
 Settings accept plaintext, not JSON. Provider/model lists and command rules use one
 entry per line. Non-command lists preserve spaces; `\n`, `\r`, `\t`, and `\\` encode
@@ -266,10 +283,9 @@ The binary embeds it; a working-directory file at the same path can override it.
 TCUI combines that contract with the effective AGENTS and SOUL text. User
 preferences do not grant tools or override host authorization and tool contracts.
 
-Terminal placement updates the current split immediately. Shell/directory and
-provider/model defaults apply to new sessions or conversations; existing sessions
-keep their state. Recovery retention changes policy for the next startup recovery
-pass, not an immediate purge.
+Terminal placement updates the current split immediately. Shell/directory defaults
+apply to new terminal sessions; existing sessions keep their state. Recovery
+retention changes policy for the next startup recovery pass, not an immediate purge.
 
 ## Commands and terminal tabs
 
@@ -401,6 +417,10 @@ OpenCode Go, OpenCode Zen, Groq, Mistral, Kilo Gateway, Berget.ai, and OpenAI OA
 API-key presets need only a key. **Custom** accepts a name, an OpenAI-compatible
 endpoint, and a key. Use `/model <id>` when a custom service cannot list models.
 
+The Provider selector starts at the bottom left; the footer has no web-search
+entry. Click the top-right **×** to close TCUI. It uses the existing quit
+confirmation and pending-document/running-terminal safeguards.
+
 OAuth works locally and over SSH without launching a browser on the app host:
 copy the sign-in URL with `c`, authorize in your browser, then paste the complete
 final response URL into TCUI and press Enter—even if the browser cannot load
@@ -426,9 +446,10 @@ controls the result limit, optional SearXNG endpoint, and automatic search.
 - `@exa <query>`, `@tavily <query>`, and `@firecrawl <query>` select the named MCP
   service explicitly.
 
-These mentions work while **Automatic web search** is off. `/web` toggles
-automatic search before each chat message; turning it on sends each request to
-the selected service and can consume that service's credits. Do not include
+These mentions work while **Automatic web search** is off. Toggle automatic search
+with **Web search: on/off** in the blank Ctrl+P popup, **Settings → Web search →
+Automatic web search**, or `/web`. Turning it on sends each request to the selected
+service and can consume that service's credits. Do not include
 secrets in search requests. Queries are limited to 2,000 characters, with 1–10
 requested results. Tavily currently requires at least five results.
 Same-source mentions share one search, and explicit searches do not trigger an
@@ -794,6 +815,42 @@ Each release contains:
 - `tcui-<version>-source.tar.gz` from the exact tagged commit
 - `install.sh`, `SHA256SUMS`, `LICENSE`, and `potion-base-8M-LICENSE`
 
+### Self-update
+
+```bash
+tcui --update
+# Equivalent: tcui --upgrade, tcui update, or tcui upgrade
+```
+
+The updater selects the most recently published GitHub release, including
+prereleases. It ignores drafts and never downgrades a newer installation.
+An incomplete new release produces an error; it does not silently select an
+older release. A current installation does not need to download release assets.
+
+Self-update uses the Linux x86-64 GNU release, regardless of whether TCUI was
+installed from an archive, Cargo, a source build, a local installer, or a native
+package. Other platforms and static musl builds must still update from source.
+The update needs Bash, curl, tar, and GNU coreutils. It uses the installer compiled
+into TCUI, not a downloaded script. The installer checks the archive checksum,
+archive members, executable format, and destination before an atomic replacement.
+Failed validation leaves the existing binary in place. User data is not changed.
+
+A safe, user-owned installed binary is replaced in place. System/package-managed,
+non-writable, and development build paths use `$HOME/.local/bin/tcui` instead.
+No system packages are changed, and no privilege escalation is used.
+`TCUI_BIN_DIR` selects another absolute, normalized, symlink-free user-local
+directory; system and package-owned
+destinations are refused. The output names the new binary and warns if another
+`tcui` comes first on `PATH`. Follow that warning before starting TCUI again.
+
+You can still update with the original method or switch methods: install a newer
+native package, rerun the local installer, rebuild/copy the binary, or use
+`cargo install --force`. If a user-local override hides a system installation,
+remove only that override with the local uninstaller after installing the desired
+package. Check `command -v tcui`, then clear the shell's cached path with
+`hash -r` or `rehash`. Package records and TCUI configuration, chats, and credentials
+are separate from the user-local binary.
+
 ### Local user install and uninstall
 
 Download and inspect the installer, then run it without sudo:
@@ -815,14 +872,20 @@ Keep the downloaded script; uninstall later with `bash install.sh uninstall`.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `TCUI_VERSION` | `latest` | Release tag, with or without `v`. |
+| `TCUI_VERSION` | `latest` | Stable release via GitHub's `latest` route, or a version normalized to a `v`-prefixed tag. |
+| `TCUI_RELEASE_TAG` | unset | Exact published tag, such as `0.8.6` or `v0.8.6`; takes precedence over `TCUI_VERSION`. |
 | `TCUI_BIN_DIR` | `$HOME/.local/bin` | Absolute, normalized, symlink-free destination. Add it to `PATH`. |
 | `TCUI_REPO` | `petterssonjonas/tcui` | Release repository, including forks. |
+
+The standalone installer's `latest` route excludes prereleases. To install a
+prerelease or an unprefixed tag, download and inspect its installer and set
+`TCUI_RELEASE_TAG` to the exact tag. Self-update uses the newest published release
+instead of this stable-only route.
 
 For offline installation, download the tarball and `SHA256SUMS` from the **same
 release**, verify the archive, then extract it into an empty directory and run
 its `install.sh`. A sibling `tcui` binary selects offline mode and is trusted as
-already verified; `TCUI_VERSION` and `TCUI_REPO` do not override that binary.
+already verified; release-selection variables do not override that binary.
 
 ```bash
 (

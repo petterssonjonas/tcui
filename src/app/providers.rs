@@ -17,7 +17,9 @@ fn refreshed_selection(
     manual_override: bool,
     models: &[&crate::ui::ModelInfo],
 ) -> Option<String> {
-    if manual_override || models.iter().any(|model| model.id == current) {
+    if (!current.trim().is_empty() && manual_override)
+        || models.iter().any(|model| model.id == current)
+    {
         return None;
     }
     Some(
@@ -112,7 +114,7 @@ impl TuiApp {
         model: &crate::ui::ModelInfo,
     ) -> Vec<String> {
         let provider = crate::llm::auth::canonical_provider_name(provider);
-        if provider == "Codex" {
+        if !model.supported_reasoning_efforts.is_empty() || provider == "Codex" {
             return model.supported_reasoning_efforts.clone();
         }
         if model.id.starts_with("gpt-5")

@@ -30,6 +30,8 @@ fn fork_persists_independent_history_and_keeps_current_selection() {
         app.ui.tabs[0].tab.reasoning_effort = Some("high".into());
         app.ui.tabs[0].manual_model_override = true;
         app.ui.tabs[0].streaming = true;
+        app.persist_tab_chat_selection(0)
+            .expect("save source selection");
         let source_before = serde_json::to_value(
             app.storage
                 .read_chat_document(source_id)
@@ -67,6 +69,27 @@ fn fork_persists_independent_history_and_keeps_current_selection() {
             .storage
             .read_chat_document(child_id)
             .expect("read child");
+        assert_eq!(
+            child
+                .selection
+                .as_ref()
+                .map(|selection| selection.provider.as_str()),
+            Some("Ollama")
+        );
+        assert_eq!(
+            child
+                .selection
+                .as_ref()
+                .map(|selection| selection.model.as_str()),
+            Some("selected-model")
+        );
+        assert_eq!(
+            child
+                .selection
+                .as_ref()
+                .and_then(|selection| selection.effort.as_deref()),
+            Some("high")
+        );
         assert_eq!(child.title, "Fork of Source title");
         assert_eq!(child.messages[0].id, Some(1));
         assert_eq!(child.messages[0].conversation_id, child_id);
@@ -158,7 +181,7 @@ fn complete_snapshot_is_encrypted_and_write_failure_does_not_leave_empty_child()
         )];
         let child_id = app
             .storage
-            .create_conversation_snapshot(0, "Recovered", &messages)
+            .create_conversation_snapshot(0, "Recovered", &messages, None)
             .expect("persist complete snapshot");
         let stored = app.storage.get_messages(child_id).expect("read snapshot");
         assert_eq!(stored[0].content, "partial answer snapshot");
@@ -181,7 +204,7 @@ fn complete_snapshot_is_encrypted_and_write_failure_does_not_leave_empty_child()
 
         let result = app
             .storage
-            .create_conversation_snapshot(0, "Failed", &messages);
+            .create_conversation_snapshot(0, "Failed", &messages, None);
 
         std::fs::remove_file(&paths.chats_dir).expect("unblock directory");
         std::fs::rename(&backup, &paths.chats_dir).expect("restore chats directory");
