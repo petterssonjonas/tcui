@@ -44,6 +44,16 @@ Type any slash command in the message box:
   In Keyboard settings, Enter captures a binding and Backspace resets it.
   During capture, Ctrl+S is binding input. After a failed binding write, Ctrl+S
   retries that binding. Finish or cancel capture before clicking Save.
+- Settings → Chat edits **SOUL.md** (personality) and **AGENTS.md** (working
+  preferences) as multiline text. Save writes these files in the TCUI configuration
+  directory, normally `~/.config/tcui`. Missing files use bundled defaults; empty
+  files disable their layer. Changes apply to the next request. If another editor
+  changes a file, Save retains your draft instead of overwriting the newer file;
+  copy the draft, cancel, and reopen to reconcile it. These plaintext instructions
+  are sent to the selected model. Do not put credentials in them.
+- Settings → Web search → **Web search source** chooses native `local` search or
+  an enabled Exa, Tavily, or Firecrawl MCP profile. `@websearch`, `@research`, and
+  automatic search use that choice; failures do not silently switch sources.
 - Click the **provider** or **model** labels in the status bar to change
   selectors.
 - Settings groups include terminal defaults, appearance, layout, chat, web search,
@@ -67,7 +77,7 @@ Type any slash command in the message box:
   Cycles and crowded graphs retain boxes, continuous arrows, and inline labels.
   Mermaid `xychart-beta` renders vertical bar/line charts; `pie` renders colored
   sectors with values and percentages. All work locally and over SSH without a
-  browser. Examples are included in the model instructions (`assets/TCUI.md`).
+  browser. Supported syntax is described in `assets/SYSTEM_PROMPT.md`.
   Unsupported, incomplete, or oversized diagrams retain a readable source view.
 - Text-box borders stay aligned when resized. Long code lines wrap instead of
   disappearing; the response copy button preserves the original source.

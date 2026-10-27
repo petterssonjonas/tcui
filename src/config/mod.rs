@@ -1,8 +1,8 @@
 pub mod app_config;
 pub mod key_store;
 pub mod mcp_config;
+pub(crate) mod prompts;
 pub mod search;
-pub mod soul;
 pub mod tui;
 
 pub use app_config::{

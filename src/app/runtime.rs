@@ -719,6 +719,13 @@ impl TuiApp {
                 "Cannot send a message without a Tokio runtime"
             ));
         }
+        let system_prompt = match Self::load_system_prompt() {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                self.replace_input_content(content);
+                return Err(error);
+            }
+        };
         let completed_vault_result = self
             .ui
             .pending_vault_mutation
@@ -844,7 +851,6 @@ impl TuiApp {
             .as_ref()
             .map(|(_, env_var, _)| env_var.clone());
         let action_tx = self.action_tx.clone();
-        let system_prompt = self.system_prompt.clone();
         let user_request = content.clone();
         let save_requested = crate::skills::mentions(&content)
             .iter()

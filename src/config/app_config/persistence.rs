@@ -57,6 +57,29 @@ fn save_with_root(config: &AppConfig, config_base: Option<PathBuf>) -> Result<()
     atomic_replace(&config_root.join(CONFIG_FILE), content.as_bytes())
 }
 
+pub(crate) fn save_prompt_file(
+    path: &Path,
+    content: &str,
+    default: &str,
+    original: Option<&str>,
+) -> Result<()> {
+    let root = path
+        .parent()
+        .ok_or_else(|| eyre!("prompt file has no parent"))?;
+    let _lock = acquire_lock(root)?;
+    let previous = read_optional(path)?;
+    if previous.as_deref() != original.map(str::as_bytes) {
+        return Err(eyre!(
+            "{} changed outside this editor. Copy your draft, then cancel and reopen the field before saving.",
+            path.display()
+        ));
+    }
+    if previous.as_deref().unwrap_or(default.as_bytes()) == content.as_bytes() {
+        return Ok(());
+    }
+    atomic_replace(path, content.as_bytes())
+}
+
 fn load_toml_with_migration(path: &Path, original: &[u8]) -> Result<AppConfig> {
     let original_text = std::str::from_utf8(original).wrap_err("config.toml is not UTF-8")?;
     let original_toml: toml::Value = toml::from_str(original_text)?;
@@ -106,7 +129,7 @@ fn reload_toml(path: &Path) -> Result<AppConfig> {
 }
 
 fn bootstrap_layout(config_root: &Path, data_root: &Path) -> Result<()> {
-    for dir in ["skills", "souls", "themes", "mcp"] {
+    for dir in ["skills", "themes", "mcp"] {
         crate::protection::open_directory(&config_root.join(dir), true)?;
     }
     crate::protection::open_directory(data_root, true)?;
@@ -114,7 +137,7 @@ fn bootstrap_layout(config_root: &Path, data_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn required_root(base: Option<PathBuf>, kind: &str) -> Result<PathBuf> {
+pub(crate) fn required_root(base: Option<PathBuf>, kind: &str) -> Result<PathBuf> {
     let base = base.ok_or_else(|| eyre!("cannot determine {kind} directory"))?;
     if !base.is_absolute() {
         return Err(eyre!(

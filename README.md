@@ -245,6 +245,27 @@ The other MCP field is `url:` for HTTP servers. Omit absent optional fields;
 `args:` with no value means an empty argument list. MCP fields support `\\`, `\n`,
 `\r`, and `\t` escapes. Saving configuration does not run server commands.
 
+**Assistant instructions:** Settings → Chat has multiline **SOUL.md** (personality
+and tone) and **AGENTS.md** (working preferences) fields. They show the effective
+text and save to `$XDG_CONFIG_HOME/tcui/SOUL.md` and `AGENTS.md`, normally under
+`~/.config/tcui`. Missing files use `assets/default_soul.md` and
+`assets/default_agent.md`; a user file replaces its corresponding default.
+An empty file disables that layer. Delete the override to restore the bundled
+default. Repository governance files are not loaded as user preferences.
+
+Save preserves whitespace and newlines. Read/write failures keep the draft and
+report an error. If the file changes while its editor is open, Save rejects the
+stale draft instead of overwriting the newer file; copy the draft, cancel, and
+reopen to reconcile it. Unrelated settings saves do not rewrite prompt files.
+The next submission reloads these files; in-flight requests keep their original
+instructions. Prompt files are plaintext configuration, not encrypted secret
+storage, and their contents are sent to the selected model.
+
+`assets/SYSTEM_PROMPT.md` contains TCUI's capability and execution contracts.
+The binary embeds it; a working-directory file at the same path can override it.
+TCUI combines that contract with the effective AGENTS and SOUL text. User
+preferences do not grant tools or override host authorization and tool contracts.
+
 Terminal placement updates the current split immediately. Shell/directory and
 provider/model defaults apply to new sessions or conversations; existing sessions
 keep their state. Recovery retention changes policy for the next startup recovery
@@ -310,13 +331,11 @@ the normal code color. Ordinary `echo`/`printf` work, redirections, and pipeline
 remain emphasized. Colors aid reading, not safety assessment; they never change
 what is copied or approved. Unsupported or oversized syntax remains readable.
 
-`assets/TCUI.md` asks for short output headings followed directly by commands,
-keeping related steps in one paste-ready block. It discourages unnecessary
-conditionals, wrappers, functions, and exit-status boilerplate; use them only when
-the task needs them. Journal/systemd queries retain supported `--no-pager` options.
-Independent diagnostics may continue after a failure; dependent changes must stop
-when prerequisites fail. Warnings and commands being discussed rather than
-recommended stay inline, not in runnable blocks.
+`assets/SYSTEM_PROMPT.md` defines actionable fences, payload requirements, and
+the distinction between reviewed shell blocks and approved agent tools.
+Commands stay simple, with bounded diagnostic output and explicit success
+dependencies where required. Commands discussed rather than recommended stay
+inline, not in runnable blocks.
 
 - The clicked block starts selected. Space or its checkbox toggles selection;
   PageUp/PageDown scroll the payload.
@@ -394,11 +413,13 @@ configurable in Settings.
 
 ## Web search
 
-**Settings → Web search** selects the source, result limit, optional SearXNG
-endpoint, and automatic-search behavior. The default local backend queries
-DuckDuckGo Lite directly: no `ddgr`, browser, API key, or MCP subprocess is needed.
-“Local” means the request runs on the TCUI host, including over SSH; it is not
-offline search.
+**Settings → Web search → Web search source** selects `local`, `exa`, `tavily`,
+or `firecrawl`. This choice controls automatic search and the `@websearch` and
+`@research` skills. MCP sources require their enabled profile and saved key.
+The default `local` backend queries DuckDuckGo Lite directly: no `ddgr`, browser,
+API key, or MCP subprocess is needed. “Local” means the request runs on the TCUI
+host, including over SSH; it is not offline search. The same settings category
+controls the result limit, optional SearXNG endpoint, and automatic search.
 
 - `@websearch <query>` searches with the selected source.
 - `@research <query>` uses that source for a sourced report.
@@ -502,9 +523,8 @@ values and percentages. Pie values must be nonnegative with a positive total.
 
 All rendering is native Rust and works locally or over SSH without a browser or
 image-capable terminal. Markdown Off and the copy button preserve original source.
-The model instructions in `assets/TCUI.md` include examples for all four visual
-formats. The binary embeds these instructions for launches outside the repository;
-a working-directory `assets/TCUI.md` remains an optional override.
+The compact model instructions in `assets/SYSTEM_PROMPT.md` describe supported
+visual syntax and limits.
 
 Unsupported syntax (including horizontal XY charts and interactive directives),
 incomplete streamed fences, and inputs beyond viewport/resource limits retain an
