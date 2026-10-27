@@ -58,7 +58,8 @@ pub type TerminalType = Terminal<Backend>;
 #[derive(Debug, Parser)]
 #[command(name = "tcui")]
 struct Cli {
-    #[arg(long, default_value_t = false)]
+    /// Install the newest published release, including prereleases.
+    #[arg(long, visible_alias = "update", default_value_t = false)]
     upgrade: bool,
     #[arg(long)]
     decrypt: Option<PathBuf>,
@@ -89,6 +90,8 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Auth(auth_command::AuthCommandArgs),
+    /// Install the newest published release, including prereleases.
+    #[command(visible_alias = "update")]
     Upgrade,
     #[command(hide = true)]
     ReminderDispatch {
@@ -896,19 +899,14 @@ mod tests {
     }
 
     #[test]
-    fn cli_parses_upgrade_as_a_pre_tui_command() {
-        let cli = Cli::try_parse_from(["tcui", "upgrade"]).expect("upgrade command parses");
-
-        assert!(matches!(cli.command, Some(Command::Upgrade)));
-    }
-
-    #[test]
-    fn cli_leaves_offline_actions_empty_for_a_pre_tui_command() {
-        let cli = Cli::try_parse_from(["tcui", "upgrade"]).expect("upgrade command parses");
-
-        assert!(OfflineAction::from_cli(&cli)
-            .expect("upgrade does not conflict with offline actions")
-            .is_none());
+    fn update_commands_bypass_offline_data_operations() {
+        for argument in ["--update", "--upgrade", "update", "upgrade"] {
+            let cli = Cli::try_parse_from(["tcui", argument]).expect("update command parses");
+            assert!(cli.upgrade || matches!(cli.command, Some(Command::Upgrade)));
+            assert!(OfflineAction::from_cli(&cli)
+                .expect("update does not conflict with offline actions")
+                .is_none());
+        }
     }
 
     #[cfg(feature = "memory")]

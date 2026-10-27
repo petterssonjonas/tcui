@@ -150,7 +150,7 @@ fn password_rotation_preserves_mixed_credentials_labels_chats_and_every_managed_
     let labels = KeyStore::list_secrets(&config).expect("original labels and IDs");
     let storage = Storage::new().expect("chat store");
     let chat = storage
-        .create_conversation_snapshot(0, "preserved chat title", &[])
+        .create_conversation_snapshot(0, "preserved chat title", &[], None)
         .expect("chat");
     drop(storage);
     let chat_path = environment

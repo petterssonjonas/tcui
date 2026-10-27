@@ -6,7 +6,8 @@ pub mod search;
 pub mod tui;
 
 pub use app_config::{
-    AppConfig, LocalInferenceConfig, LocalServerType, ProviderConfig, LOCAL_PROVIDER_NAME,
+    AppConfig, ChatSelection, LocalInferenceConfig, LocalServerType, ProviderConfig,
+    LOCAL_PROVIDER_NAME,
 };
 pub use key_store::KeyStore;
 pub use mcp_config::McpServerConfig;

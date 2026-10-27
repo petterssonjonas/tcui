@@ -174,8 +174,11 @@ fn cancelling_executing_host_request_terminates_group_without_final_side_effect(
 
 fn fixture_config() -> AppConfig {
     let mut config = AppConfig {
-        default_provider: "Ollama".to_owned(),
-        default_model: "host-fixture".to_owned(),
+        default_chat: crate::config::ChatSelection {
+            provider: "Ollama".to_owned(),
+            model: "host-fixture".to_owned(),
+            effort: None,
+        },
         providers: vec![ProviderConfig {
             name: "Ollama".to_owned(),
             endpoint: "http://127.0.0.1:9".to_owned(),

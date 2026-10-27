@@ -61,13 +61,40 @@ impl TuiApp {
         tab.input_history_draft = None;
     }
 
+    pub(crate) fn persist_tab_chat_selection(&self, tab_id: usize) -> color_eyre::Result<()> {
+        let Some(tab) = self.ui.tabs.get(tab_id) else {
+            return Ok(());
+        };
+        if tab.active_conversation == 0 {
+            return Ok(());
+        }
+        self.storage.set_conversation_selection(
+            tab.active_conversation,
+            &crate::config::ChatSelection {
+                provider: tab.tab.provider.clone(),
+                model: tab.tab.model.clone(),
+                effort: tab.tab.reasoning_effort.clone(),
+            },
+        )
+    }
+
     pub(crate) fn load_conversation_into_tab(
         &mut self,
         tab_id: usize,
         conv_id: i64,
     ) -> color_eyre::Result<()> {
         self.cancel_escape = None;
-        let messages = self.storage.get_messages(conv_id)?;
+        let document = self.storage.read_chat_document(conv_id)?;
+        if self
+            .ui
+            .tabs
+            .get(tab_id)
+            .is_some_and(|tab| tab.active_conversation != conv_id)
+        {
+            self.persist_tab_chat_selection(tab_id)?;
+        }
+        let selection = document.selection;
+        let messages = document.messages;
         let title = self.ui.tabs.get(tab_id).and_then(|tab| {
             tab.conversations
                 .iter()
@@ -79,9 +106,24 @@ impl TuiApp {
             tab.active_conversation = conv_id;
             tab.generated_title = title.filter(|value| value != "New Chat");
             tab.messages = messages;
+            if let Some(selection) = &selection {
+                tab.tab.provider = selection.provider.clone();
+                tab.tab.model = selection.model.clone();
+                tab.tab.reasoning_effort = selection.effort.clone();
+                tab.tab.endpoint = None;
+                tab.manual_model_override = true;
+            }
+        }
+        if selection.is_none() {
+            self.apply_default_chat_selection(tab_id);
+        } else if tab_id == self.ui.active_tab {
+            self.refresh_visible_selectors();
         }
         self.hydrate_chat_files(tab_id, conv_id)?;
         self.sync_request_view(tab_id);
+        if tab_id == self.ui.active_tab {
+            self.queue_connection_check_for_active_tab();
+        }
         Ok(())
     }
 
@@ -155,7 +197,7 @@ impl TuiApp {
         let conv_id = self.storage.create_conversation(tab_id as i64)?;
         self.refresh_tab_conversations(tab_id)?;
         self.load_conversation_into_tab(tab_id, conv_id)?;
-        self.apply_default_chat_selection(tab_id);
+        self.persist_tab_chat_selection(tab_id)?;
         Ok(())
     }
 
@@ -210,6 +252,7 @@ impl TuiApp {
                 "Send or clear the main chat draft before opening a persistent fork"
             ));
         }
+        self.persist_tab_chat_selection(tab_id)?;
         let messages = self.conversation_snapshot(source_id)?;
         let child =
             self.storage
@@ -228,6 +271,7 @@ impl TuiApp {
                     child.id,
                 ));
         }
+        self.persist_tab_chat_selection(destination_tab)?;
         self.focus_chat_pane(destination_tab);
         Ok(())
     }

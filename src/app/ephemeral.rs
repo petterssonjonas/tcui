@@ -41,6 +41,7 @@ impl TuiApp {
             .or(source.generated_title.as_deref())
             .unwrap_or("New Chat");
         let title = format!("Ephemeral fork of {source_title} conversation");
+        self.persist_tab_chat_selection(main_tab_index)?;
         let snapshot = self.conversation_snapshot(origin)?;
         let copied_message_count = snapshot.len();
         let tab_index = self.ui.tabs.len();

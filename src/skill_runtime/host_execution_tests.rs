@@ -858,8 +858,11 @@ fn app_redacts_keys_split_across_final_answer_and_thinking_sse_chunks() {
 
 fn app_config() -> AppConfig {
     let mut config = AppConfig {
-        default_provider: "Ollama".into(),
-        default_model: "host-agent-fixture".into(),
+        default_chat: crate::config::ChatSelection {
+            provider: "Ollama".into(),
+            model: "host-agent-fixture".into(),
+            effort: None,
+        },
         providers: vec![crate::config::ProviderConfig {
             name: "Ollama".into(),
             endpoint: "http://127.0.0.1:9".into(),

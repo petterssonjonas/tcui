@@ -65,6 +65,7 @@ pub enum Action {
     SwitchTab(usize),
     AddTab(crate::app::Tab),
     RemoveTab(usize),
+    NewTab,
     NewChat,
     CloseChat,
     ToggleSidebar,

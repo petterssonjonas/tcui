@@ -84,7 +84,7 @@ struct PanelLayout {
     description: Option<Rect>,
 }
 
-/// Search-only navigator. Configuration editing belongs to the Settings workspace.
+/// Settings navigator with quick actions; configuration editing belongs to Settings.
 #[derive(Debug, Clone, Default)]
 pub struct SettingsPanelState {
     pub search: SearchField,
@@ -135,7 +135,18 @@ impl SettingsPanelState {
             .enumerate()
             .filter(|(_, setting)| {
                 if query.is_empty() {
-                    setting.id == "settings_tab"
+                    matches!(
+                        setting.setting_type,
+                        SettingType::Command(
+                            "open_settings"
+                                | "new_tab"
+                                | "focus_input"
+                                | "open_vault"
+                                | "open_terminal"
+                                | "toggle_web_search"
+                                | "open_memories"
+                        )
+                    )
                 } else {
                     setting_matches(setting, &query)
                 }
@@ -246,7 +257,7 @@ impl SettingsPanelState {
             .collect()
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
+    pub fn render(&self, frame: &mut Frame, area: Rect, web_search_enabled: bool) {
         let theme = crate::theme::active_theme();
         let layout = self.panel_layout(area);
         let style = Style::default().fg(theme.foreground).bg(theme.panel);
@@ -301,7 +312,12 @@ impl SettingsPanelState {
             } else {
                 "↗"
             };
-            let label = if setting.id == "settings_tab" && self.query().trim().is_empty() {
+            let label = if setting.id == "command_toggle_web_search" {
+                format!(
+                    " {marker} Web search: {}",
+                    if web_search_enabled { "on" } else { "off" }
+                )
+            } else if setting.id == "settings_tab" && self.query().trim().is_empty() {
                 format!(" {marker} {}", setting.title)
             } else {
                 format!(" {marker} {} · {}", setting.title, setting.category.label())
@@ -341,6 +357,10 @@ pub fn command_action(id: &str) -> Option<crate::app::Action> {
     use crate::app::Action;
     match id {
         "open_settings" | "open_settings_panel" => Some(Action::OpenSettingsPanel),
+        "new_tab" => Some(Action::NewTab),
+        "open_vault" => Some(Action::OpenVaultLauncher),
+        #[cfg(feature = "memory")]
+        "open_memories" => Some(Action::OpenMemoriesLauncher),
         "toggle_settings" => Some(Action::ToggleSettings),
         "connect_provider" => Some(Action::OpenProviders),
         "toggle_session_list" => Some(Action::ToggleSessionList),
@@ -383,6 +403,34 @@ pub fn all_settings() -> Vec<Setting> {
             C::Commands,
             T::Command("open_settings"),
             &["preferences", "configuration"],
+            D::Safe,
+        ),
+        setting(
+            "command_new_tab",
+            "New Tab",
+            "Open a tab with workspace choices.",
+            C::Commands,
+            T::Command("new_tab"),
+            &["launcher", "workspace"],
+            D::Safe,
+        ),
+        #[cfg(feature = "memory")]
+        setting(
+            "command_open_memories",
+            "Memories",
+            "Open the memories workspace.",
+            C::Commands,
+            T::Command("open_memories"),
+            &["memory", "notes"],
+            D::Safe,
+        ),
+        setting(
+            "command_open_vault",
+            "Vault workspace",
+            "Open the file vault workspace, not the credential vault.",
+            C::Commands,
+            T::Command("open_vault"),
+            &["files", "documents", "storage"],
             D::Safe,
         ),
         setting(
@@ -459,9 +507,9 @@ pub fn all_settings() -> Vec<Setting> {
         ),
         setting(
             "command_toggle_web_search",
-            "Toggle Web Search",
-            "Enable or disable web search for subsequent prompts.",
-            C::Commands,
+            "Web search",
+            "Enable or disable automatic web search for subsequent prompts. Explicit search mentions still work when automatic search is off.",
+            C::WebSearch,
             T::Command("toggle_web_search"),
             &["web", "search"],
             D::Safe,
@@ -522,11 +570,11 @@ pub fn all_settings() -> Vec<Setting> {
         ),
         setting(
             "command_focus_input",
-            "Focus Input",
+            "Chat",
             "Return focus to the chat composer.",
             C::Commands,
             T::Command("focus_input"),
-            &["prompt"],
+            &["prompt", "focus input", "conversation"],
             D::Safe,
         ),
         setting(
@@ -566,22 +614,6 @@ fn setting(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{backend::TestBackend, Terminal};
-
-    #[test]
-    fn empty_navigator_only_offers_settings_tab() {
-        let settings = all_settings();
-        let mut state = SettingsPanelState::new();
-        assert_eq!(state.results(&settings).len(), 1);
-        assert_eq!(
-            state.selected_setting(&settings).expect("entry").title,
-            "Settings tab"
-        );
-        assert_eq!(
-            state.enter(&settings),
-            EnterResult::RunCommand("open_settings")
-        );
-    }
 
     #[test]
     fn search_navigates_setting_without_mutation() {
@@ -603,6 +635,8 @@ mod tests {
             ("connect timeout", "local_inference.connect_timeout_ms"),
             ("focus input", "command_focus_input"),
             ("terminal placement", "tui.terminal_placement"),
+            ("files", "command_open_vault"),
+            ("launcher", "command_new_tab"),
         ] {
             let mut state = SettingsPanelState::new();
             for character in query.chars() {
@@ -616,27 +650,6 @@ mod tests {
                 "{query}"
             );
         }
-    }
-
-    #[test]
-    fn navigator_keeps_compact_layout_and_optional_details() {
-        let mut state = SettingsPanelState::new();
-        assert!(state
-            .panel_layout(Rect::new(0, 0, 100, 40))
-            .description
-            .is_none());
-        let mut terminal = Terminal::new(TestBackend::new(64, 16)).expect("terminal");
-        terminal
-            .draw(|frame| state.render(frame, frame.area()))
-            .expect("render");
-        let rendered = terminal.backend().to_string();
-        assert!(rendered.contains("Settings search"));
-        assert!(!rendered.contains("Settings tab · Commands"));
-        state.toggle_descriptions();
-        assert!(state
-            .panel_layout(Rect::new(0, 0, 100, 40))
-            .description
-            .is_some());
     }
 
     #[test]

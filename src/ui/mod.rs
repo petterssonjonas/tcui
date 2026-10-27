@@ -206,6 +206,7 @@ pub enum MouseAction {
     AppTabSelect(app_tabs::AppTabId),
     AppTabAdd,
     AppTabClose(app_tabs::AppTabId),
+    CloseApp,
     Sidebar(sidebar::SidebarAction),
     PaletteItem(usize),
     LeftHandle,
@@ -523,6 +524,7 @@ impl UI {
                     top_bar::TopBarAction::Select(id) => MouseAction::AppTabSelect(id),
                     top_bar::TopBarAction::Add => MouseAction::AppTabAdd,
                     top_bar::TopBarAction::Close(id) => MouseAction::AppTabClose(id),
+                    top_bar::TopBarAction::CloseApp => MouseAction::CloseApp,
                 };
                 (hit.area, action)
             }));
@@ -815,7 +817,6 @@ impl UI {
                 reasoning_effort: tab_state.tab.reasoning_effort.clone(),
                 show_reasoning_selector: !self.current_reasoning_options.is_empty(),
                 show_selector: self.show_selector,
-                web_search_enabled: self.web_search_enabled,
                 context_window: self
                     .current_models
                     .iter()
@@ -1018,7 +1019,7 @@ impl UI {
         }
 
         if let Some(ref settings) = self.settings_v2 {
-            settings.render(f, area);
+            settings.render(f, area, self.web_search_enabled);
             self.mouse_hit_areas.extend(
                 settings
                     .visible_item_areas(area)

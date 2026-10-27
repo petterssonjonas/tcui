@@ -22,7 +22,7 @@ fn vault_config_migration_discards_external_selection_without_importing_or_mutat
     let second = AppConfig::load().expect("reload migrated config");
 
     assert_eq!(config.theme, "legacy-theme");
-    assert_eq!(second.default_model, "retained-model");
+    assert_eq!(second.default_chat.model, "retained-model");
     assert!(config.saved_files_dir.is_none());
     assert_eq!(
         std::fs::read(home.backup_path()).expect("read original backup"),
@@ -114,5 +114,37 @@ fn vault_config_migration_preserves_visibility_and_native_content() {
     assert_eq!(
         std::fs::read(native.join("existing.md")).expect("read native content"),
         b"native content"
+    );
+}
+
+#[test]
+fn chat_defaults_migrate_together_and_new_selection_wins_over_legacy_keys() {
+    let _guard = env_lock().lock().expect("env lock poisoned");
+    let home = ConfigHome::new("default-chat-migration");
+    home.seed_toml("default_provider = \"Saved connection\"\ndefault_model = \"saved-model\"\n");
+    let migrated = AppConfig::load().expect("migrate selection");
+    assert_eq!(
+        migrated.default_chat,
+        crate::config::ChatSelection {
+            provider: "Saved connection".into(),
+            model: "saved-model".into(),
+            effort: None,
+        }
+    );
+    let rewritten = std::fs::read_to_string(home.config_path()).expect("saved config");
+    assert!(!rewritten.contains("default_provider"));
+    assert!(!rewritten.contains("default_model"));
+    assert_eq!(
+        AppConfig::load().expect("reload").default_chat,
+        migrated.default_chat
+    );
+    home.seed_toml("default_provider = \"obsolete\"\ndefault_model = \"obsolete\"\n[default_chat]\nprovider = \"Saved connection\"\nmodel = \"explicit-model\"\neffort = \"medium\"\n");
+    let selected = AppConfig::load().expect("prefer new combination");
+    assert_eq!(selected.default_chat.provider, "Saved connection");
+    assert_eq!(selected.default_chat.model, "explicit-model");
+    assert_eq!(selected.default_chat.effort.as_deref(), Some("medium"));
+    assert_eq!(
+        AppConfig::load().expect("roundtrip").default_chat,
+        selected.default_chat
     );
 }

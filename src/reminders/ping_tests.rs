@@ -152,7 +152,7 @@ fn encrypted_credentials_deliver_after_lock_then_one_shot_snapshot_is_consumed()
     .unwrap();
     let storage = crate::storage::Storage::new().unwrap();
     storage
-        .create_conversation_snapshot(1, "Protected chat", &[])
+        .create_conversation_snapshot(1, "Protected chat", &[], None)
         .unwrap();
     assert!(!fixture.root.join("data/tcui/chat.key").exists());
     let record = fixture.schedule();

@@ -156,27 +156,6 @@ impl TuiApp {
         ui.visible_providers =
             Self::filter_visible_providers(&ui.db_providers, &ui.disabled_providers);
 
-        let resolve_provider_name = |candidate: &str| {
-            ui.db_providers
-                .iter()
-                .find(|(name, _, _, _, _)| name.eq_ignore_ascii_case(candidate.trim()))
-                .map(|(name, _, _, _, _)| name.clone())
-                .unwrap_or_else(|| crate::llm::auth::canonical_provider_name(candidate))
-        };
-        let default_provider = resolve_provider_name(&config_snapshot.default_provider);
-        let default_model = if default_provider == crate::config::LOCAL_PROVIDER_NAME
-            && config_snapshot.default_model.trim().is_empty()
-        {
-            config_snapshot.local_inference.selected_model.clone()
-        } else {
-            config_snapshot.default_model.clone()
-        };
-
-        if let Some(active_tab) = ui.tabs.get_mut(ui.active_tab) {
-            active_tab.tab.provider = default_provider.clone();
-            active_tab.tab.model = default_model.clone();
-        }
-
         let mut background_tasks = Vec::new();
         if std::io::stdin().is_terminal() {
             let model_action_tx = action_tx.clone();
@@ -218,7 +197,7 @@ impl TuiApp {
             background_tasks: std::sync::Mutex::new(background_tasks),
         };
         let mut app = app;
-        app.refresh_visible_selectors();
+        app.apply_default_chat_selection(app.ui.active_tab);
         app.initialize_chat_state();
         app.refresh_artifact_sidebar_catalogs();
         if orphan_cleanup_error.is_some() {
@@ -229,7 +208,6 @@ impl TuiApp {
             app.ui
                 .show_toast(format!("Legacy saved-file migration skipped: {error}"));
         }
-        app.queue_connection_check_for_active_tab();
         app
     }
 
@@ -404,20 +382,17 @@ impl TuiApp {
         let mut model = tab.tab.model.clone();
         let mut reasoning_effort = tab.tab.reasoning_effort.clone();
         let mut manual_model_override = tab.manual_model_override;
-        if !self
-            .ui
-            .visible_providers
-            .iter()
-            .any(|(name, _, _, _, _)| name == &provider)
-        {
+        if model.trim().is_empty() {
+            manual_model_override = false;
+        }
+        // A saved or restored explicit connection must not be replaced by an unrelated one
+        // while credentials are locked, a provider is offline, or its catalog is still loading.
+        if provider.is_empty() {
             if let Some((next_provider, _, _, _, _)) = self.ui.visible_providers.first() {
                 provider = next_provider.clone();
                 model.clear();
-            } else {
-                provider.clear();
-                model.clear();
+                manual_model_override = false;
             }
-            manual_model_override = false;
         }
         self.ui.current_models = self.visible_models_for_provider(&provider);
         if model.trim().is_empty()
@@ -445,23 +420,29 @@ impl TuiApp {
         self.ui.current_reasoning_options = selected_model
             .map(|entry| Self::reasoning_options_for(&provider, entry))
             .unwrap_or_default();
+        let unsupported_saved_effort = manual_model_override
+            && selected_model.is_some()
+            && reasoning_effort
+                .as_ref()
+                .is_some_and(|effort| !self.ui.current_reasoning_options.contains(effort));
         if self.ui.current_reasoning_options.is_empty() {
-            reasoning_effort = None;
-        } else if reasoning_effort.as_ref().is_none_or(|value| {
-            !self
+            if !manual_model_override {
+                reasoning_effort = None;
+            }
+        } else if !unsupported_saved_effort
+            && reasoning_effort
+                .as_ref()
+                .is_none_or(|value| !self.ui.current_reasoning_options.contains(value))
+        {
+            reasoning_effort = self
                 .ui
                 .current_reasoning_options
                 .iter()
-                .any(|option| option == value)
-        }) {
-            reasoning_effort = default_reasoning_effort
-                .filter(|default| self.ui.current_reasoning_options.contains(default))
+                .find(|option| option.as_str() == "medium")
+                .cloned()
                 .or_else(|| {
-                    self.ui
-                        .current_reasoning_options
-                        .iter()
-                        .find(|option| option.as_str() == "medium")
-                        .cloned()
+                    default_reasoning_effort
+                        .filter(|default| self.ui.current_reasoning_options.contains(default))
                 })
                 .or_else(|| self.ui.current_reasoning_options.first().cloned());
         }
@@ -473,6 +454,13 @@ impl TuiApp {
             tab.tab.model = model;
             tab.manual_model_override = manual_model_override;
             tab.tab.reasoning_effort = reasoning_effort;
+        }
+        if unsupported_saved_effort {
+            self.ui.show_toast("Saved reasoning effort is no longer supported by this model. Choose a supported effort before sending.".into());
+        }
+        if let Err(error) = self.persist_tab_chat_selection(self.ui.active_tab) {
+            self.ui
+                .show_toast(format!("Chat selection could not be saved: {error}"));
         }
     }
 

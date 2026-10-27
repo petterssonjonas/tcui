@@ -273,13 +273,33 @@ impl LocalInferenceConfig {
     }
 }
 
+/// Provider, model and reasoning policy saved together for subsequent chats.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ChatSelection {
+    pub provider: String,
+    pub model: String,
+    /// Omitted means medium when supported, otherwise the model's supported default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+impl Default for ChatSelection {
+    fn default() -> Self {
+        Self {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            effort: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub theme: String,
-    pub default_model: String,
+    pub default_chat: ChatSelection,
     pub small_model: Option<String>,
-    pub default_provider: String,
     pub user_alignment: TextAlignment,
     pub ai_alignment: TextAlignment,
     pub markdown_mode: MarkdownMode,
@@ -370,9 +390,8 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             theme: "system".to_string(),
-            default_model: "gpt-4o".to_string(),
+            default_chat: ChatSelection::default(),
             small_model: None,
-            default_provider: "openai".to_string(),
             user_alignment: TextAlignment::Right,
             ai_alignment: TextAlignment::Left,
             markdown_mode: MarkdownMode::Full,

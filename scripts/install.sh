@@ -2,7 +2,8 @@
 # Install a Linux x86-64 release into ~/.local/bin without sudo or package managers.
 # Usage: bash install.sh [install|uninstall]
 # TCUI_BIN_DIR selects an absolute destination; TCUI_REPO selects owner/repository.
-# TCUI_VERSION selects a release tag (with or without v), defaulting to latest.
+# TCUI_VERSION selects a v-prefixed release (with or without v), default latest stable.
+# TCUI_RELEASE_TAG pins the exact published tag without changing its v prefix.
 # A regular sibling tcui is a trusted, already-extracted offline release. Otherwise
 # the downloaded tarball must match its release SHA256SUMS before it is opened.
 set -euo pipefail
@@ -74,8 +75,12 @@ fi
 if [[ -z "$source_binary" ]]; then
     repo="${TCUI_REPO:-petterssonjonas/tcui}"
     version="${TCUI_VERSION:-latest}"
+    exact_tag="${TCUI_RELEASE_TAG:-}"
     [[ "$repo" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die 'TCUI_REPO must be owner/repository'
-    if [[ "$version" == latest ]]; then
+    if [[ -n "$exact_tag" ]]; then
+        [[ "$exact_tag" =~ ^v?[0-9][A-Za-z0-9.+-]*$ ]] || die 'TCUI_RELEASE_TAG must be an exact version tag'
+        base="https://github.com/$repo/releases/download/$exact_tag"
+    elif [[ "$version" == latest ]]; then
         base="https://github.com/$repo/releases/latest/download"
     else
         version="${version#v}"

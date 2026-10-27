@@ -27,6 +27,56 @@ fn open_configured_workspace(app: &mut crate::app::TuiApp) {
 }
 
 #[test]
+fn command_popup_opens_vault_from_chat_without_a_launcher() {
+    with_test_app_config("palette-vault-from-chat", AppConfig::default(), |app| {
+        let root = crate::protection::internal_vault_root();
+        std::fs::create_dir_all(&root).expect("create internal Vault");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let action = app
+            .handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .expect("open popup action");
+        runtime.block_on(app.dispatch(action)).expect("open popup");
+        for character in "vault workspace".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        let action = app
+            .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("vault destination action");
+        runtime.block_on(app.dispatch(action)).expect("open Vault");
+        assert_eq!(
+            app.ui.app_tabs.active_view(),
+            crate::ui::app_tabs::AppView::Vault
+        );
+        assert!(app
+            .ui
+            .vault_workspaces
+            .get(app.ui.app_tabs.active_id())
+            .is_some());
+        for (query, expected) in [
+            ("launcher", crate::ui::app_tabs::AppView::Launcher),
+            ("focus input", crate::ui::app_tabs::AppView::Chat),
+            ("vault workspace", crate::ui::app_tabs::AppView::Vault),
+        ] {
+            let tabs_before = app.ui.app_tabs.tabs().len();
+            let action = app
+                .handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+                .expect("reopen popup action");
+            runtime.block_on(app.dispatch(action)).expect("open popup");
+            for character in query.chars() {
+                app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+            }
+            let action = app
+                .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .expect("destination action");
+            runtime.block_on(app.dispatch(action)).expect("navigate");
+            assert_eq!(app.ui.app_tabs.active_view(), expected);
+            let added_tabs = usize::from(expected == crate::ui::app_tabs::AppView::Launcher);
+            assert_eq!(app.ui.app_tabs.tabs().len(), tabs_before + added_tabs);
+        }
+    });
+}
+
+#[test]
 fn vault_workspace_ui_central_keyboard_routes_enter_e_tab_and_escape_risk() {
     let fixture = AppVaultFixture::new("keys");
     with_test_app_config(

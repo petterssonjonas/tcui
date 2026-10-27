@@ -96,17 +96,16 @@ pub fn catalog() -> &'static [WorkspaceSetting] {
     use ValueKind::*;
     &[
         entry!("theme", "Color theme", "Applies immediately across the workspace. Choose a built-in theme.", Theme, Choice(&["system", "gruvbox-dark-low-contrast", "gruvbox-dark-high-contrast", "nord", "dracula", "github", "kanagawa", "catppuccin", "material", "matrix", "monokai", "zenburn", "solarized", "tokyo-night", "opencode"])),
-        entry!("default_provider", "Default provider", "Saved connection used for new conversations. Add connections through Providers / Connect first. Existing chats keep their selection.", Provider, Text),
+        entry!("default_chat", "Default chat selection", "Save provider, model and effort together. Enter provider=connection name, model=model ID, effort=medium (one per line). effort=auto uses medium when supported; unsupported explicit effort is rejected. Existing chats keep their selection.", Model, Structured),
         entry!("providers", "Providers / Connect", "Manage provider name, endpoint, environment-variable reference, backend type and authentication type in the dedicated manager. Secrets stay in masked credential fields.", Provider, Manager("open_providers")),
         entry!("disabled_providers", "Disabled providers", "One provider name per line; spaces are literal. Blank lines are ignored. Escapes: \\\\, \\n, \\r, \\t; \\e means an empty entry. Provider manager also controls visibility.", Provider, Lines),
-        entry!("default_model", "Default model", "Model identifier for new conversations using the saved default connection. Empty selects an available model or the local fallback. Existing chats keep their model.", Model, Text),
         entry!("disabled_models", "Disabled models", "One provider:model identifier per line; spaces are literal. Blank lines are ignored. Escapes: \\\\, \\n, \\r, \\t; \\e means an empty entry.", Model, Lines),
         entry!("local_inference.enabled", "Enable local inference", "Make the local inference provider available. Saving does not start a server or execute a command.", Local, Bool),
         entry!("local_inference.scheme", "Local server protocol", "HTTP or HTTPS for the local inference endpoint.", Local, Choice(&["http", "https"])),
         entry!("local_inference.host", "Local server host", "Hostname or IP address only; no scheme, path or credentials.", Local, Text),
         entry!("local_inference.port", "Local server port", "TCP port from 1 to 65535.", Local, Number { min: 1, max: 65535 }),
         entry!("local_inference.server_type", "Local server type", "Select the backend protocol. Auto detects the backend when connecting.", Local, Choice(&["auto", "ollama", "llama_cpp", "lm_studio", "open_ai_compat"])),
-        entry!("local_inference.selected_model", "Local fallback model", "Fallback model for new Local Inference conversations when Default model is empty. Does not change running conversations.", Local, Text),
+        entry!("local_inference.selected_model", "Local fallback model", "Fallback model for migrated Local Inference defaults with an empty model. Explicit default chat selections require a model. Does not change running conversations.", Local, Text),
         entry!("local_inference.connect_timeout_ms", "Probe connect timeout (ms)", "Connection timeout for subsequent explicit local server connection checks (minimum 250 ms). Does not change a request already in flight.", Local, Number { min: 250, max: u64::MAX }),
         entry!("local_inference.request_timeout_ms", "Probe request timeout (ms)", "Request timeout for subsequent explicit local server checks (minimum 500 ms). Chat requests use the provider client defaults.", Local, Number { min: 500, max: u64::MAX }),
         entry!("user_alignment", "User message alignment", "Horizontal alignment of user messages.", ChatBehavior, Choice(&["left", "middle", "right"])),
@@ -1020,7 +1019,6 @@ pub fn validate_edit(config: &Value, id: &str, text: &str) -> Result<AppConfig, 
         let mut slots = HashSet::new();
         for widget in &candidate.tui.status_widgets {
             if ![
-                "web_search",
                 "provider",
                 "model",
                 "reasoning",
@@ -1032,7 +1030,7 @@ pub fn validate_edit(config: &Value, id: &str, text: &str) -> Result<AppConfig, 
             ]
             .contains(&widget.id.as_str())
             {
-                return Err("Unknown widget ID; use web_search, provider, model, reasoning, connection, context, hints or tools".into());
+                return Err("Unknown widget ID; use provider, model, reasoning, connection, context, hints, mcps or tools".into());
             }
             if !slots.insert((widget.row, widget.area)) {
                 return Err("Two widgets cannot occupy the same status slot".into());
@@ -1065,12 +1063,32 @@ pub fn validate_edit(config: &Value, id: &str, text: &str) -> Result<AppConfig, 
         | "web_search.local_endpoint" => {
             candidate.web_search.validate().map_err(str::to_string)?;
         }
-        "default_provider" if text.trim().is_empty() => {
-            return Err("Choose a saved connection".into())
-        }
-        "default_provider" | "default_model" => {
-            if !saved_provider(&candidate, &candidate.default_provider) {
-                return Err("Choose a saved connection from Providers / Connect before setting a default provider or model".into());
+        "default_chat" => {
+            let selection = &mut candidate.default_chat;
+            selection.provider = selection.provider.trim().to_string();
+            selection.model = selection.model.trim().to_string();
+            if selection.model.is_empty() || selection.model.chars().any(char::is_control) {
+                return Err("Enter a non-empty model identifier without control characters".into());
+            }
+            if let Some(effort) = &selection.effort {
+                if effort.is_empty() || effort.chars().any(char::is_control) {
+                    return Err("Choose a supported effort, or auto".into());
+                }
+            }
+            if !saved_provider(&candidate, &candidate.default_chat.provider) {
+                return Err("Choose an enabled saved connection from Providers / Connect".into());
+            }
+            if let Some(provider) = candidate.provider_config(&candidate.default_chat.provider) {
+                candidate.default_chat.provider = provider.name.clone();
+            } else {
+                candidate.default_chat.provider = crate::config::LOCAL_PROVIDER_NAME.into();
+            }
+            let key = format!(
+                "{}:{}",
+                candidate.default_chat.provider, candidate.default_chat.model
+            );
+            if candidate.disabled_models.contains(&key) {
+                return Err("Enable this model before saving it as the default".into());
             }
         }
         "local_inference.host"
@@ -1446,17 +1464,33 @@ mod tests {
 
     #[test]
     fn defaults_cannot_reference_unsaved_provider_connections() {
-        assert!(validate_edit(&config(), "default_provider", "OpenAI").is_err());
-        assert!(validate_edit(&config(), "default_model", "model-id").is_err());
+        let selection = r#"{"provider":"Saved","model":"manual-model","effort":null}"#;
+        assert!(validate_edit(&config(), "default_chat", selection).is_err());
         let mut config = AppConfig::default();
         config.providers.push(crate::config::ProviderConfig {
             name: "Saved".into(),
             ..Default::default()
         });
-        let mut saved = serde_json::to_value(&config).expect("config");
-        let updated = validate_edit(&saved, "default_provider", "Saved").expect("saved provider");
-        saved = serde_json::to_value(updated).expect("updated");
-        assert!(validate_edit(&saved, "default_model", "manual-model").is_ok());
+        let saved = serde_json::to_value(&config).expect("config");
+        assert!(validate_edit(&saved, "default_chat", selection).is_ok());
+        assert!(validate_edit(
+            &saved,
+            "default_chat",
+            r#"{"provider":"Saved","model":"","effort":null}"#
+        )
+        .is_err());
+        assert!(validate_edit(
+            &saved,
+            "default_chat",
+            r#"{"provider":"Saved","model":"manual-model","effrot":"medium"}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn removed_web_widget_is_rejected() {
+        let input = r#"[{"id":"web_search","row":1,"area":1}]"#;
+        assert!(validate_edit(&config(), "tui.status_widgets", input).is_err());
     }
 
     #[test]
@@ -1504,13 +1538,13 @@ mod tests {
     #[test]
     fn text_edit_cancel_keeps_saved_value() {
         let mut state = SettingsWorkspaceState::default();
-        state.select_id("default_model");
+        state.select_id("default_chat");
         state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         state.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(state.edit.is_none());
         assert_eq!(
-            get_value(&state.config, "default_model"),
+            get_value(&state.config, "default_chat.model"),
             Some(&Value::from("gpt-4o"))
         );
     }
@@ -1518,7 +1552,7 @@ mod tests {
     #[test]
     fn failed_apply_preserves_draft_for_retry() {
         let mut state = SettingsWorkspaceState::default();
-        state.select_id("default_model");
+        state.select_id("default_chat");
         state.activate(1);
         state.fail("disk full");
         assert!(state.edit.is_some());
