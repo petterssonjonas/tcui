@@ -1098,6 +1098,8 @@ Tests use temporary HOME/XDG directories while preserving Rust's tool and cache 
 Environment-mutating tests retain the shared environment lock until cleanup.
 Run their async work with `Runtime::block_on` from a synchronous test, keeping
 lock acquisition outside the async runtime.
+Configuration locks end with their guarded operation, even if a subprocess
+temporarily retains an inherited descriptor during startup.
 
 The `auth_cli` integration suite clears the inherited environment and uses private
 HOME/XDG directories, temporary provider/browser stand-ins, and loopback HTTP
@@ -1118,15 +1120,26 @@ Both branches also run `bash scripts/scan-secrets.sh`: it downloads a checksum-p
 Gitleaks CLI and scans full reachable Git history, including merge resolutions.
 A shallow checkout is rejected. This scan checks committed history, not uncommitted files.
 
-Only an explicit release instruction authorizes tagging and publication. After
-the version commit reaches `main`, create a stable `vX.Y.Z` tag on that commit
-and manually run `release.yml` **on main**, supplying `tag=vX.Y.Z` (Actions UI or
-`gh workflow run release.yml --ref main -f tag=vX.Y.Z`). The workflow verifies
-ancestry and version, runs full CI on the exact tag, and creates the GitHub
-Release with all assets. Merges and tag pushes alone do not publish anything.
-Before publication, verify GitHub protections require reviews and passing checks
-on both branches, block direct pushes, and restrict the `release` environment to
-`main` with owner approval. Workflow files do not configure those remote safeguards.
+Only an explicit release instruction authorizes publication. Promote `development`
+to `main` through a reviewed PR with full CI and a merge commit. Agents do not
+merge into `main`. After the version commit reaches `main`, create and publish
+a stable GitHub Release, explicitly targeting the approved main commit with a
+new `vX.Y.Z` tag matching `Cargo.toml`. Release creation can create the tag.
+Supply the release notes when publishing.
+
+The published-release event starts CD. Merges and tag pushes alone do not build
+or publish packages. The workflow validates the event SHA, main ancestry,
+version, and release workflow; runs full CI, package/ABI smoke and the secret
+scan; then uploads assets to that existing release without changing its notes.
+Duplicate asset names fail rather than overwrite existing downloads. Publication
+is not atomic: a failed upload can leave a partial set of assets.
+
+Before publication, have the owner configure GitHub protections for reviews and
+passing checks on both branches, block direct pushes, and configure the `release`
+environment for stable release-tag refs with owner approval. Release jobs use
+tag refs, not `main` branch refs; the independent main-ancestry gate still applies.
+Workflow files do not configure those remote safeguards. Never move a published
+tag to reuse a version.
 
 ## License
 
