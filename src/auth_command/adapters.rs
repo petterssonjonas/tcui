@@ -3,7 +3,7 @@ use super::AuthCommandError;
 use super::AuthProvider;
 use crate::llm::auth::{codex::CodexNativeAdapter, openrouter::OpenRouterAdapter};
 
-pub(crate) fn codex_native_adapter() -> Result<CodexNativeAdapter, AuthCommandError> {
+pub(super) fn codex_native_adapter() -> Result<CodexNativeAdapter, AuthCommandError> {
     #[cfg(debug_assertions)]
     {
         super::debug::codex_native_adapter()
@@ -16,7 +16,7 @@ pub(crate) fn codex_native_adapter() -> Result<CodexNativeAdapter, AuthCommandEr
     }
 }
 
-pub(crate) fn openrouter_adapter() -> Result<OpenRouterAdapter, AuthCommandError> {
+pub(super) fn openrouter_adapter() -> Result<OpenRouterAdapter, AuthCommandError> {
     #[cfg(debug_assertions)]
     {
         super::debug::openrouter_adapter()

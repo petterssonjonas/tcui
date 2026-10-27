@@ -14,11 +14,12 @@ pub(super) fn map_codex_cli(error: CodexCliError) -> AuthCommandError {
         CodexCliError::Cancelled => AuthCommandError::Cancelled {
             provider: AuthProvider::Codex,
         },
-        CodexCliError::CredentialRead | CodexCliError::UnsafeExternalFile => {
-            AuthCommandError::Unauthenticated {
-                provider: AuthProvider::Codex,
-            }
-        }
+        CodexCliError::PostLoginMissing
+        | CodexCliError::PostLoginMalformed
+        | CodexCliError::CredentialRead
+        | CodexCliError::UnsafeExternalFile => AuthCommandError::Unauthenticated {
+            provider: AuthProvider::Codex,
+        },
         CodexCliError::Launch
         | CodexCliError::NonzeroExit
         | CodexCliError::TimedOut
@@ -37,11 +38,11 @@ pub(super) fn map_native(error: CodexNativeError) -> AuthCommandError {
                 provider: AuthProvider::Codex,
             }
         }
-        CodexNativeError::Store(_)
-        | CodexNativeError::LocalRemoval
-        | CodexNativeError::StaleRefresh => AuthCommandError::CredentialStore {
-            provider: AuthProvider::Codex,
-        },
+        CodexNativeError::Store(_) | CodexNativeError::LocalRemoval => {
+            AuthCommandError::CredentialStore {
+                provider: AuthProvider::Codex,
+            }
+        }
         CodexNativeError::Configuration
         | CodexNativeError::MissingAccount
         | CodexNativeError::MissingExpiry

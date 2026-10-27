@@ -10,7 +10,6 @@ mod runner;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use adapters::{codex_native_adapter, openrouter_adapter};
 pub(crate) use cli::AuthCommandArgs;
 pub(crate) use contracts::{
     AuthCommandError, AuthCommandRequest, AuthCommandResult, AuthLoginRequest, AuthLogoutRequest,

@@ -12,61 +12,7 @@ pub(crate) type ModelRow = (
     Vec<String>,
 );
 
-fn refreshed_selection(
-    current: &str,
-    manual_override: bool,
-    models: &[&crate::ui::ModelInfo],
-) -> Option<String> {
-    if manual_override || models.iter().any(|model| model.id == current) {
-        return None;
-    }
-    Some(
-        models
-            .first()
-            .map(|model| model.id.clone())
-            .unwrap_or_default(),
-    )
-}
 impl TuiApp {
-    pub(crate) fn apply_refreshed_provider_models(
-        &mut self,
-        provider: &str,
-        models: &[crate::ui::ModelInfo],
-    ) {
-        let visible_models: Vec<_> = models
-            .iter()
-            .filter(|model| {
-                !self
-                    .ui
-                    .disabled_models
-                    .contains(&Self::model_disable_key(provider, &model.id))
-            })
-            .collect();
-        let mut changed_selection = None;
-        for (index, tab) in self.ui.tabs.iter_mut().enumerate() {
-            if tab.tab.provider != provider {
-                continue;
-            }
-            if let Some(model) =
-                refreshed_selection(&tab.tab.model, tab.manual_model_override, &visible_models)
-            {
-                if index == self.ui.active_tab && !tab.tab.model.is_empty() {
-                    changed_selection = Some((tab.tab.model.clone(), model.clone()));
-                }
-                tab.tab.model = model;
-                tab.tab.reasoning_effort = None;
-            }
-        }
-        self.refresh_visible_selectors();
-        if let Some((previous, model)) = changed_selection {
-            self.ui.show_toast(if model.is_empty() {
-                format!("{previous} is no longer available. Choose a model with /model.")
-            } else {
-                format!("{previous} is no longer available. Selected {model}.")
-            });
-        }
-    }
-
     pub(crate) fn provider_entries_with_local(
         config: &AppConfig,
         detected: Option<crate::config::LocalServerType>,
@@ -153,9 +99,12 @@ impl TuiApp {
                 .collect::<Vec<_>>(),
             Err(_) => Vec::new(),
         };
-        if crate::llm::auth::canonical_provider_name(provider) != "Codex" {
-            models.sort_by(|left, right| left.id.cmp(&right.id));
+        for fallback in crate::llm::model_fetcher::provider_model_fallback(provider) {
+            if !models.iter().any(|existing| existing.id == fallback.id) {
+                models.push(fallback);
+            }
         }
+        models.sort_by(|left, right| left.id.cmp(&right.id));
         models
     }
 
@@ -167,7 +116,7 @@ impl TuiApp {
                 .try_read()
                 .map(|config| config.clone())
                 .unwrap_or_default();
-            self.track_background_task(tokio::spawn(async move {
+            tokio::spawn(async move {
                 let Ok(probe) = crate::llm::local::probe(&config_snapshot.local_inference).await
                 else {
                     return;
@@ -193,7 +142,7 @@ impl TuiApp {
                     crate::config::LOCAL_PROVIDER_NAME.to_string(),
                     probe.models,
                 ));
-            }));
+            });
             return;
         }
 
@@ -202,12 +151,12 @@ impl TuiApp {
         };
         let action_tx = self.action_tx.clone();
 
-        self.track_background_task(tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             let Ok(storage) = crate::storage::Storage::new() else {
                 return;
             };
             let rt = tokio::runtime::Handle::current();
-            let result = rt.block_on(async {
+            rt.block_on(async {
                 crate::llm::model_fetcher::refresh_provider_models(
                     &storage,
                     &provider,
@@ -215,14 +164,38 @@ impl TuiApp {
                     &env_var,
                     &backend_type,
                 )
-                .await
+                .await;
             });
-            let action = match result {
-                Ok(models) => Action::SetProviderModels(provider, models),
-                Err(message) => Action::ShowToast(format!("{provider}: {message}")),
+
+            let Ok(models) = storage.get_models(&provider) else {
+                return;
             };
-            let _ = action_tx.send(action);
-        }));
+            if models.is_empty() {
+                return;
+            }
+
+            let model_infos = models
+                .into_iter()
+                .map(
+                    |(
+                        id,
+                        input_price,
+                        output_price,
+                        context_window,
+                        default_reasoning_effort,
+                        supported_reasoning_efforts,
+                    )| crate::ui::ModelInfo {
+                        id,
+                        input_price,
+                        output_price,
+                        context_window,
+                        default_reasoning_effort,
+                        supported_reasoning_efforts,
+                    },
+                )
+                .collect();
+            let _ = action_tx.send(Action::SetProviderModels(provider, model_infos));
+        });
     }
 }
 

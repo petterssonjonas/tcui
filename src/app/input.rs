@@ -11,38 +11,24 @@ impl TuiApp {
     }
 
     pub(crate) fn open_chat_draft_editor(&mut self) {
-        match crate::protection::policy() {
-            Ok(Some(policy)) if policy.chats => {
-                self.ui.active_modal = Some(crate::ui::Modal::ExportChatDraft);
-            }
-            Ok(_) => self.open_chat_draft_editor_after_consent(),
-            Err(error) => self
-                .ui
-                .show_toast(format!("Cannot check draft protection: {error}")),
-        }
-    }
-
-    pub(crate) fn open_chat_draft_editor_after_consent(&mut self) {
-        if let Err(error) = crate::protection::require(crate::protection::Domain::Chats) {
-            self.ui
-                .show_toast(format!("Cannot edit protected draft: {error}"));
-            return;
-        }
         let content = self
             .ui
             .tabs
             .get(self.ui.active_tab)
             .map(|tab| tab.input_content.as_str())
             .unwrap_or_default();
-        let area = self
-            .ui
-            .chat_area
-            .unwrap_or(ratatui::layout::Rect::new(0, 0, 80, 24));
-        match crate::ui::modals::editor_popup::EditorPopupState::new_chat_draft(content, area) {
+        let path = chat_draft_path();
+        if let Err(error) = std::fs::write(&path, content) {
+            self.ui
+                .show_toast(format!("Could not prepare chat draft editor: {error}"));
+            return;
+        }
+        match crate::ui::modals::editor_popup::EditorPopupState::new_chat_draft(&path) {
             Ok(editor) => self.ui.editor_popup = Some(editor),
-            Err(error) => self
-                .ui
-                .show_toast(format!("Could not prepare chat draft editor: {error}")),
+            Err(error) => {
+                let _ = std::fs::remove_file(&path);
+                self.ui.show_toast(error);
+            }
         }
     }
 
@@ -57,9 +43,8 @@ impl TuiApp {
     }
 
     pub(crate) fn take_input_submission(&mut self) -> Option<String> {
-        let has_pending_documents = self.has_pending_documents();
         let tab = self.ui.tabs.get_mut(self.ui.active_tab)?;
-        if tab.input_content.is_empty() && !has_pending_documents {
+        if tab.input_content.is_empty() {
             return None;
         }
         let content = std::mem::take(&mut tab.input_content);
@@ -254,6 +239,14 @@ pub(crate) fn char_to_byte_index(text: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(idx, _)| idx)
         .unwrap_or(text.len())
+}
+
+fn chat_draft_path() -> std::path::PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!("tcui-chat-draft-{}-{stamp}.md", std::process::id()))
 }
 
 #[cfg(test)]

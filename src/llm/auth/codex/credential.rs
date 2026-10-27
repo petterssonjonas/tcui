@@ -98,7 +98,7 @@ impl fmt::Display for CodexCredential {
 pub(crate) enum CodexCredentialError {
     #[error("Codex CLI credentials could not be read")]
     Read,
-    #[error("Codex CLI credentials are malformed")]
+    #[error("Codex CLI credentials are malformed; run `codex login` or choose `--native`")]
     Malformed,
     #[error("Codex CLI credentials are stored in an unsafe file")]
     UnsafeFile,
@@ -123,11 +123,10 @@ pub(crate) fn read_external_credential() -> Result<Option<CodexCredential>, Code
     Ok(None)
 }
 
-pub(crate) fn resolve_connection(
+pub(crate) fn resolve_credential(
     config: &AppConfig,
-    connection: &str,
 ) -> Result<Option<CodexCredential>, CodexResolutionError> {
-    if let Some(credential) = KeyStore::get_oauth(config, connection)? {
+    if let Some(credential) = KeyStore::get_oauth(config, "Codex")? {
         if credential.ownership != OAuthCredentialOwnership::Tcui
             || credential.source != OAuthCredentialSource::NativeOAuth
         {
@@ -135,7 +134,7 @@ pub(crate) fn resolve_connection(
         }
         return Ok(Some(CodexCredential::native(credential)));
     }
-    Ok(None)
+    read_external_credential().map_err(CodexResolutionError::External)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -144,6 +143,8 @@ pub(crate) enum CodexResolutionError {
     UnexpectedNativeCredential,
     #[error("TCUI Codex credential store is unavailable")]
     Store(#[from] KeyStoreError),
+    #[error("Codex CLI credentials are unavailable")]
+    External(#[from] CodexCredentialError),
 }
 
 fn read_external_credential_path(

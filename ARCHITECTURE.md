@@ -1,7 +1,6 @@
 # TermChatUI Architecture
 
 > Generated from GitNexus knowledge graph (637 symbols, 1212 relationships, 33 execution flows).
-> The graph-derived inventory is historical; implementation notes below are maintained separately.
 
 ## Overview
 
@@ -14,10 +13,10 @@ The codebase consists of **47 source files** organized into 7 major functional a
 | **UI** | 20 | Terminal rendering, layout, widgets, modals, components |
 | **App** | 4 | Event loop, action dispatch, state management |
 | **Config** | 4 | App settings, API key storage, soul/agent configs |
-| **Storage** | 2 | Persistent SQLite metadata and authoritative chat documents |
+| **Storage** | 2 | SQLite database (messages, conversations, settings) |
 | **LLM** | 5 | Provider abstraction, HTTP client, streaming, tools |
 | **MCP** | 4 | Model Context Protocol client, registry, transport |
-| **Native stores** | — | Internal Vault, separate Memories, portable protection and transfer |
+| **Obsidian** | 5 | Vault file integration, diff safety, file watcher |
 
 ---
 
@@ -28,7 +27,7 @@ The codebase consists of **47 source files** organized into 7 major functional a
 The core application loop lives in `TuiApp` (`src/app.rs`). It owns the event loop (`run`), processes keyboard/mouse input (`handle_key`, `handle_mouse`), and dispatches actions (`dispatch`).
 
 Key types:
-- `TuiApp` — Main app struct holding storage, config, UI state, LLM client, and the canonical internal file store
+- `TuiApp` — Main app struct holding storage, config, UI state, LLM client, vault
 - `Action` — Enum of all possible user/system actions (Quit, SendMessage, ToggleSettings, etc.)
 - `Message` — Chat message model (role, content, thinking, tool calls, images)
 - `Tab` — Chat tab configuration (provider, model, endpoint, soul, agent)
@@ -55,12 +54,9 @@ All rendering is pure and stateless per frame. The `UI` struct (`src/ui/mod.rs`)
 - `sidebar.rs` — Conversation list, New Chat button, Settings button
 - `chat_tab.rs` — Message list, input box, provider/model selector
 - `status_bar.rs` — Connection status, MCP server indicators
-- `settings_workspace.rs` — Categorized live settings, validation, field editing, and keyboard binding capture; `tui/settings_panel.rs` is the search-only navigator.
-- `terminal_workspace.rs` — Persistent PTY sessions, terminal tab/split presentation, focus, and draggable divider geometry.
-- `command_blocks.rs` / `command_review.rs` — Closed shell-fence extraction and explicit selected-command review; no execution during rendering.
+- `settings_tab.rs` — Settings popup (General, Keybindings, API Keys tabs)
 - `session_list.rs` — Session/conversation switcher
-- `vault.rs` / `vault_workspace.rs` — Internal file tree, preview, editing, and confirmed operations
-- `memory_manager.rs` — Native Memory entry management and context selection
+- `obsidian_tab.rs` — Obsidian vault file tree and preview
 
 **Modals:**
 - `quit_confirm.rs` — Exit confirmation
@@ -71,104 +67,30 @@ All rendering is pure and stateless per frame. The `UI` struct (`src/ui/mod.rs`)
 
 **Components:**
 - `chat_message.rs` — Individual message bubble rendering
-- `markdown.rs` / `markdown_model.rs` — Shared Markdown rendering and block parsing.
-- `markdown_rich.rs` — Boxed tables and bounded, cached `merman-core` / `merman-ascii` flowchart rendering.
-- `markdown_flowchart.rs` — Bounded, width-aware ranked recovery layout with multiple columns, continuous directional edges, and inline labels; narrow or grouped diagrams retain stacked recovery with nested group frames.
-- `markdown_charts.rs` — Mermaid XY/bar/line and pie semantic models rendered through native Ratatui charts/canvas, with bounded parsing, series, samples, and cells.
-- `markdown_code.rs` — Lossless preformatted wrapping, display-width-aware tab expansion, and recognizable text-frame normalization/reflow. Copying remains source-based.
+- `markdown.rs` — Markdown rendering with syntax highlighting
 - `diff_view.rs` — Side-by-side diff display
 - `image_block.rs` — Image display in chat
 - `collapsible.rs` — Collapsible sections (e.g., thinking blocks)
 
-`notifications.rs` selects Herdr, a reachable local notification service, or a
-known direct-terminal OSC protocol. SSH never targets server D-Bus. Helpers
-have captured, bounded output and deadlines; unavailable routes disable desktop
-delivery. Detached reminders preserve only the explicit SSH/Herdr routing context.
-
 ### 3. Storage (`src/storage/`)
 
-`Storage::new` opens the persistent `tcui.db` through `rusqlite` (bundled).
-Provider/model/settings and credential metadata remain in that on-disk database;
-the whole application database is **not** an in-RAM SQLite database.
-`tcui_credential_vault` holds password derivation/wrapping metadata and preferences,
-while `tcui_credentials` holds mixed plaintext/encrypted provider and search
-records plus always-encrypted machine secrets.
+SQLite persistence via `rusqlite` (bundled). The `Storage` struct manages:
 
-Authoritative chat history is stored as per-conversation documents in
-`$XDG_DATA_HOME/tcui/chats`, not the legacy `messages`/`conversations` SQL rows.
-Documents are encrypted only when chat protection is selected. Migration archives
-legacy SQL chat content to Trash, deletes migrated rows, and runs `VACUUM`;
-archives and prior backups may remain readable. The legacy `chat.key` remains
-for legacy content/reminders and cannot unlock new protection envelopes.
-New legacy shared-key files are created exclusively with mode 0600 before writing
-and keep the existing final 0400 mode. Existing key bytes and formats do not change.
+- `messages` — Chat messages with metadata (thinking, tool calls, images, diffs)
+- `conversations` — Conversation groups per tab
+- `tabs` — Tab configuration (provider, model, endpoint, API key refs)
+- `settings` — Key-value app settings (use_env_keys, api_key_*, custom_endpoint, etc.)
+- `mcp_servers` — MCP server configurations
+- `file_backups` — Backup entries for file modifications
+- `key_metadata` — Encryption salt for key storage
 
-Reminder metadata remains in `$XDG_DATA_HOME/tcui/reminders.toml`. Its stable
-`.reminders.lock` serializes readers and complete read-modify-write operations
-across TCUI processes. Writers reload under the lock and replace only their
-record, so different-record changes merge; same-ID changes use lock order.
-Metadata uses private, no-follow, atomic durable replacement with checked rollback.
-systemd unit operations remain outside this metadata-only transaction.
-
-Native Memory lives independently in `$XDG_DATA_HOME/tcui/memories`, with chat
-and Memory Trash under each store's `.trash`. When protected, its serialized
-SQLite search index is encrypted on disk and loaded into an in-RAM query database
-without plaintext SQLite sidecars. Corrupt caches do not prevent source reads or
-listing; explicit repair rebuilds the index without changing source records.
-
-The internal Vault is rooted at `$XDG_DATA_HOME/tcui/vault`. There are no external
-profiles, profile selectors, or Obsidian adapters. `ChatSavedFileStore` owns one
-manifest and canonical file bodies, with separate numeric item IDs and chat-link
-IDs. An explicit Chat Artifact save creates an independent Vault snapshot.
-Vault deletion archives links and moves the encoded body to internal Trash.
-Content-digest comparisons protect editor saves from overwriting a newer body.
-
-Vault protection covers content, retained backups, link manifests, journals, and
-stages. Vault and Memory files use authenticated, self-contained portable V2
-envelopes with password-wrapped data keys. Chats retain their existing format.
-Source-password authentication does not import provider credentials. Explicit
-adoption rewrites copied data under the destination key; ordinary reads never
-silently accept foreign encryption as plaintext.
-
-`storage/native_transfer` owns Add, Replace, export, retained snapshots, and
-restore. Replace and restore preserve displaced data and its matching identity
-metadata. Retained backups enter the same authenticated protection transaction
-as active data. Pending replacement recovery blocks incompatible policy changes.
-Native snapshots use bounded streaming copies; protection conversion still
-buffers one file at a time. File, count, and depth limits remain explicit.
-
-Password changes reuse the protection journal and an atomic SQLite verifier/row
-transaction. The journal contains ciphertext-only credential replacements and
-staged portable wrappers, not the new password or its derived credential key.
-Managed retained-backup hashes change with their stored bodies; derived Memory
-indexes are retired and rebuilt. The old password authenticates before SQLite
-cutover, the new one after it. Recovery that completes cutover with the old
-password requires a subsequent new-password unlock. Policy and explicit
-plaintext credentials remain unchanged. The data master remains stable, so
-password changes do not revoke previously exported or extracted data keys.
-
-On Linux `$XDG_DATA_HOME` defaults to `~/.local/share`; the database is therefore
-normally `~/.local/share/tcui/tcui.db`. Filenames, paths, configuration, profile
-names, logs, and general database metadata are not covered by content protection.
+Database path: `~/.local/share/tcui/tcui.db` (Linux) or platform equivalent.
 
 ### 4. Config (`src/config/`)
 
 - `app_config.rs` — `AppConfig` (TOML serialized), default provider/model, vault path, tab configs. Stored at `~/.config/tcui/config.toml`.
-- `key_store.rs` — Explicit per-record SQLite credential storage, shared password lifecycle, API/OAuth records, and opt-in legacy import. Argon2id protects the random master secret; selected content uses domain-separated AES-GCM envelopes. Plaintext/encrypted provider and search records coexist; machine secrets always remain encrypted.
+- `key_store.rs` — `KeyStore` with `KeyEntry` variants: Keyring, Encrypted, Env
 - `soul.rs` — Soul/agent personality configuration loading
-
-Configuration load/save keeps its Result API and stable `.config.lock`.
-The existing writer uses no-follow directory capabilities, exclusively created
-0600 sibling stages, file sync, atomic rename, directory sync, and checked rollback.
-Backups are published complete without replacing an existing regular backup.
-Cleanup checks retained file identities and does not remove a replaced entry.
-New directories are 0700. Config, backup, lock, and parent symlinks are rejected;
-cooperating processes must keep the stable lock file in place. This is not an
-isolation boundary against another process that can replace the user's files.
-Configuration load resolves both configuration and data roots before writing.
-Missing or relative discovered roots return errors; config and reminder metadata
-do not fall back to CWD. This IO hardening does not change config serialization's
-separate unknown-field/comment preservation limits.
 
 ### 5. LLM (`src/llm/`)
 
@@ -176,13 +98,6 @@ separate unknown-field/comment preservation limits.
 - `provider.rs` — `Provider` enum (OpenAI, Anthropic, Gemini, Ollama, Custom) with endpoint URLs
 - `stream.rs` — Streaming response handling
 - `tools.rs` — LLM tool/function call definitions
-- `auth/tui.rs` — Cancellable native OpenAI/Codex and OpenRouter PKCE login flows. Authorization URLs are displayed without host-browser launch; masked response input and loopback callbacks share validation, cancellation, and deadlines.
-- `anthropic_sdk.rs` — Official Claude CLI subprocess transport using a saved Console API key, isolated configuration, and `--bare`.
-- `app/credential_manager.rs` — `/providers`, `/connect`, and `/vault` masked input and lifecycle UI. Provider selectors contain saved connections rather than automatically seeded presets.
-
-Provider authentication does not read environment keys, `.env`, or another
-application's login files. Credential vault access is independent of Markdown
-Vault; `/vault-search` retains Markdown search.
 
 Supported endpoints:
 | Provider | Endpoint |
@@ -195,32 +110,16 @@ Supported endpoints:
 ### 6. MCP (`src/mcp/`)
 
 Model Context Protocol integration for external tool servers:
-- `client.rs` — Bounded discovery/calls, credential redaction before result truncation, deadlines, and session cleanup.
-- `registry.rs` — Disabled-by-default presets and lossless merging of configured/custom server rows.
-- `transport.rs` — Explicit stdio commands or native streamable HTTP, KeyStore-only service credentials, official-origin binding, and disabled HTTP redirects.
-- `search.rs` — Exa, Tavily, and Firecrawl adapters discover and call only their supported read-only search tools; no model-selected crawl or execution tools.
+- `client.rs` — MCP client connection management
+- `registry.rs` — Server registration and lookup
+- `transport.rs` — stdio and HTTP transports
 
-`search.rs` at the source root dispatches the configured backend and bounds
-untrusted request-only evidence. `search/local.rs` queries DuckDuckGo Lite
-directly or a configured JSON-enabled SearXNG endpoint. Automatic search is
-off by default; explicit search skills bypass that toggle, share a search for
-the same backend, and suppress duplicate automatic searches. Failures provide
-unavailable evidence rather than silently falling back. The Web search settings
-category and credential manager own backend selection, result limits, service
-keys, and profile enablement; no environment API-key discovery occurs.
+### 7. Obsidian (`src/obsidian/`)
 
-### 7. Native Vault and Memories
-
-- `src/vault/` — Confined internal paths, file operations, previews, backups, recovery, and watching
-- `src/storage/chat_files/` — Canonical Vault bodies, item IDs, chat links, compare-and-save, and Trash
-- `src/memory/` — Native records, preserved source/scope metadata, search, management, and separate Trash
-- `src/storage/native_transfer/` — Portable imports/exports, in-place adoption, Replace, and retained-backup restore
-- `src/protection/` — Selective access gates, authenticated file formats, password wrapping, and durable policy migration
-
-Native context attachments capture immutable bytes at selection. They render as
-`<Memory #N>` or `<Vault item #N>` and expand into the destination user message.
-Only the raw typed instruction can select host-side skills, saves, or reminders.
-Protected-to-plaintext chat insertion needs explicit consent.
+File-based knowledge vault integration:
+- `vault.rs` — File listing, reading, searching, writing
+- `safety.rs` — Diff generation, backup creation, diff review parsing
+- `watcher.rs` — File system change monitoring (`notify` crate)
 
 ---
 
@@ -231,9 +130,7 @@ Protected-to-plaintext chat insertion needs explicit consent.
 ```
 main (src/main.rs)
   → setup_terminal (crossterm raw mode, alternate screen)
-  → create one EventStream shared by security screens and app restarts
-  → first-run or configured protection manager; mandatory unlock gate when required
-  → open config/stores and construct TuiApp
+  → TuiApp::new(storage, config, llm, vault)
   → TuiApp::run
       → terminal.draw(|f| UI::render(f))
       → tokio::select!
@@ -242,47 +139,19 @@ main (src/main.rs)
           └─ action_rx          → dispatch(action)
 ```
 
-The protection manager runs before app configuration/stores when setup,
-password management, or recovery is needed. Unlock keeps staged choices visible;
-authenticated saves reuse the shared vault session rather than a cached plaintext
-password. The mandatory gate applies to app-entry, chat protection, and pending
-recovery. Optional-only protection offers an explicit continue-locked action.
-`/security`, `/unlock`, and `/lock` use the outer restart loop rather than competing
-terminal event readers. The old app/session is dropped and its frame cleared
-before the next security screen. Voluntary transitions confirm disposal of running
-terminals, unsaved editors, and drafts, quiesce tracked producers, and persist
-state; cancellation preserves the session. Forced revocation fails closed.
-
 This is the primary cross-community flow spanning **App → UI**.
 
-### 2. Live Settings → Atomic Configuration
+### 2. Settings Load/Save → Database
 
-```mermaid
-flowchart LR
-    Search["Ctrl+P search"] --> Page["Settings tab"]
-    Page --> Validate["Validate edited value"]
-    Validate --> Save["Atomic config.toml save"]
-    Save --> Publish["Publish live configuration"]
-    Publish --> Refresh["Refresh affected UI and defaults"]
+```
+dispatch (src/app.rs)
+  → load_settings_popup_state
+      → storage.get_all_settings
+          → Storage::new → db_path
+              → ~/.local/share/tcui/tcui.db
 ```
 
-`app/settings.rs` holds the live configuration lock through validation and save.
-Failed writes leave the previous configuration active and preserve the editing
-draft. Credentials and vault profiles use their dedicated managers. Runtime
-consumers read updated configuration; defaults apply to new conversations and
-terminal sessions, and recovery retention applies at the next recovery pass.
-
-`app/terminal_workspace.rs` owns the command approval boundary. Run consumes an
-explicit review and starts a clean, interpreter-matched PTY only after approval;
-existing terminals accept explicit paste without submission. The shared
-`TerminalEditorState` transport waits for a random prompt marker before approved
-execution. It reserves input capacity, writes the exact approved text to an
-exclusive owner-only temporary file, and submits one quoted source invocation.
-Commands are never queued as terminal typeahead: interactive programs retain
-TTY input while the shell reads code from the file. Sourcing preserves directory
-and variable changes. Files are removed on normal session teardown; forced
-process termination can leave them behind. The transport bounds input/output and
-scrollback, suppresses host OSC side effects, and tears down PTY jobs on confirmed close.
+This is the longest traced process (5 steps). Settings are read from the `settings` table on popup open and written back on close.
 
 ### 3. Chat Render Pipeline
 
@@ -308,33 +177,24 @@ Each frame rebuilds the layout tree and renders all visible widgets.
 handle_key → Enter
   → Action::SendMessage(content)
       → dispatch
-          → persist authoritative conversation document
+          → storage.save_message(&msg)
           → UI::add_message
           → (first message?) generate_title
               → UI::add_chat_to_active_tab(title)
 ```
 
-### 5. Explicit Connection → Credential Store
+### 5. Settings API Keys → Environment Scan
 
-`/providers` and `/connect` open the credential manager. The user selects a
-preset or custom endpoint, chooses encrypted or plaintext provider storage,
-and supplies an API key or completes OAuth. The manager saves credentials
-through `KeyStore`, persists provider metadata, and refreshes model selectors.
+```
+handle_key → Space on "Grab keys from env" toggle
+  → settings.use_env_keys = true
+  → SettingsPopup::grab_keys_from_env
+      → std::env::var(OPENAI_API_KEY, ANTHROPIC_API_KEY, ...)
+      → read .env and ~/.env
+      → storage.set_setting("api_key_<provider>", key)
+```
 
-OpenAI OAuth discovery fetches the authenticated subscription catalog using a
-pinned upstream protocol version, not TCUI's version or external Codex files.
-Successful refreshes replace stale selections while preserving session-local
-manual overrides; failures retain the last saved catalog. Credential resolution
-reads the XDG-scoped vault without taking the unrelated configuration-file lock.
-
-Connection storage is explicit per record; encrypted and plaintext records may
-coexist and resolve by exact IDs. `/vault` defaults affect new records without
-silently converting old ones. Changing the credentials checkbox in `/security`
-intentionally converts provider/search records and updates the default;
-unchanged selection preserves explicit exceptions. First encrypted enrollment
-after plaintext-only setup requires the shared password before reopening
-`/connect`. `/unlock` unlocks all selected domains. No environment or external-login
-scan occurs. See [Authentication](docs/auth.md).
+When the toggle is activated, the app scans environment variables and `.env` files, autofilling the saved keys list and persisting to SQLite.
 
 ---
 
@@ -365,7 +225,7 @@ flowchart TB
     end
 
     subgraph Storage["Storage Layer"]
-        DB["Storage (db.rs)\nProvider, model, settings,\nand MCP metadata"]
+        DB["Storage (db.rs)\nSQLite: messages, conversations,\nsettings, tabs, mcp_servers"]
     end
 
     subgraph Config["Config Layer"]
@@ -387,11 +247,9 @@ flowchart TB
         TRN["Transport"]
     end
 
-    subgraph NativeStores["Native Stores"]
-        VAULT["VaultFs / ChatSavedFileStore"]
-        MEM["MemoryStore"]
-        PROTECT["Selective / portable protection"]
-        SAFE["Backups and recovery journals"]
+    subgraph Obsidian["Obsidian Layer"]
+        VAULT["Vault"]
+        SAFE["Safety (diff/backup)"]
         WATCH["File Watcher"]
     end
 
@@ -404,8 +262,6 @@ flowchart TB
     A -->|chat| LC
     A -->|tools| MC
     A -->|vault| VAULT
-    A -->|memories| MEM
-    A -->|access and migration| PROTECT
 
     U --> TB
     U --> SB
@@ -424,8 +280,6 @@ flowchart TB
 
     VAULT --> SAFE
     VAULT --> WATCH
-    VAULT --> PROTECT
-    MEM --> PROTECT
 
     style Entry fill:#f9f,stroke:#333
     style AppLayer fill:#bbf,stroke:#333
@@ -434,7 +288,7 @@ flowchart TB
     style Config fill:#ffb,stroke:#333
     style LLM fill:#bff,stroke:#333
     style MCP fill:#fbf,stroke:#333
-    style NativeStores fill:#eee,stroke:#333
+    style Obsidian fill:#eee,stroke:#333
 ```
 
 ---
@@ -444,13 +298,12 @@ flowchart TB
 | Flow | Direction | Persistence |
 |------|-----------|-------------|
 | User input → Action → UI update | In-memory | None |
-| Chat messages and conversations | App ↔ document store | Per-conversation files under `tcui/chats`, optionally encrypted |
-| Provider/model/settings metadata | App ↔ Storage | Persistent `tcui.db` |
-| Credentials | App ↔ KeyStore | Per-record plaintext/encrypted SQLite records; machine secrets encrypted |
+| Chat messages | App → Storage | SQLite (`messages` table) |
+| Conversations | App → Storage | SQLite (`conversations` table) |
+| API keys / settings | App ↔ Storage | SQLite (`settings` table) |
 | App config (provider, model, theme) | Disk → App | TOML (`~/.config/tcui/config.toml`) |
-| Memory sources / search | App ↔ native Memory | `tcui/memories`; protected serialized index encrypted on disk, queried in RAM |
-| LLM streaming | LLM → UI | Saved response content follows destination chat policy |
-| Vault file operations | App ↔ internal Vault | Optional portable encryption; no external profiles |
+| LLM streaming | LLM → UI | None (real-time) |
+| Obsidian file ops | Vault → UI | Disk (vault path) |
 
 ---
 
@@ -460,7 +313,7 @@ flowchart TB
 
 2. **Frame-based rendering** — The entire UI is redrawn every 33ms (30 FPS) via `terminal.draw`. No widget retains internal rendering state; all layout is computed from `UI` and `ChatTabState`.
 
-3. **Separate content stores and metadata** — Authoritative chat documents and native Memory records are independent of persistent SQLite provider/model/settings metadata. Protection is selective, not whole-config or whole-database encryption; copies into chats, exports, or LLM requests follow destination rules and cannot recall provider-sent data.
+3. **SQLite for runtime state, TOML for static config** — Transient chat data (messages, conversations, keys) lives in SQLite. Static user preferences (theme, default provider) live in TOML.
 
 4. **Provider abstraction** — The `Provider` enum maps display names to base URLs. Custom providers are supported via free-form endpoint + key inputs.
 

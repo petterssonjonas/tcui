@@ -21,7 +21,7 @@ pub(crate) use callback::{
     AuthorizationCode, CallbackPath, CallbackTimeout, LoopbackCallbackConfig,
 };
 pub(crate) use callback_listener::LoopbackCallback;
-pub(crate) use cancellation::{oauth_cancellation, OAuthCancellation, OAuthCancellationHandle};
+pub(crate) use cancellation::{oauth_cancellation, OAuthCancellation};
 pub(crate) use device::{DeviceCode, DeviceCodeLifetime, DevicePollingRequest, PollInterval};
 pub(crate) use error::{OAuthError, TokenErrorKind};
 pub(crate) use headless::{

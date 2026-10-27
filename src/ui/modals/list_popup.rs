@@ -252,7 +252,7 @@ mod tests {
             "No skills",
             vec![
                 ListPopupItem::insert("@caveman "),
-                ListPopupItem::insert("@vault "),
+                ListPopupItem::insert("@obsidian "),
             ],
         );
 
@@ -262,7 +262,7 @@ mod tests {
         // Then
         assert_eq!(
             popup.selected_action(),
-            Some(ListPopupAction::InsertText("@vault ".to_string()))
+            Some(ListPopupAction::InsertText("@obsidian ".to_string()))
         );
     }
 }

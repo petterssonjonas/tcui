@@ -10,59 +10,23 @@ use ratatui::{
 pub mod app_tabs;
 pub mod artifact_sidebar;
 pub mod chat_tab;
-pub mod command_blocks;
-pub mod command_review;
 pub mod components;
-pub(crate) mod ephemeral;
 pub mod launcher;
-#[cfg(feature = "memory")]
-pub(crate) mod memory_manager;
 pub mod modals;
-pub mod pending_documents;
 pub mod session_list;
-pub mod settings_workspace;
 pub mod sidebar;
 pub mod status_bar;
 pub mod tab_bar;
-pub mod terminal_workspace;
-pub mod text_selection;
 pub mod toast;
 pub mod top_bar;
-pub mod vault;
-pub mod vault_workspace;
 
 #[cfg(test)]
 mod toast_tests;
 
-#[cfg(test)]
-pub(crate) mod ephemeral_tests;
-
-#[cfg(test)]
-#[path = "vault_workspace_tests.rs"]
-mod vault_workspace_lifecycle;
-
-#[cfg(test)]
-#[path = "vault_workspace_ui_tests.rs"]
-mod vault_workspace_ui;
-
-#[cfg(test)]
-#[path = "vault_workspace_ui_edges_tests.rs"]
-mod vault_workspace_ui_edges;
-
-#[cfg(test)]
-#[path = "vault_workspace_ui_tree_tests.rs"]
-mod vault_workspace_ui_tree;
-
-#[cfg(test)]
-#[path = "vault_workspace_watcher_tests.rs"]
-mod vault_workspace_watcher;
-
 use crate::config::app_config::{HeadingDownscale, MarkdownMode, TextAlignment};
 use crate::tui::components::centered_rect;
 use crate::ui::components::terminal_capabilities::TerminalCapabilities;
-use artifact_sidebar::{
-    ArtifactEntry, ArtifactSidebar, ArtifactSidebarState, ArtifactSidebarVisibility,
-};
+use artifact_sidebar::{ArtifactEntry, ArtifactSidebar, ArtifactSidebarState};
 use modals::artifact_viewer::ArtifactViewerState;
 use modals::export_dialog::ExportDialog;
 use modals::list_popup::ListPopup;
@@ -74,25 +38,6 @@ use toast::ToastStack;
 use top_bar::TopBar;
 
 pub const HELP_MARKDOWN: &str = include_str!("help.md");
-
-pub(crate) fn provider_display_name(name: &str) -> std::borrow::Cow<'_, str> {
-    use crate::config::key_store::{provider_base_name, CredentialStorage, KeyStore};
-    let base = provider_base_name(name);
-    let label = match base {
-        "Codex" => "OpenAI OAuth",
-        "OpenRouter" => "OpenRouter API key",
-        _ => base,
-    };
-    if KeyStore::provider_storage(&crate::config::AppConfig::default(), name)
-        .ok()
-        .flatten()
-        == Some(CredentialStorage::Encrypted)
-    {
-        format!("{label} (encrypted)").into()
-    } else {
-        label.into()
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
@@ -117,6 +62,7 @@ pub enum Action {
     UpdateModel(String),
     UpdateStatus(String),
     ShowToast(String),
+    SetTitle(String),
     SwitchTab(usize),
     AddTab(crate::app::tab::Tab),
     RemoveTab(usize),
@@ -127,15 +73,9 @@ pub enum Action {
 }
 
 pub struct UI {
-    pub text_selection: text_selection::TextSelection,
     pub tabs: Vec<ChatTabState>,
     pub active_tab: usize,
-    pub(crate) ephemeral: Option<ephemeral::EphemeralPane>,
     pub app_tabs: app_tabs::AppTabs,
-    pub vault_workspaces: vault_workspace::VaultWorkspaceRegistry,
-    pub terminals: terminal_workspace::TerminalWorkspace,
-    pub command_review: Option<command_review::CommandReview>,
-    pub settings_workspace: settings_workspace::SettingsWorkspaceState,
     pub panel_state: crate::tui::shell::PanelState,
     pub sidebar_open: bool,
     pub artifact_sidebar_open: bool,
@@ -149,11 +89,7 @@ pub struct UI {
     pub list_popup: Option<ListPopup>,
     pub palette: Option<crate::tui::palette::PaletteState>,
     pub settings_v2: Option<crate::tui::settings_panel::SettingsPanelState>,
-    pub(crate) credential_manager: Option<crate::app::credential_manager::CredentialManager>,
-    pub(crate) pending_vault_action: Option<crate::app::vault::PendingVaultAction>,
-    pub(crate) pending_vault_mutation: Option<crate::app::submission::PendingVaultMutation>,
-    pub(crate) pending_vault_mutation_areas:
-        Option<modals::vault_mutation_preview::VaultMutationPreviewAreas>,
+    pub keybind_capture: Option<crate::tui::keybind_capture::KeybindCaptureState>,
     pub keybinding_overrides: BTreeMap<String, String>,
     pub show_keybinds: bool,
     pub mouse_hit_areas: Vec<(Rect, MouseAction)>,
@@ -169,15 +105,8 @@ pub struct UI {
     pub artifact_sidebar_state: ArtifactSidebarState,
     pub vault_available: bool,
     pub vault_artifacts: Vec<ArtifactEntry>,
+    pub saved_artifacts: Vec<ArtifactEntry>,
     pub memory_artifacts: Vec<ArtifactEntry>,
-    pub show_memories: bool,
-    pub show_vault: bool,
-    pub(crate) vault_notice: Option<String>,
-    pub(crate) memory_notice: Option<String>,
-    pub(crate) resource_editor: Option<modals::resource_editor::ResourceEditor>,
-    pub(crate) pending_protected_context: Option<crate::app::submission::PendingDocumentInput>,
-    #[cfg(feature = "memory")]
-    pub(crate) memory_manager: memory_manager::MemoryManagerState,
     pub mcps: Vec<String>,
     pub user_alignment: TextAlignment,
     pub ai_alignment: TextAlignment,
@@ -197,15 +126,14 @@ pub struct UI {
     pub disabled_providers: HashSet<String>,
     pub disabled_models: HashSet<String>,
     pub frame_tick: u64,
-    pub(crate) protection_blocked: bool,
     pub tui_config: crate::config::TuiConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseAction {
-    AppTabSelect(app_tabs::AppTabId),
+    AppTabSelect(usize),
     AppTabAdd,
-    AppTabClose(app_tabs::AppTabId),
+    AppTabClose(usize),
     Sidebar(sidebar::SidebarAction),
     PaletteItem(usize),
     LeftHandle,
@@ -215,7 +143,6 @@ pub enum MouseAction {
     ProviderDropdown,
     ModelDropdown,
     SettingsItem(usize),
-    Launcher(launcher::LauncherAction),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -227,15 +154,10 @@ pub struct ModalAreas {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Modal {
     QuitConfirm,
-    DiscardPendingDocuments,
-    DiscardSecurityDrafts,
-    ExportChatDraft,
-    ShareProtectedContext,
 }
 
 pub struct ChatTabState {
     pub tab: crate::app::tab::Tab,
-    pub manual_model_override: bool,
     pub messages: Vec<crate::app::message::Message>,
     pub active_conversation: i64,
     pub conversations: Vec<ConversationEntry>,
@@ -256,16 +178,12 @@ pub struct ChatTabState {
     pub reasoning_hit_area: Option<Rect>,
     pub input_area: Option<Rect>,
     pub input_text_area: Option<Rect>,
-    pub pending_document_chips: Vec<pending_documents::PendingDocumentChip>,
-    pub pending_document_chip_hit_areas: Vec<(crate::app::submission::PendingDocumentId, Rect)>,
     pub dropdown_item_areas: Vec<Rect>,
     pub dropdown_scroll_offset: usize,
     pub chat_scrollbar_area: Option<Rect>,
     pub chat_scrollbar_thumb: Option<Rect>,
     pub thinking_hit_areas: Vec<(usize, Rect)>,
     pub link_hit_areas: Vec<(Rect, String)>,
-    pub copy_hit_areas: Vec<(usize, Rect)>,
-    pub command_hit_areas: Vec<(usize, usize, crate::ui::chat_tab::CommandBlockAction, Rect)>,
     pub thinking_fold_overrides: HashSet<usize>,
     pub scroll_to_message: Option<usize>,
     pub answer_anchor_lines: Vec<(usize, usize)>,
@@ -311,14 +229,12 @@ pub enum DiffStatus {
 impl UI {
     pub fn new() -> Self {
         Self {
-            text_selection: text_selection::TextSelection::default(),
             tabs: vec![ChatTabState {
                 tab: crate::app::tab::Tab::new(
                     "Chat".to_string(),
                     "Ollama".to_string(),
                     "llama3.1".to_string(),
                 ),
-                manual_model_override: false,
                 messages: vec![],
                 active_conversation: 0,
                 conversations: vec![],
@@ -339,16 +255,12 @@ impl UI {
                 reasoning_hit_area: None,
                 input_area: None,
                 input_text_area: None,
-                pending_document_chips: Vec::new(),
-                pending_document_chip_hit_areas: Vec::new(),
                 dropdown_item_areas: vec![],
                 dropdown_scroll_offset: 0,
                 chat_scrollbar_area: None,
                 chat_scrollbar_thumb: None,
                 thinking_hit_areas: vec![],
                 link_hit_areas: vec![],
-                copy_hit_areas: vec![],
-                command_hit_areas: vec![],
                 thinking_fold_overrides: HashSet::new(),
                 scroll_to_message: None,
                 answer_anchor_lines: vec![],
@@ -359,12 +271,7 @@ impl UI {
                 sidebar_state: sidebar::SidebarState::default(),
             }],
             active_tab: 0,
-            ephemeral: None,
             app_tabs: app_tabs::AppTabs::default(),
-            terminals: terminal_workspace::TerminalWorkspace::default(),
-            command_review: None,
-            settings_workspace: settings_workspace::SettingsWorkspaceState::default(),
-            vault_workspaces: vault_workspace::VaultWorkspaceRegistry::default(),
             panel_state: crate::tui::shell::PanelState::new(),
             sidebar_open: false,
             artifact_sidebar_open: false,
@@ -378,10 +285,7 @@ impl UI {
             list_popup: None,
             palette: None,
             settings_v2: None,
-            credential_manager: None,
-            pending_vault_action: None,
-            pending_vault_mutation: None,
-            pending_vault_mutation_areas: None,
+            keybind_capture: None,
             keybinding_overrides: BTreeMap::new(),
             show_keybinds: false,
             mouse_hit_areas: Vec::new(),
@@ -397,15 +301,8 @@ impl UI {
             artifact_sidebar_state: ArtifactSidebarState::default(),
             vault_available: false,
             vault_artifacts: vec![],
+            saved_artifacts: vec![],
             memory_artifacts: vec![],
-            show_memories: true,
-            show_vault: true,
-            vault_notice: None,
-            memory_notice: None,
-            resource_editor: None,
-            pending_protected_context: None,
-            #[cfg(feature = "memory")]
-            memory_manager: memory_manager::MemoryManagerState::default(),
             mcps: vec![],
             user_alignment: TextAlignment::Right,
             ai_alignment: TextAlignment::Left,
@@ -425,20 +322,11 @@ impl UI {
             disabled_providers: HashSet::new(),
             disabled_models: HashSet::new(),
             frame_tick: 0,
-            protection_blocked: false,
             tui_config: crate::config::TuiConfig::default(),
         }
     }
 
     pub fn render(&mut self, f: &mut Frame) {
-        if self.protection_blocked {
-            f.render_widget(ratatui::widgets::Clear, f.area());
-            f.render_widget(
-                ratatui::widgets::Paragraph::new("Application protection transition in progress."),
-                f.area(),
-            );
-            return;
-        }
         let theme = crate::theme::active_theme();
         self.frame_tick = self.frame_tick.wrapping_add(1);
         let area = f.area();
@@ -446,44 +334,7 @@ impl UI {
         self.modal_areas = None;
         self.status_bar_areas = None;
         self.chat_area = None;
-        if let Some(pane) = self.ephemeral.as_mut() {
-            pane.area = None;
-            pane.close_area = None;
-        }
         self.mouse_hit_areas.clear();
-        self.terminals.clear_areas();
-        self.terminals.show_helpers = self.tui_config.helper_enabled;
-        self.terminals.show_cursor = self.active_modal.is_none()
-            && self.command_review.is_none()
-            && self.terminals.close_pending.is_none()
-            && self.delete_confirm.is_none()
-            && self.save_file_dialog.is_none()
-            && self.export_dialog.is_none()
-            && self.artifact_viewer.is_none()
-            && self.editor_popup.is_none()
-            && self.list_popup.is_none()
-            && self.palette.is_none()
-            && self.settings_v2.is_none()
-            && self.credential_manager.is_none()
-            && self.pending_vault_mutation.is_none()
-            && !self.show_keybinds
-            && !self.show_session_list
-            && !self.tabs.get(self.active_tab).is_some_and(|tab| {
-                tab.provider_dropdown_open || tab.model_dropdown_open || tab.reasoning_dropdown_open
-            });
-        for (index, tab) in self.tabs.iter_mut().enumerate() {
-            tab.clear_hit_areas();
-            if index != self.active_tab {
-                tab.provider_dropdown_open = false;
-                tab.model_dropdown_open = false;
-                tab.reasoning_dropdown_open = false;
-            }
-        }
-        self.artifact_sidebar_state.clear_hit_areas();
-        let active_app_tab_id = self.app_tabs.active_id();
-        if let Some(state) = self.vault_workspaces.get_mut(active_app_tab_id) {
-            state.hit_areas.clear();
-        }
 
         if area.width < 64 || area.height < 16 {
             f.render_widget(Clear, area);
@@ -520,109 +371,25 @@ impl UI {
         self.mouse_hit_areas
             .extend(top_bar.hit_areas(top_bar_area).into_iter().map(|hit| {
                 let action = match hit.action {
-                    top_bar::TopBarAction::Select(id) => MouseAction::AppTabSelect(id),
+                    top_bar::TopBarAction::Select(index) => MouseAction::AppTabSelect(index),
                     top_bar::TopBarAction::Add => MouseAction::AppTabAdd,
-                    top_bar::TopBarAction::Close(id) => MouseAction::AppTabClose(id),
+                    top_bar::TopBarAction::Close(index) => MouseAction::AppTabClose(index),
                 };
                 (hit.area, action)
             }));
 
-        let active_view = self.app_tabs.active_tab().map(app_tabs::AppTab::view);
-        match active_view {
-            Some(app_tabs::AppView::Terminal { session_id }) => {
-                let session_id = *session_id;
-                self.terminals.focused = true;
-                self.terminals.render_session(
-                    f,
-                    Rect::new(
-                        area.x,
-                        area.y + 1,
-                        area.width,
-                        area.height.saturating_sub(1),
-                    ),
-                    session_id,
-                );
-                self.render_global_overlays(f, area, 0);
-                return;
-            }
-            Some(app_tabs::AppView::Settings) => {
-                self.settings_workspace.render(
-                    f,
-                    Rect::new(
-                        area.x,
-                        area.y + 1,
-                        area.width,
-                        area.height.saturating_sub(1),
-                    ),
-                );
-                self.render_global_overlays(f, area, 0);
-                return;
-            }
-            Some(app_tabs::AppView::Launcher) => {
-                let launcher_area = Rect::new(
+        if !self.app_tabs.active_view().is_chat() {
+            launcher::render(
+                f,
+                Rect::new(
                     area.x,
                     area.y.saturating_add(1),
                     area.width,
                     area.height.saturating_sub(1),
-                );
-                self.mouse_hit_areas.extend(
-                    launcher::render(f, launcher_area)
-                        .into_iter()
-                        .map(|hit| (hit.area, MouseAction::Launcher(hit.action))),
-                );
-                self.render_global_overlays(f, area, 0);
-                return;
-            }
-            Some(app_tabs::AppView::Vault) => {
-                let workspace = Rect::new(
-                    area.x,
-                    area.y.saturating_add(1),
-                    area.width,
-                    area.height.saturating_sub(1),
-                );
-                let active_id = self.app_tabs.active_id();
-                if let Some(state) = self.vault_workspaces.get_mut(active_id) {
-                    vault::render_workspace(
-                        f,
-                        workspace,
-                        state,
-                        vault::VaultRenderProps {
-                            markdown_mode: self.markdown_mode,
-                            kitty_enhanced_text: self.kitty_enhanced_text,
-                            kitty_heading_downscale: self.kitty_heading_downscale,
-                            image_protocol: &self.image_protocol,
-                            terminal_capabilities: self.terminal_capabilities,
-                        },
-                    );
-                } else {
-                    f.render_widget(
-                        Paragraph::new("Vault workspace unavailable")
-                            .style(Style::default().fg(theme.error).bg(theme.background))
-                            .alignment(Alignment::Center),
-                        workspace,
-                    );
-                }
-                self.render_global_overlays(f, area, 0);
-                return;
-            }
-            #[cfg(feature = "memory")]
-            Some(app_tabs::AppView::Memories) => {
-                let workspace = Rect::new(
-                    area.x,
-                    area.y.saturating_add(1),
-                    area.width,
-                    area.height.saturating_sub(1),
-                );
-                self.memory_manager.render(
-                    f,
-                    workspace,
-                    &self.memory_artifacts,
-                    self.memory_notice.as_deref(),
-                );
-                self.render_global_overlays(f, area, 0);
-                return;
-            }
-            Some(app_tabs::AppView::Chat) | None => {}
+                ),
+            );
+            self.render_global_overlays(f, area, 0);
+            return;
         }
 
         let status_bar_rows = self.tui_config.status_bar_rows.clamp(1, 2);
@@ -635,27 +402,12 @@ impl UI {
             ])
             .split(area);
 
-        let mut panels = self.panel_state.clamped_for_area(main_layout[1]);
-        let ephemeral_open = self.ephemeral.is_some();
-        if ephemeral_open {
-            panels.right = crate::tui::shell::PanelMode::Wide;
-            if main_layout[1].width < panels.left_width().saturating_add(64) {
-                panels.left = crate::tui::shell::PanelMode::Closed;
-            }
-            panels.right_wide_width = self.panel_state.right_wide_width.min(
-                main_layout[1]
-                    .width
-                    .saturating_sub(panels.left_width())
-                    .saturating_sub(24),
-            );
-        }
+        let panels = self.panel_state.clamped_for_area(main_layout[1]);
 
         let left_actual_width = panels.left_width();
         let artifact_actual_width = panels.right_width();
-        let left_overlays_chat =
-            !ephemeral_open && panels.left == crate::tui::shell::PanelMode::Wide;
-        let right_overlays_chat =
-            !ephemeral_open && panels.right == crate::tui::shell::PanelMode::Wide;
+        let left_overlays_chat = panels.left == crate::tui::shell::PanelMode::Wide;
+        let right_overlays_chat = panels.right == crate::tui::shell::PanelMode::Wide;
         let left_width = if left_overlays_chat {
             0
         } else {
@@ -711,11 +463,6 @@ impl UI {
         } else {
             content_layout[2]
         };
-        let artifact_visibility = ArtifactSidebarVisibility {
-            memories: cfg!(feature = "memory") && self.show_memories,
-            vault: self.show_vault,
-        };
-        let main_chat_index = self.main_chat_index();
 
         // Sidebar
         if self.sidebar_open && !left_overlays_chat {
@@ -724,7 +471,7 @@ impl UI {
                 left_sidebar_area,
             );
             let focused = self.focus == crate::tui::focus::Focus::LeftSidebar;
-            let active_tab = &mut self.tabs[main_chat_index];
+            let active_tab = &mut self.tabs[self.active_tab];
             let mut sidebar = Sidebar::new(
                 &active_tab.conversations,
                 active_tab.active_conversation,
@@ -741,19 +488,19 @@ impl UI {
 
         let left_handle_rects = panels.handle_left_rects(main_layout[1]);
         if let Some(tab_state) = self.tabs.get_mut(self.active_tab) {
-            if !ephemeral_open && artifact_actual_width > 0 && !right_overlays_chat {
+            if artifact_actual_width > 0 && !right_overlays_chat {
                 f.render_widget(
                     Block::default().style(Style::default().fg(theme.foreground).bg(theme.sidebar)),
                     right_sidebar_area,
                 );
                 let mut artifact_sidebar = ArtifactSidebar::new(
                     &tab_state.temporary_artifacts,
+                    &self.saved_artifacts,
                     &self.memory_artifacts,
                     &self.vault_artifacts,
                     self.vault_available,
                     &mut self.artifact_sidebar_state,
-                )
-                .with_visibility(artifact_visibility);
+                );
                 artifact_sidebar.render(f, right_sidebar_area);
             } else if artifact_actual_width == 0 {
                 self.artifact_sidebar_state = ArtifactSidebarState::default();
@@ -762,47 +509,42 @@ impl UI {
 
         let right_handle_rects = panels.handle_right_rects(main_layout[1]);
 
-        let chat_content_area = self.terminals.split_chat(f, content_layout[1]);
-        self.chat_area = Some(chat_content_area);
+        self.chat_area = Some(content_layout[1]);
 
         // Content area
-        let chat_cursor_visible = self.focus == crate::tui::focus::Focus::Chat
-            && !self.terminals.focused
-            && self.command_review.is_none()
-            && self.active_modal.is_none()
-            && self.delete_confirm.is_none()
-            && self.save_file_dialog.is_none()
-            && self.export_dialog.is_none()
-            && self.artifact_viewer.is_none()
-            && self.editor_popup.is_none()
-            && self.palette.is_none()
-            && self.settings_v2.is_none()
-            && self.credential_manager.is_none()
-            && self.pending_vault_mutation.is_none()
-            && !self.show_keybinds
-            && !self.show_session_list
-            && !left_overlays_chat
-            && !right_overlays_chat
-            && self
-                .list_popup
-                .as_ref()
-                .is_none_or(|popup| popup.live_input)
-            && self.tabs.get(self.active_tab).is_some_and(|tab| {
-                !tab.provider_dropdown_open
-                    && !tab.model_dropdown_open
-                    && !tab.reasoning_dropdown_open
-            });
-        self.render_chat_pane(
-            f,
-            main_chat_index,
-            chat_content_area,
-            chat_cursor_visible && self.active_tab == main_chat_index,
-        );
-        if ephemeral_open {
-            self.render_ephemeral(f, content_layout[2], chat_cursor_visible);
-        }
         if let Some(tab_state) = self.tabs.get_mut(self.active_tab) {
+            let pane =
+                Block::default().style(Style::default().fg(theme.foreground).bg(theme.background));
+            let pane_area = pane.inner(content_layout[1]);
+            f.render_widget(pane, content_layout[1]);
+
+            let chat_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0)])
+                .split(pane_area);
+
             let streaming = tab_state.streaming;
+            {
+                let mut chat_tab = chat_tab::ChatTab::new(
+                    tab_state,
+                    chat_tab::ChatTabProps {
+                        user_alignment: self.user_alignment,
+                        ai_alignment: self.ai_alignment,
+                        markdown_mode: self.markdown_mode,
+                        collapse_thinking: self.collapse_thinking,
+                        show_chat_scrollbar: self.show_chat_scrollbar,
+                        kitty_enhanced_text: self.kitty_enhanced_text,
+                        kitty_heading_downscale: self.kitty_heading_downscale,
+                        image_protocol: &self.image_protocol,
+                        terminal_capabilities: self.terminal_capabilities,
+                        frame_tick: self.frame_tick,
+                        providers: &self.visible_providers,
+                        models: &self.current_models,
+                        reasoning_options: &self.current_reasoning_options,
+                    },
+                );
+                chat_tab.render(f, chat_chunks[0]);
+            }
 
             let status_bar = StatusBar {
                 status: self.connection_status,
@@ -863,10 +605,7 @@ impl UI {
                 left_sidebar_area,
             );
             let focused = self.focus == crate::tui::focus::Focus::LeftSidebar;
-            let active_tab = &mut self.tabs[main_chat_index];
-            active_tab
-                .command_hit_areas
-                .retain(|(_, _, _, rect)| rect.intersection(left_sidebar_area).is_empty());
+            let active_tab = &mut self.tabs[self.active_tab];
             let mut sidebar = Sidebar::new(
                 &active_tab.conversations,
                 active_tab.active_conversation,
@@ -883,9 +622,6 @@ impl UI {
 
         if right_overlays_chat {
             if let Some(tab_state) = self.tabs.get_mut(self.active_tab) {
-                tab_state
-                    .command_hit_areas
-                    .retain(|(_, _, _, rect)| rect.intersection(right_sidebar_area).is_empty());
                 if artifact_actual_width > 0 {
                     f.render_widget(Clear, right_sidebar_area);
                     f.render_widget(
@@ -895,12 +631,12 @@ impl UI {
                     );
                     let mut artifact_sidebar = ArtifactSidebar::new(
                         &tab_state.temporary_artifacts,
+                        &self.saved_artifacts,
                         &self.memory_artifacts,
                         &self.vault_artifacts,
                         self.vault_available,
                         &mut self.artifact_sidebar_state,
-                    )
-                    .with_visibility(artifact_visibility);
+                    );
                     artifact_sidebar.render(f, right_sidebar_area);
                 }
             }
@@ -920,11 +656,7 @@ impl UI {
             crate::tui::shell::PanelMode::Thin => ["<", "<", ">"],
             crate::tui::shell::PanelMode::Wide => [">", ">", ">"],
         };
-        for (index, rect) in right_handle_rects
-            .into_iter()
-            .enumerate()
-            .filter(|_| !ephemeral_open)
-        {
+        for (index, rect) in right_handle_rects.into_iter().enumerate() {
             let color = if index == 2 && panels.right != crate::tui::shell::PanelMode::Closed {
                 theme.foreground
             } else {
@@ -946,29 +678,22 @@ impl UI {
         } else {
             MouseAction::RightHandle
         };
-        if !ephemeral_open {
-            self.mouse_hit_areas
-                .push((right_handle_rects[0], right_primary_action));
-            self.mouse_hit_areas
-                .push((right_handle_rects[1], right_primary_action));
-            let bottom_action = match panels.right {
-                crate::tui::shell::PanelMode::Closed => MouseAction::RightHandleThin,
-                crate::tui::shell::PanelMode::Thin => MouseAction::RightHandleClose,
-                crate::tui::shell::PanelMode::Wide => MouseAction::RightHandleThin,
-            };
-            self.mouse_hit_areas
-                .push((right_handle_rects[2], bottom_action));
-        }
+        self.mouse_hit_areas
+            .push((right_handle_rects[0], right_primary_action));
+        self.mouse_hit_areas
+            .push((right_handle_rects[1], right_primary_action));
+        let bottom_action = match panels.right {
+            crate::tui::shell::PanelMode::Closed => MouseAction::RightHandleThin,
+            crate::tui::shell::PanelMode::Thin => MouseAction::RightHandleClose,
+            crate::tui::shell::PanelMode::Wide => MouseAction::RightHandleThin,
+        };
+        self.mouse_hit_areas
+            .push((right_handle_rects[2], bottom_action));
 
         self.render_global_overlays(f, area, artifact_width);
     }
 
     fn render_global_overlays(&mut self, f: &mut Frame, area: Rect, artifact_width: u16) {
-        if !self.terminals.show_cursor {
-            for tab in &mut self.tabs {
-                tab.command_hit_areas.clear();
-            }
-        }
         if let Some(ref mut dialog) = self.save_file_dialog {
             dialog.render(f, area);
         }
@@ -977,14 +702,10 @@ impl UI {
             dialog.render(f, area);
         }
 
-        if let Some(viewer) = &mut self.artifact_viewer {
+        if let (Some(viewer), Some(chat_area)) = (&mut self.artifact_viewer, self.chat_area) {
             viewer.render(
                 f,
-                if self.app_tabs.active_view().is_chat() {
-                    self.chat_area.unwrap_or(area)
-                } else {
-                    area
-                },
+                chat_area,
                 modals::artifact_viewer::ArtifactViewerProps {
                     markdown_mode: self.markdown_mode,
                     kitty_enhanced_text: self.kitty_enhanced_text,
@@ -997,10 +718,6 @@ impl UI {
 
         if let (Some(editor), Some(chat_area)) = (&mut self.editor_popup, self.chat_area) {
             editor.render(f, chat_area);
-        }
-
-        if let Some(editor) = &mut self.resource_editor {
-            editor.render(f, area);
         }
 
         if let Some(ref popup) = self.list_popup {
@@ -1018,7 +735,7 @@ impl UI {
         }
 
         if let Some(ref settings) = self.settings_v2 {
-            settings.render(f, area);
+            settings.render_with_keybindings(f, area, &self.keybinding_overrides);
             self.mouse_hit_areas.extend(
                 settings
                     .visible_item_areas(area)
@@ -1027,8 +744,8 @@ impl UI {
             );
         }
 
-        if let Some(manager) = &self.credential_manager {
-            manager.render(f, area);
+        if let Some(ref capture) = self.keybind_capture {
+            capture.render(f, area);
         }
 
         toast::render(
@@ -1055,61 +772,12 @@ impl UI {
             self.render_keybinds(f, area);
         }
 
-        if let Some(review) = self.command_review.as_mut() {
-            review.render(f, area);
-        }
-        self.terminals.render_close_confirmation(f);
         // Modal overlay (rendered on top of everything)
         if let Some(modal) = self.active_modal {
             match modal {
                 Modal::QuitConfirm => {
                     let modal = QuitConfirmModal::new();
-                    let modal = if self.terminals.has_running() {
-                        modal.message("Quit TCUI and terminate all running terminal processes?")
-                    } else {
-                        modal
-                    };
                     let areas = modal.render(f);
-                    self.modal_areas = Some(ModalAreas {
-                        yes: areas.yes,
-                        no: areas.no,
-                    });
-                }
-                Modal::DiscardPendingDocuments => {
-                    let modal = QuitConfirmModal::new()
-                        .title("Discard documents?")
-                        .message("Discard inserted documents and continue?");
-                    let areas = modal.render(f);
-                    self.modal_areas = Some(ModalAreas {
-                        yes: areas.yes,
-                        no: areas.no,
-                    });
-                }
-                Modal::DiscardSecurityDrafts => {
-                    let areas = QuitConfirmModal::new()
-                        .title("Discard work and close processes?")
-                        .message("Continue and discard ALL composer/history drafts, inserted documents, open editor changes, and temporary chats? Running terminal and vault editor processes will close; unsaved work may be lost. Cancel keeps your work and processes.")
-                        .render(f);
-                    self.modal_areas = Some(ModalAreas {
-                        yes: areas.yes,
-                        no: areas.no,
-                    });
-                }
-                Modal::ExportChatDraft => {
-                    let areas = QuitConfirmModal::new()
-                        .title("Export protected draft as plaintext?")
-                        .message("The external editor requires a PLAINTEXT file. TCUI uses private temporary permissions, but the editor may retain backups or copies. Export this draft? Cancel keeps it only in TCUI.")
-                        .render(f);
-                    self.modal_areas = Some(ModalAreas {
-                        yes: areas.yes,
-                        no: areas.no,
-                    });
-                }
-                Modal::ShareProtectedContext => {
-                    let areas = QuitConfirmModal::new()
-                        .title("Store protected content in an unencrypted chat?")
-                        .message("This content is encrypted at rest. When sent, it goes to the chosen provider. If this chat is saved, the content will be stored in PLAINTEXT chat history. Continue? Cancel keeps it out of this chat.")
-                        .render(f);
                     self.modal_areas = Some(ModalAreas {
                         yes: areas.yes,
                         no: areas.no,
@@ -1128,16 +796,6 @@ impl UI {
                 no: areas.no,
             });
         }
-
-        if let Some(pending) = self.pending_vault_mutation.as_ref() {
-            self.pending_vault_mutation_areas = Some(
-                modals::vault_mutation_preview::VaultMutationPreviewModal::new(pending)
-                    .render(f, area),
-            );
-        } else {
-            self.pending_vault_mutation_areas = None;
-        }
-        self.text_selection.render(f.buffer_mut());
     }
 
     fn render_keybinds(&self, f: &mut Frame, area: Rect) {
@@ -1156,18 +814,28 @@ impl UI {
             Line::styled("Esc or Enter dismisses.", Style::default().fg(theme.muted)),
             Line::from(""),
         ];
-        for (binding, label) in [
-            ("ctrl+p", "Search settings and commands"),
-            ("ctrl+,", "Open Settings tab"),
-            ("ctrl+t", "Open launcher tab"),
-            ("ctrl+w", "Close app tab"),
-            ("F6", "Focus chat / terminal"),
-            ("F7", "Cycle terminal placement"),
-        ] {
-            lines.push(Line::from(format!("  {binding:<14}{label}")));
-        }
-        for (command, binding) in &self.keybinding_overrides {
-            lines.push(Line::from(format!("  {binding:<14}{command} (override)")));
+        for setting in crate::tui::settings_panel::all_settings()
+            .iter()
+            .filter(|setting| {
+                matches!(
+                    setting.setting_type,
+                    crate::tui::settings_panel::SettingType::Keybind { .. }
+                )
+            })
+            .take(6)
+        {
+            if let crate::tui::settings_panel::SettingType::Keybind {
+                default_binding, ..
+            } = setting.setting_type
+            {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {default_binding:<14}"),
+                        Style::default().fg(theme.muted),
+                    ),
+                    Span::raw(setting.title.to_string()),
+                ]));
+            }
         }
         lines.extend([
             Line::from("  shift+enter  Insert newline"),
@@ -1190,7 +858,6 @@ impl UI {
     pub fn add_tab(&mut self, tab: crate::app::tab::Tab) {
         self.tabs.push(ChatTabState {
             tab,
-            manual_model_override: false,
             messages: vec![],
             active_conversation: 0,
             conversations: vec![],
@@ -1211,16 +878,12 @@ impl UI {
             reasoning_hit_area: None,
             input_area: None,
             input_text_area: None,
-            pending_document_chips: Vec::new(),
-            pending_document_chip_hit_areas: Vec::new(),
             dropdown_item_areas: vec![],
             dropdown_scroll_offset: 0,
             chat_scrollbar_area: None,
             chat_scrollbar_thumb: None,
             thinking_hit_areas: vec![],
             link_hit_areas: vec![],
-            copy_hit_areas: vec![],
-            command_hit_areas: vec![],
             thinking_fold_overrides: HashSet::new(),
             scroll_to_message: None,
             answer_anchor_lines: vec![],
@@ -1258,6 +921,47 @@ impl UI {
         if let Some(tab) = self.tabs.get_mut(tab_id) {
             tab.messages.push(msg);
             tab.scroll_to_message = Some(tab.messages.len().saturating_sub(1));
+        }
+    }
+
+    pub fn add_generated_file(&mut self, tab_id: usize, file: crate::app::GeneratedFile) {
+        if let Some(tab) = self.tabs.get_mut(tab_id) {
+            let artifact = match file.saved_path {
+                Some(path) => ArtifactEntry::saved_markdown(path, file.content),
+                None => ArtifactEntry::temp_markdown(file.id, file.name, file.content),
+            };
+            tab.temporary_artifacts.push(artifact);
+        }
+    }
+
+    pub fn add_stream_content(&mut self, tab_id: usize, message_idx: usize, content: String) {
+        if let Some(tab) = self.tabs.get_mut(tab_id) {
+            if let Some(message) = tab.messages.get_mut(message_idx) {
+                if message.role == "assistant" {
+                    message.content.push_str(&content);
+                    tab.scroll_to_message = Some(message_idx);
+                }
+            }
+        }
+    }
+
+    pub fn add_stream_thinking(&mut self, tab_id: usize, message_idx: usize, content: String) {
+        if let Some(tab) = self.tabs.get_mut(tab_id) {
+            if let Some(message) = tab.messages.get_mut(message_idx) {
+                if message.role == "assistant" {
+                    message
+                        .thinking_content
+                        .get_or_insert_with(String::new)
+                        .push_str(&content);
+                    tab.scroll_to_message = Some(message_idx);
+                }
+            }
+        }
+    }
+
+    pub fn finish_stream(&mut self, tab_id: usize) {
+        if let Some(tab) = self.tabs.get_mut(tab_id) {
+            tab.streaming = false;
         }
     }
 
@@ -1342,27 +1046,21 @@ mod tests {
     }
 
     #[test]
-    fn app_tab_id_launcher_uses_full_screen_without_chat_chrome() {
+    fn placeholder_tab_uses_full_launcher_without_chat_chrome() {
         let mut ui = UI::new();
         ui.sidebar_open = true;
         ui.artifact_sidebar_open = true;
-        ui.app_tabs.add_launcher();
+        ui.app_tabs.add_placeholder();
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
 
         terminal.draw(|frame| ui.render(frame)).expect("render ui");
 
         let screen = terminal.backend().to_string();
-        assert!(screen.contains("Launcher"));
-        assert!(screen.contains("Vault"));
-        #[cfg(feature = "memory")]
-        assert!(screen.contains("Memories"));
-        assert!(screen.contains("Terminal"));
-        assert!(!screen.contains("Pomodoro"));
+        assert!(screen.contains("Tab 1"));
+        assert!(screen.contains("Obsidian"));
+        assert!(screen.contains("Memory management"));
+        assert!(screen.contains("Pomodoro"));
         assert!(!screen.contains("[New Chat]"));
-        assert_eq!(
-            terminal.backend().buffer()[(0, 1)].bg,
-            crate::theme::active_theme().background
-        );
         assert!(ui.chat_area.is_none());
         assert!(ui.status_bar_areas.is_none());
         assert!(!ui.mouse_hit_areas.iter().any(|(_, action)| matches!(

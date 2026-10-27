@@ -28,12 +28,8 @@ fn request_body_maps_system_messages_and_reasoning_to_responses_input() {
         build_request_body(&request),
         json!({
             "model": "gpt-5.6",
+            "instructions": "system policy\n\nhistory policy",
             "input": [
-                {
-                    "type": "message",
-                    "role": "developer",
-                    "content": [{"type": "input_text", "text": "system policy\n\nhistory policy"}]
-                },
                 {
                     "type": "message",
                     "role": "user",
@@ -52,9 +48,6 @@ fn request_body_maps_system_messages_and_reasoning_to_responses_input() {
             "reasoning": {"effort": "high"},
             "stream": true,
             "store": false,
-            "tool_choice": "auto",
-            "parallel_tool_calls": false,
-            "include": [],
             "client_metadata": {
                 "session_id": "tcui-conversation-0000000000000001",
                 "thread_id": "tcui-conversation-0000000000000001"
@@ -82,10 +75,6 @@ fn headers_match_the_codex_subscription_contract() -> color_eyre::Result<()> {
     assert_eq!(headers["chatgpt-account-id"], "account-123");
     assert_eq!(headers["originator"], "codex_cli_rs");
     assert_eq!(headers["user-agent"], request::codex_user_agent()?);
-    assert!(headers["user-agent"]
-        .to_str()?
-        .starts_with("codex_cli_rs/0.163.0 "));
-    assert!(headers["authorization"].is_sensitive());
     assert_eq!(headers["accept"], "text/event-stream");
     assert!(!headers.contains_key("version"));
     assert_eq!(headers["session-id"], "tcui-conversation-0000000000000001");

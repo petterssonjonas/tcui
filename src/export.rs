@@ -13,17 +13,14 @@ pub fn export_chat_document_to_dir(
     format: OutputFormat,
     destination: &Path,
 ) -> Result<PathBuf> {
+    std::fs::create_dir_all(destination)?;
     let extension = match format {
         OutputFormat::Markdown => "md",
         OutputFormat::Json => "json",
     };
-    create_named_export(
-        destination,
-        &document.title,
-        document.id,
-        extension,
-        render_chat_document(document, format)?.as_bytes(),
-    )
+    let path = unique_export_path(destination, &document.title, document.id, extension)?;
+    std::fs::write(&path, render_chat_document(document, format)?)?;
+    Ok(path)
 }
 
 #[cfg(feature = "memory")]
@@ -32,18 +29,15 @@ pub fn export_memory_document_to_dir(
     format: OutputFormat,
     destination: &Path,
 ) -> Result<PathBuf> {
+    std::fs::create_dir_all(destination)?;
     let extension = match format {
         OutputFormat::Markdown => "md",
         OutputFormat::Json => "json",
     };
     let id = i64::try_from(document.id).unwrap_or(i64::MAX);
-    create_named_export(
-        destination,
-        &document.title,
-        id,
-        extension,
-        render_memory_document(document, format)?.as_bytes(),
-    )
+    let path = unique_export_path(destination, &document.title, id, extension)?;
+    std::fs::write(&path, render_memory_document(document, format)?)?;
+    Ok(path)
 }
 
 pub fn render_chat_document(
@@ -84,35 +78,15 @@ pub fn render_memory_document(
     }
 }
 
-pub(crate) fn create_named_export(
-    dir: &Path,
-    title: &str,
-    id: i64,
-    extension: &str,
-    bytes: &[u8],
-) -> Result<PathBuf> {
+pub fn unique_export_path(dir: &Path, title: &str, id: i64, extension: &str) -> Result<PathBuf> {
     let base = sanitize_filename(title);
-    for suffix in 1..=u32::MAX {
-        let filename = if suffix == 1 {
-            format!("{base}-{id}.{extension}")
-        } else {
-            format!("{base}-{id}-{suffix}.{extension}")
-        };
-        let path = dir.join(filename);
-        match crate::vault::create_artifact_path(&path, bytes) {
-            Ok(()) => return Ok(path),
-            Err(error)
-                if error
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|source| source.kind() == std::io::ErrorKind::AlreadyExists) => {}
-            Err(error) => return Err(error),
-        }
+    let mut candidate = dir.join(format!("{base}-{id}.{extension}"));
+    let mut suffix = 2_u32;
+    while candidate.exists() {
+        candidate = dir.join(format!("{base}-{id}-{suffix}.{extension}"));
+        suffix += 1;
     }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::AlreadyExists,
-        "No export filename is available",
-    )
-    .into())
+    Ok(candidate)
 }
 
 pub fn sanitize_filename(title: &str) -> String {

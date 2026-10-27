@@ -50,7 +50,6 @@ async fn codex_connection_check_treats_a_resolved_credential_as_ready_without_pr
         "Codex",
         "https://chatgpt.com/backend-api/codex",
         Some(&credential),
-        "codex",
     )
     .await;
 

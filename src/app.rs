@@ -1,63 +1,24 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 pub mod action;
 mod artifacts;
-mod chat_files;
 mod connection;
 mod conversations;
-pub(crate) mod credential_manager;
-mod ephemeral;
 mod export;
 pub mod generated_file;
 mod input;
 mod input_events;
 pub mod message;
-mod pending_documents;
 mod popups;
 mod providers;
-mod request_control;
-pub(crate) mod requests;
 mod runtime;
 mod settings;
-pub mod submission;
-mod submission_runtime;
 pub mod tab;
 mod terminal;
-mod terminal_workspace;
 mod update;
-pub(crate) mod vault;
-pub(crate) mod vault_mutation_execute;
-
-#[cfg(test)]
-#[path = "app/request_only_document_tests.rs"]
-mod request_only_document_tests;
-
-#[cfg(test)]
-#[path = "app/vault_mutation_preview_tests.rs"]
-mod vault_mutation_preview_tests;
-
-#[cfg(test)]
-#[path = "app/vault_mutation_execute_tests.rs"]
-mod vault_mutation_execute_tests;
-
-#[cfg(test)]
-#[path = "app/chat_file_lifecycle.rs"]
-mod chat_file_lifecycle;
-
-#[cfg(test)]
-#[path = "app/saved_file_migration_tests.rs"]
-mod saved_file_migration_tests;
-
-#[cfg(test)]
-#[path = "app/vault_restart_tests.rs"]
-mod vault_restart_tests;
-
-#[cfg(test)]
-#[path = "app/host_execution_tests.rs"]
-mod host_execution_tests;
 
 pub use action::Action;
 pub use generated_file::GeneratedFile;
@@ -67,29 +28,19 @@ pub use tab::Tab;
 pub(crate) use artifacts::local_media_sources;
 pub(crate) use input::char_to_byte_index;
 
-use crate::{config::AppConfig, llm::LlmClient, storage::Storage};
+use crate::{config::AppConfig, llm::LlmClient, obsidian::Vault, storage::Storage};
 
 pub struct TuiApp {
     pub storage: Storage,
-    pub(crate) chat_files: crate::storage::chat_files::ChatSavedFileStore,
     pub config: Arc<tokio::sync::RwLock<AppConfig>>,
     pub ui: crate::ui::UI,
+    pub vault: Option<Arc<Vault>>,
     pub action_tx: tokio::sync::mpsc::UnboundedSender<Action>,
     pub action_rx: tokio::sync::mpsc::UnboundedReceiver<Action>,
+    pub system_prompt: String,
     pub ctrl_c_count: u32,
     pub last_ctrl_c: Option<std::time::Instant>,
-    pub(crate) cancel_escape: Option<(submission::SubmissionId, std::time::Instant)>,
-    pub(crate) requests: HashMap<submission::SubmissionId, requests::ConversationRequest>,
     pub terminal_has_focus: Arc<AtomicBool>,
-    pub(crate) pending_documents:
-        HashMap<crate::ui::app_tabs::AppTabId, submission::PendingDocuments>,
-    pub(crate) submission_states:
-        HashMap<crate::ui::app_tabs::AppTabId, submission::SubmissionState>,
-    pub(crate) pending_document_discard_action:
-        Option<pending_documents::PendingDocumentDiscardAction>,
-    pub(crate) security_restart: Option<crate::protection::ui::SecurityRestart>,
-    pub(crate) security_notice: Option<String>,
-    background_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl TuiApp {
@@ -97,30 +48,12 @@ impl TuiApp {
         storage: Storage,
         config: Arc<tokio::sync::RwLock<AppConfig>>,
         _llm: Arc<LlmClient>,
+        vault: Option<Arc<Vault>>,
     ) -> Self {
         let mut ui = crate::ui::UI::new();
-        let loaded_config_snapshot = config.try_read().ok().map(|cfg| cfg.clone());
-        let config_snapshot = loaded_config_snapshot.as_ref().cloned().unwrap_or_default();
-        let reset_startup = crate::storage::saved_file_migration::SavedFileMigration::startup(
-            loaded_config_snapshot.as_ref(),
-        );
-        let reset_warning = reset_startup.warning;
-        #[cfg(test)]
-        let chat_files = if std::env::var_os("TCUI_TEST_SAVED_FILE_MIGRATION").is_some() {
-            crate::storage::chat_files::ChatSavedFileStore::new(
-                reset_startup.saved_root,
-                reset_startup.data_paths,
-            )
-        } else {
-            crate::storage::chat_files::ChatSavedFileStore::discover()
-        };
-        #[cfg(not(test))]
-        let chat_files = crate::storage::chat_files::ChatSavedFileStore::new(
-            reset_startup.saved_root,
-            reset_startup.data_paths,
-        );
-        let orphan_cleanup_error = chat_files.cleanup_orphans().err();
         let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
+        let system_prompt = Self::load_system_prompt();
+        let config_snapshot = config.try_read().map(|cfg| cfg.clone()).unwrap_or_default();
         crate::theme::set_active_theme(&config_snapshot.theme);
 
         ui.user_alignment = config_snapshot.user_alignment;
@@ -133,8 +66,6 @@ impl TuiApp {
         ui.kitty_heading_downscale = config_snapshot.kitty_heading_downscale;
         ui.image_protocol = config_snapshot.image_protocol.clone();
         ui.web_search_enabled = config_snapshot.web_search.enabled;
-        ui.show_memories = config_snapshot.show_memories;
-        ui.show_vault = config_snapshot.show_vault;
         ui.db_providers = Self::provider_entries_with_local(&config_snapshot, None);
         ui.panel_state = crate::tui::shell::PanelState::from_config(&config_snapshot.tui);
         ui.sidebar_open = ui.panel_state.left != crate::tui::shell::PanelMode::Closed;
@@ -177,224 +108,56 @@ impl TuiApp {
             active_tab.tab.model = default_model.clone();
         }
 
-        let mut background_tasks = Vec::new();
         if std::io::stdin().is_terminal() {
-            let model_action_tx = action_tx.clone();
-            background_tasks.push(tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || {
                 let Ok(runtime_storage) = crate::storage::Storage::new() else {
                     return;
                 };
                 let rt = tokio::runtime::Handle::current();
                 rt.block_on(async {
-                    crate::llm::model_fetcher::refresh_all_models(
-                        &runtime_storage,
-                        |provider, models| {
-                            let _ =
-                                model_action_tx.send(Action::SetProviderModels(provider, models));
-                        },
-                    )
-                    .await;
+                    crate::llm::model_fetcher::refresh_all_models(&runtime_storage).await;
                 });
-            }));
+            });
         }
 
         let app = Self {
             storage,
-            chat_files,
             config,
             ui,
+            vault,
             action_tx,
             action_rx,
+            system_prompt,
             ctrl_c_count: 0,
             last_ctrl_c: None,
-            cancel_escape: None,
-            requests: HashMap::new(),
             terminal_has_focus: Arc::new(AtomicBool::new(true)),
-            pending_documents: HashMap::new(),
-            submission_states: HashMap::new(),
-            pending_document_discard_action: None,
-            security_restart: None,
-            security_notice: None,
-            background_tasks: std::sync::Mutex::new(background_tasks),
         };
         let mut app = app;
         app.refresh_visible_selectors();
         app.initialize_chat_state();
         app.refresh_artifact_sidebar_catalogs();
-        if orphan_cleanup_error.is_some() {
-            app.ui
-                .show_toast("Some deleted-chat files still need cleanup.".to_string());
-        }
-        if let Some(error) = reset_warning {
-            app.ui
-                .show_toast(format!("Legacy saved-file migration skipped: {error}"));
-        }
+        app.sync_message_media(app.ui.active_tab);
         app.queue_connection_check_for_active_tab();
         app
     }
 
-    pub(crate) fn lock_application(&mut self) -> Result<(), String> {
-        self.request_security_restart(crate::protection::ui::SecurityRestart::Lock);
-        Ok(())
-    }
-
-    pub(crate) fn unlock_application(&mut self) {
-        self.request_security_restart(crate::protection::ui::SecurityRestart::Unlock);
-    }
-
-    pub(crate) fn initialize_application_password(&mut self) -> Result<(), String> {
-        self.request_security_restart(crate::protection::ui::SecurityRestart::InitializePassword);
-        Ok(())
-    }
-
-    pub(crate) fn recover_security_restart(&mut self, error: &color_eyre::eyre::Report) -> bool {
-        if self.security_restart.is_none() || self.security_notice.is_some() {
-            return false;
-        }
-        self.security_restart = None;
-        self.ui.protection_blocked = false;
-        self.ui.show_toast(format!(
-            "Protection transition stopped: {error}\nThe application is NOT locked. Unsaved responses remain available. Fix the save error, then retry /lock, /unlock, or /security."
-        ));
-        true
-    }
-
-    fn has_unsaved_security_drafts(&self) -> bool {
-        self.pending_documents
-            .values()
-            .any(|documents| !documents.is_empty())
-            || self.ui.tabs.iter().any(|tab| {
-                !tab.input_content.is_empty()
-                    || tab
-                        .input_history_draft
-                        .as_ref()
-                        .is_some_and(|draft| !draft.is_empty())
-            })
-            || self.ui.ephemeral.is_some()
-            || self.ui.editor_popup.is_some()
-            || self
-                .ui
-                .resource_editor
-                .as_ref()
-                .is_some_and(|editor| editor.is_dirty())
-            || self.ui.pending_protected_context.is_some()
-            || self.ui.pending_vault_mutation.is_some()
-    }
-
-    fn has_security_process_close_risk(&self) -> bool {
-        self.ui.terminals.has_running()
-            || self.ui.app_tabs.tabs().iter().any(|tab| {
-                self.ui
-                    .vault_workspaces
-                    .get(tab.id())
-                    .and_then(|state| state.editor.as_ref())
-                    .is_some_and(|editor| editor.has_unsaved_risk())
-            })
-    }
-
-    pub(crate) fn lock_application_after_error(&mut self, error: String) {
-        // Authentication has already revoked the key: do not leave caches visible behind a modal.
-        let process_notice = if self.has_security_process_close_risk() {
-            "\nRunning terminal and vault editor processes were closed for security; unsaved work may have been lost."
-        } else {
-            ""
-        };
-        self.security_notice = Some(format!(
-            "Application locked after authentication failed: {error}{process_notice}"
-        ));
-        self.security_restart = Some(crate::protection::ui::SecurityRestart::Lock);
-        self.ui.protection_blocked = true;
-        self.pending_document_discard_action = None;
-        self.ui.active_modal = None;
-    }
-
-    fn request_security_restart(&mut self, restart: crate::protection::ui::SecurityRestart) {
-        if self.has_unsaved_security_drafts() || self.has_security_process_close_risk() {
-            self.pending_document_discard_action =
-                Some(pending_documents::PendingDocumentDiscardAction::SecurityRestart(restart));
-            self.ui.active_modal = Some(crate::ui::Modal::DiscardSecurityDrafts);
-        } else {
-            self.security_restart = Some(restart);
-            self.ui.protection_blocked = true;
-        }
-    }
-
-    fn track_background_task(&self, task: tokio::task::JoinHandle<()>) {
-        let mut tasks = self
-            .background_tasks
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        tasks.retain(|task| !task.is_finished());
-        tasks.push(task);
-    }
-
-    async fn stop_background_tasks(&mut self) {
-        let tasks = std::mem::take(
-            self.background_tasks
-                .get_mut()
-                .unwrap_or_else(|error| error.into_inner()),
-        );
-        for task in &tasks {
-            task.abort();
-        }
-        // Already-running blocking storage work cannot be aborted: finish it before clearing keys.
-        for task in tasks {
-            let _ = task.await;
-        }
-    }
-
-    #[cfg(test)]
-    pub fn pending_documents_mut(&mut self) -> &mut submission::PendingDocuments {
-        let tab_id = self.input_context_id();
-        self.pending_documents.entry(tab_id).or_default()
-    }
-
-    #[cfg(test)]
-    pub fn submission_state(&self) -> Option<&submission::SubmissionState> {
-        self.submission_states.get(&self.input_context_id())
-    }
-
-    pub(crate) fn transition_submission(
-        &mut self,
-        tab_id: crate::ui::app_tabs::AppTabId,
-        transition: fn(
-            submission::SubmissionState,
-        ) -> Result<
-            submission::SubmissionState,
-            submission::SubmissionTransitionError,
-        >,
-    ) -> color_eyre::Result<()> {
-        let state = self
-            .submission_states
-            .remove(&tab_id)
-            .ok_or_else(|| color_eyre::eyre::eyre!("submission state is unavailable"))?;
-        self.submission_states.insert(tab_id, transition(state)?);
-        Ok(())
-    }
-
-    pub(crate) fn load_system_prompt() -> color_eyre::Result<String> {
-        use color_eyre::eyre::WrapErr;
-        let system = match std::fs::read_to_string("assets/SYSTEM_PROMPT.md") {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                include_str!("../assets/SYSTEM_PROMPT.md").to_owned()
+    pub(crate) fn load_system_prompt() -> String {
+        let paths = [
+            std::path::PathBuf::from("assets/TCUI.md"),
+            std::path::PathBuf::from("/home/jp/Code/TermChatUI/assets/TCUI.md"),
+        ];
+        for path in &paths {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                return content;
             }
-            Err(error) => return Err(error).wrap_err("Cannot read assets/SYSTEM_PROMPT.md"),
-        };
-        crate::config::prompts::compose(&system)
+        }
+        // Default prompt if file not found
+        "You are TCUI, a helpful terminal assistant.".to_string()
     }
 
     pub(crate) fn refresh_visible_selectors(&mut self) {
-        let Ok(config) = self.config.try_read() else {
-            return;
-        };
         self.ui.visible_providers =
             Self::filter_visible_providers(&self.ui.db_providers, &self.ui.disabled_providers);
-        self.ui.visible_providers.retain(|(name, _, _, _, _)| {
-            crate::llm::local::is_local_provider(name)
-                || crate::config::KeyStore::has_credential(&config, name).unwrap_or(false)
-        });
-        drop(config);
         let Some(tab) = self.ui.tabs.get(self.ui.active_tab) else {
             self.ui.current_models.clear();
             self.ui.current_reasoning_options.clear();
@@ -403,7 +166,6 @@ impl TuiApp {
         let mut provider = tab.tab.provider.clone();
         let mut model = tab.tab.model.clone();
         let mut reasoning_effort = tab.tab.reasoning_effort.clone();
-        let mut manual_model_override = tab.manual_model_override;
         if !self
             .ui
             .visible_providers
@@ -413,26 +175,16 @@ impl TuiApp {
             if let Some((next_provider, _, _, _, _)) = self.ui.visible_providers.first() {
                 provider = next_provider.clone();
                 model.clear();
-            } else {
-                provider.clear();
-                model.clear();
             }
-            manual_model_override = false;
         }
         self.ui.current_models = self.visible_models_for_provider(&provider);
         if model.trim().is_empty()
-            || (!manual_model_override
-                && (!self.ui.current_models.is_empty()
-                    || crate::llm::auth::canonical_provider_name(&provider) == "Codex")
+            || (!self.ui.current_models.is_empty()
                 && !self.ui.current_models.iter().any(|entry| entry.id == model))
         {
-            model = self
-                .ui
-                .current_models
-                .first()
-                .map(|entry| entry.id.clone())
-                .unwrap_or_default();
-            reasoning_effort = None;
+            if let Some(first_model) = self.ui.current_models.first() {
+                model = first_model.id.clone();
+            }
         }
         let selected_model = self
             .ui
@@ -466,12 +218,8 @@ impl TuiApp {
                 .or_else(|| self.ui.current_reasoning_options.first().cloned());
         }
         if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
-            if tab.tab.provider != provider {
-                tab.tab.endpoint = None;
-            }
             tab.tab.provider = provider;
             tab.tab.model = model;
-            tab.manual_model_override = manual_model_override;
             tab.tab.reasoning_effort = reasoning_effort;
         }
     }
@@ -484,10 +232,39 @@ impl TuiApp {
         }
         if self.storage.created_default_key() {
             self.ui.show_toast(format!(
-                "Encrypted portable Vault and Memory files use their source password. Keep {} for legacy data and reminders.",
+                "Back up {}; encrypted chats, memories, and saved provider keys cannot be recovered without it.",
                 Storage::chat_key_path().display()
             ));
         }
+    }
+
+    pub(crate) fn sync_message_media(&mut self, tab_id: usize) {
+        let Some(tab) = self.ui.tabs.get_mut(tab_id) else {
+            return;
+        };
+
+        let existing: HashSet<_> = tab
+            .temporary_artifacts
+            .iter()
+            .filter_map(|artifact| match &artifact.handle {
+                crate::ui::artifact_sidebar::ArtifactHandle::Media(source) => Some(source.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut discovered = Vec::new();
+        for message in &tab.messages {
+            for source in local_media_sources(&message.content) {
+                if existing.contains(&source) {
+                    continue;
+                }
+                if let Some(artifact) =
+                    crate::ui::artifact_sidebar::ArtifactEntry::temp_media(&source)
+                {
+                    discovered.push(artifact);
+                }
+            }
+        }
+        tab.temporary_artifacts.extend(discovered);
     }
 
     pub(crate) fn scroll_active_chat_lines(&mut self, delta: isize) {
@@ -633,28 +410,8 @@ impl TuiApp {
         }
 
         let filter = trimmed.trim_start_matches('/').to_ascii_lowercase();
-        let mut commands = [
-            ("/fork", "Continue this conversation in an independent chat"),
-            ("/temp", "Open a temporary fork in the wide right sidebar"),
-            ("/temp close", "Close and delete the temporary conversation"),
-            ("/cancel", "Cancel this conversation's active request"),
-            (
-                "/steer ",
-                "Steer an active request when the transport supports it",
-            ),
-            ("/settings", "Open the Settings tab"),
-            ("/security", "Choose app and data protection"),
-            ("/unlock", "Unlock selected protected data"),
-            ("/lock", "Lock application protection"),
-            ("/terminal", "Open an interactive terminal"),
-            ("/providers", "Manage your added provider connections"),
-            ("/connect", "Add or reconnect a provider"),
-            (
-                "/vault",
-                "Unlock and manage stored credentials and machine secrets",
-            ),
-            ("/vault-search ", "Search the Markdown Vault"),
-            ("/model ", "Enter a provider model ID manually"),
+        let commands = [
+            ("/settings", "Open the Settings panel"),
             ("/help", "Show the help document"),
             ("/keybinds", "Show keyboard shortcuts"),
             ("/theme ", "Select and apply a theme"),
@@ -662,16 +419,10 @@ impl TuiApp {
             ("/mcp", "Show MCP servers"),
             ("/remindme ", "Schedule, list, or forget reminders"),
             ("/schedule-command ", "Schedule, list, or forget reminders"),
+            ("/vault ", "Search the configured vault"),
             ("/web", "Toggle local web search"),
             ("/quit", "Quit the app"),
         ];
-        // A typed command outranks another command's descriptive substring match.
-        if let Some(index) = commands
-            .iter()
-            .position(|(command, _)| command.trim_end() == trimmed.trim_end())
-        {
-            commands[..=index].rotate_right(1);
-        }
         let items = commands
             .into_iter()
             .filter_map(|(command, description)| {
@@ -725,22 +476,16 @@ impl TuiApp {
     }
 
     pub(crate) fn generate_title(content: &str) -> String {
-        let mut words = content.split_whitespace();
-        let mut title = String::with_capacity(content.len().min(16 * 4) + 3);
-        let mut length = 0;
-        for (index, word) in words.by_ref().take(5).enumerate() {
-            for character in (index > 0).then_some(' ').into_iter().chain(word.chars()) {
-                if length == 16 {
-                    title.push_str("...");
-                    return title;
-                }
-                title.push(character);
-                length += 1;
-            }
-        }
-        if words.next().is_some() {
-            title.push_str("...");
-        }
+        let words: Vec<&str> = content.split_whitespace().collect();
+        let title_words: Vec<&str> = words.iter().take(5).copied().collect();
+        let title = title_words.join(" ");
+        let title = if title.len() > 16 {
+            format!("{}...", &title[..16])
+        } else if words.len() > 5 {
+            format!("{}...", title)
+        } else {
+            title
+        };
         if title.is_empty() {
             "New Chat".to_string()
         } else {
@@ -764,7 +509,7 @@ impl TuiApp {
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;
 
 #[cfg(test)]
 #[path = "app/runtime_guard_tests.rs"]

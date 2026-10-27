@@ -1,5 +1,6 @@
 use crate::config::McpServerConfig;
 use serde::Serialize;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct McpCapabilities {
@@ -27,40 +28,24 @@ pub struct McpProfile {
     pub args: &'static [&'static str],
     pub api_key_env: Option<&'static str>,
     pub key_store_name: Option<&'static str>,
+    pub vault_env: Option<&'static str>,
     pub capabilities: McpCapabilities,
 }
 
 impl McpProfile {
     pub fn config(self, enabled: bool) -> McpServerConfig {
-        let endpoint = self.hosted_endpoint();
         McpServerConfig {
             name: self.name.to_string(),
-            transport: if endpoint.is_some() {
-                "streamable_http"
-            } else {
-                "stdio"
-            }
-            .to_string(),
-            command: endpoint.is_none().then(|| self.program.to_string()),
-            args: endpoint
-                .is_none()
-                .then(|| self.args.iter().map(|arg| (*arg).to_string()).collect()),
-            url: endpoint.map(ToString::to_string),
+            transport: "stdio".to_string(),
+            command: Some(self.program.to_string()),
+            args: Some(self.args.iter().map(|arg| (*arg).to_string()).collect()),
+            url: None,
             enabled,
-        }
-    }
-
-    pub fn hosted_endpoint(&self) -> Option<&'static str> {
-        match self.skill {
-            "exa" => Some("https://mcp.exa.ai/mcp"),
-            "tavily" => Some("https://mcp.tavily.com/mcp/"),
-            "firecrawl" => Some("https://mcp.firecrawl.dev/v2/mcp"),
-            _ => None,
         }
     }
 }
 
-const PROFILES: [McpProfile; 4] = [
+const PROFILES: [McpProfile; 5] = [
     McpProfile {
         name: "Exa",
         skill: "exa",
@@ -69,6 +54,7 @@ const PROFILES: [McpProfile; 4] = [
         args: &["-y", "exa-mcp-server@3.2.1"],
         api_key_env: Some("EXA_API_KEY"),
         key_store_name: Some("Exa Search"),
+        vault_env: None,
         capabilities: McpCapabilities::tools_only(),
     },
     McpProfile {
@@ -79,6 +65,7 @@ const PROFILES: [McpProfile; 4] = [
         args: &["-y", "tavily-mcp@0.2.20"],
         api_key_env: Some("TAVILY_API_KEY"),
         key_store_name: Some("Tavily Search"),
+        vault_env: None,
         capabilities: McpCapabilities::tools_only(),
     },
     McpProfile {
@@ -89,6 +76,7 @@ const PROFILES: [McpProfile; 4] = [
         args: &["-y", "firecrawl-mcp@3.22.1"],
         api_key_env: Some("FIRECRAWL_API_KEY"),
         key_store_name: Some("Firecrawl Search"),
+        vault_env: None,
         capabilities: McpCapabilities::tools_only(),
     },
     McpProfile {
@@ -99,7 +87,27 @@ const PROFILES: [McpProfile; 4] = [
         args: &["gnome-desktop-mcp==0.1.0"],
         api_key_env: None,
         key_store_name: None,
+        vault_env: None,
         capabilities: McpCapabilities::tools_only(),
+    },
+    McpProfile {
+        name: "Obsidian",
+        skill: "obsidian",
+        description: "Obsidian",
+        program: "uvx",
+        args: &[
+            "--from",
+            "git+https://github.com/Vasallo94/obsidian-mcp-server.git@ac9889f93c39c3a6a38515fdeb374e61f87c70a2",
+            "obsidian-mcp-server",
+        ],
+        api_key_env: None,
+        key_store_name: None,
+        vault_env: Some("OBSIDIAN_VAULT_PATH"),
+        capabilities: McpCapabilities {
+            tools: true,
+            resources: true,
+            prompts: true,
+        },
     },
 ];
 
@@ -124,15 +132,22 @@ pub fn lookup_profile(query: &str) -> Option<&'static McpProfile> {
 }
 
 pub fn merged_configs(existing: &[McpServerConfig]) -> Vec<McpServerConfig> {
-    let mut configs = existing.to_vec();
-    for profile in profiles() {
-        if !existing
-            .iter()
-            .any(|row| lookup_profile(&row.name) == Some(profile))
-        {
-            configs.push(profile.config(false));
+    let enabled_by_name = existing.iter().fold(HashMap::new(), |mut acc, row| {
+        if let Some(profile) = lookup_profile(&row.name) {
+            acc.insert(normalize(profile.name), row.enabled);
         }
+        acc
+    });
+
+    let mut configs = Vec::with_capacity(PROFILES.len());
+    for profile in profiles() {
+        let enabled = enabled_by_name
+            .get(&normalize(profile.name))
+            .copied()
+            .unwrap_or(false);
+        configs.push(profile.config(enabled));
     }
+
     configs
 }
 
@@ -149,6 +164,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn profiles_cover_the_fixed_catalog() {
+        let profiles = profiles();
+        assert_eq!(profiles.len(), 5);
+        assert_eq!(
+            profiles
+                .iter()
+                .map(|profile| profile.name)
+                .collect::<Vec<_>>(),
+            vec!["Exa", "Tavily", "Firecrawl", "GNOME Desktop", "Obsidian"]
+        );
+        assert!(profiles.iter().all(|profile| profile.capabilities.tools));
+        assert_eq!(profiles[0].args, &["-y", "exa-mcp-server@3.2.1"]);
+        assert_eq!(profiles[1].args, &["-y", "tavily-mcp@0.2.20"]);
+        assert_eq!(profiles[2].args, &["-y", "firecrawl-mcp@3.22.1"]);
+        assert_eq!(profiles[3].args, &["gnome-desktop-mcp==0.1.0"]);
+        assert_eq!(
+            profiles[4].args,
+            &[
+                "--from",
+                "git+https://github.com/Vasallo94/obsidian-mcp-server.git@ac9889f93c39c3a6a38515fdeb374e61f87c70a2",
+                "obsidian-mcp-server"
+            ]
+        );
+    }
+
+    #[test]
     fn lookup_finds_profiles_by_name_and_skill() {
         assert_eq!(
             lookup_profile("exa").map(|profile| profile.name),
@@ -161,29 +202,40 @@ mod tests {
     }
 
     #[test]
-    fn merged_configs_preserves_explicit_transport_and_custom_rows() {
+    fn merged_configs_keeps_enabled_state_and_drops_custom_rows() {
         let existing = vec![
             McpServerConfig {
                 name: "Tavily".to_string(),
-                transport: "stdio".to_string(),
-                command: Some("my-tavily".to_string()),
-                args: Some(vec!["--flag".to_string()]),
                 enabled: true,
                 ..McpServerConfig::default()
             },
             McpServerConfig {
                 name: "Custom MCP".to_string(),
-                url: Some("https://example.com/mcp".to_string()),
+                transport: "stdio".to_string(),
+                command: Some("custom".to_string()),
+                args: Some(vec!["--flag".to_string()]),
+                enabled: true,
+                ..McpServerConfig::default()
+            },
+            McpServerConfig {
+                name: "Exa".to_string(),
                 enabled: true,
                 ..McpServerConfig::default()
             },
         ];
+
         let merged = merged_configs(&existing);
-        assert_eq!(&merged[..existing.len()], existing.as_slice());
-        assert_eq!(merged.len(), 5);
-        assert!(merged[2..].iter().all(|row| !row.enabled));
-        assert!(merged[2..4]
-            .iter()
-            .all(|row| row.transport == "streamable_http"));
+        assert_eq!(
+            merged
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Exa", "Tavily", "Firecrawl", "GNOME Desktop", "Obsidian"]
+        );
+        assert!(merged[0].enabled);
+        assert!(merged[1].enabled);
+        assert!(!merged[2].enabled);
+        assert!(!merged[3].enabled);
+        assert!(!merged[4].enabled);
     }
 }

@@ -1,4 +1,3 @@
-pub(crate) mod anthropic_sdk;
 pub(crate) mod auth;
 pub(crate) mod chat;
 pub mod client;
@@ -13,7 +12,3 @@ pub use client::LlmClient;
 #[cfg(test)]
 #[path = "openrouter_regression_tests.rs"]
 mod openrouter_regression_tests;
-
-#[cfg(test)]
-#[path = "request_only_document_tests.rs"]
-mod request_only_document_tests;

@@ -1,29 +1,31 @@
-use super::credential::StoredApiKeyCredential;
-use super::vault::{self, Vault};
-use super::{ApiKeyCredential, ApiKeyCredentialSource, Credential, KeyStore, KeyStoreError};
 use crate::config::AppConfig;
-use zeroize::Zeroizing;
+use crate::storage::crypto::{decrypt_serialized, encrypt_serialized, StorageCryptoError};
+
+use super::credential::StoredApiKeyCredential;
+use super::{ApiKeyCredential, ApiKeyCredentialSource, Credential, KeyStore, KeyStoreError};
 
 impl KeyStore {
     pub fn get_api_key_credential(
-        _config: &AppConfig,
+        config: &AppConfig,
         provider: &str,
     ) -> std::result::Result<Option<ApiKeyCredential>, KeyStoreError> {
-        let keys = vault::session()?;
-        let Some(payload) = Vault::open()?.read("api_key_owned", provider, &keys)? else {
+        let file = Self::load_file(config)?.into_current()?;
+        let Some(encrypted) = file.credentials.get(provider) else {
             return Ok(None);
         };
-        let credential = ApiKeyCredential::from_payload(
-            serde_json::from_slice(&payload)
-                .map_err(|_| KeyStoreError::InvalidCredentialPayload)?,
-        )?;
+        let payload = decrypt_serialized::<StoredApiKeyCredential>(
+            &super::shared_key()?,
+            &credential_record_kind(provider),
+            encrypted,
+        )
+        .map_err(map_credential_crypto_error)?;
+        let credential = ApiKeyCredential::from_payload(payload)?;
         if credential.provider() != provider {
             return Err(KeyStoreError::ProviderMismatch);
         }
         Ok(Some(credential))
     }
 
-    #[cfg(test)]
     pub fn get_credential(
         config: &AppConfig,
         provider: &str,
@@ -33,66 +35,68 @@ impl KeyStore {
     }
 
     pub fn upsert_credential(
-        _config: &AppConfig,
+        config: &AppConfig,
         credential: &Credential,
-    ) -> std::result::Result<(), KeyStoreError> {
-        Self::write_credential(credential, None)
-    }
-
-    pub(crate) fn upsert_credential_with_storage(
-        _config: &AppConfig,
-        credential: &Credential,
-        storage: super::CredentialStorage,
-    ) -> std::result::Result<(), KeyStoreError> {
-        Self::write_credential(credential, Some(storage))
-    }
-
-    fn write_credential(
-        credential: &Credential,
-        storage: Option<super::CredentialStorage>,
     ) -> std::result::Result<(), KeyStoreError> {
         match credential {
-            Credential::ApiKey(credential) => {
-                let keys = vault::session()?;
-                let store = Vault::open()?;
-                let payload = Zeroizing::new(
-                    serde_json::to_vec(&StoredApiKeyCredential::from(credential))
-                        .map_err(|_| KeyStoreError::Serialize)?,
-                );
-                store.transaction(|| {
-                    store.write(
-                        "api_key_owned",
-                        credential.provider(),
-                        credential.provider(),
-                        &payload,
-                        store.selected_storage(credential.provider(), storage)?,
-                        &keys,
-                    )
-                })
-            }
+            Credential::ApiKey(credential) => Self::upsert_api_key(config, credential),
         }
     }
 
     pub fn remove_api_key(
-        _config: &AppConfig,
+        config: &AppConfig,
         provider: &str,
         source: ApiKeyCredentialSource,
     ) -> std::result::Result<bool, KeyStoreError> {
-        let keys = vault::session()?;
-        let store = Vault::open()?;
-        let Some(payload) = store.read("api_key_owned", provider, &keys)? else {
+        let _guard = super::store_write_guard()?;
+        let Some(credential) = Self::get_api_key_credential(config, provider)? else {
             return Ok(false);
         };
-        let credential = ApiKeyCredential::from_payload(
-            serde_json::from_slice(&payload)
-                .map_err(|_| KeyStoreError::InvalidCredentialPayload)?,
-        )?;
-        if credential.provider() != provider {
-            return Err(KeyStoreError::ProviderMismatch);
-        }
         if credential.source() != source {
             return Ok(false);
         }
-        store.remove("api_key_owned", provider, &keys)
+        let mut file = Self::load_file(config)?.into_current()?;
+        file.credentials.remove(provider);
+        Self::write_file(config, &file)?;
+        Ok(true)
+    }
+
+    fn upsert_api_key(
+        config: &AppConfig,
+        credential: &ApiKeyCredential,
+    ) -> std::result::Result<(), KeyStoreError> {
+        let _guard = super::store_write_guard()?;
+        let mut file = Self::load_file(config)?.into_current()?;
+        let encrypted = encrypt_serialized(
+            &super::shared_key()?,
+            &credential_record_kind(credential.provider()),
+            &StoredApiKeyCredential::from(credential),
+        )
+        .map_err(map_credential_crypto_error)?;
+        file.credentials
+            .insert(credential.provider().to_owned(), encrypted);
+        Self::write_file(config, &file)
+    }
+}
+
+fn credential_record_kind(provider: &str) -> String {
+    format!("credential:api_key:{provider}")
+}
+
+fn map_credential_crypto_error(error: StorageCryptoError) -> KeyStoreError {
+    match error {
+        StorageCryptoError::Encrypt => KeyStoreError::CredentialEncrypt,
+        StorageCryptoError::Json(_) | StorageCryptoError::Utf8(_) => {
+            KeyStoreError::InvalidCredentialPayload
+        }
+        StorageCryptoError::Io(_)
+        | StorageCryptoError::InvalidKeyLength
+        | StorageCryptoError::MissingDefaultKey { .. } => KeyStoreError::KeyAccess,
+        StorageCryptoError::Base64(_)
+        | StorageCryptoError::MissingNonce
+        | StorageCryptoError::MissingCiphertext
+        | StorageCryptoError::InvalidEnvelope
+        | StorageCryptoError::Decrypt
+        | StorageCryptoError::WrongDocumentKind => KeyStoreError::CredentialDecrypt,
     }
 }

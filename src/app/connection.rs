@@ -28,7 +28,7 @@ impl TuiApp {
         let provider = tab.tab.provider.clone();
         let provider_config = self.provider_config(&provider);
         let action_tx = self.action_tx.clone();
-        self.track_background_task(tokio::spawn(async move {
+        tokio::spawn(async move {
             let _ = action_tx.send(Action::SetConnectionState(
                 crate::ui::status_bar::ConnectionStatus::Checking,
                 Some("Checking connection...".to_string()),
@@ -71,10 +71,10 @@ impl TuiApp {
                 return;
             }
 
-            let Some((endpoint, env_var, backend_type)) = provider_config else {
+            let Some((endpoint, env_var, _)) = provider_config else {
                 let _ = action_tx.send(Action::SetConnectionState(
                     crate::ui::status_bar::ConnectionStatus::Failed,
-                    Some("No provider connected. Use /connect to add a provider.".to_string()),
+                    Some("Not connected, check settings".to_string()),
                 ));
                 return;
             };
@@ -90,28 +90,21 @@ impl TuiApp {
                     }
                 };
 
-            match Self::check_cloud_connection(
-                &provider,
-                &endpoint,
-                credential.as_ref(),
-                &backend_type,
-            )
-            .await
-            {
+            match Self::check_cloud_connection(&provider, &endpoint, credential.as_ref()).await {
                 Ok(()) => {
                     let _ = action_tx.send(Action::SetConnectionState(
                         crate::ui::status_bar::ConnectionStatus::CloudConnected,
                         None,
                     ));
                 }
-                Err(error) => {
+                Err(_) => {
                     let _ = action_tx.send(Action::SetConnectionState(
                         crate::ui::status_bar::ConnectionStatus::Failed,
-                        Some(crate::llm::auth::redact_secrets(&error.to_string())),
+                        Some("Not connected, check settings".to_string()),
                     ));
                 }
             }
-        }));
+        });
     }
 
     pub(crate) fn local_probe_state(
@@ -160,59 +153,34 @@ impl TuiApp {
         provider: &str,
         endpoint: &str,
         credential: Option<&crate::llm::auth::Credential>,
-        backend_type: &str,
     ) -> color_eyre::Result<()> {
         if !crate::llm::auth::trusted_provider_endpoint(provider, endpoint) {
             return Err(color_eyre::eyre::eyre!("Provider endpoint is not trusted"));
         }
-        if credential.is_none() {
-            return Err(color_eyre::eyre::eyre!(
-                "No saved provider credential. Use /connect, or /vault to unlock credentials."
-            ));
-        }
-        if backend_type == "anthropic_sdk" {
-            crate::llm::anthropic_sdk::check_dependency().await?;
-        }
         if crate::llm::auth::canonical_provider_name(provider) == "Codex" && credential.is_some() {
             return Ok(());
         }
-        Self::probe_cloud_connection(provider, endpoint, credential, backend_type).await
+        Self::probe_cloud_connection(provider, endpoint, credential).await
     }
 
     async fn probe_cloud_connection(
         provider: &str,
         endpoint: &str,
         credential: Option<&crate::llm::auth::Credential>,
-        backend_type: &str,
     ) -> color_eyre::Result<()> {
         let endpoint = endpoint.trim_end_matches('/');
         let url = format!("{endpoint}/models");
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
-            .redirect(reqwest::redirect::Policy::none())
             .build()?;
         let mut request = client.get(url);
-        if credential.is_some_and(|credential| !credential.permits_endpoint(provider, endpoint)) {
-            return Err(color_eyre::eyre::eyre!(
-                "Credential does not belong to this provider endpoint."
-            ));
-        }
         if let Some(credential) = credential {
-            request = if matches!(backend_type, "anthropic" | "anthropic_sdk") {
-                request
-                    .header("x-api-key", credential.bearer_token().expose_secret())
-                    .header("anthropic-version", "2023-06-01")
-            } else {
-                request.bearer_auth(credential.bearer_token().expose_secret())
-            };
+            request = request.bearer_auth(credential.bearer_token().expose_secret());
         }
-        if matches!(provider, "OpenRouter" | "OpenRouter OAuth") {
+        if provider == "OpenRouter" {
             request = request
                 .header("HTTP-Referer", "https://github.com/jp/TermChatUI")
                 .header("X-Title", "TermChatUI");
-        }
-        if provider == "OpenCode Go" {
-            request = request.header("User-Agent", concat!("tcui/", env!("CARGO_PKG_VERSION")));
         }
         request.send().await?.error_for_status()?;
         Ok(())
@@ -224,7 +192,7 @@ impl TuiApp {
         endpoint: &str,
         credential: &crate::llm::auth::Credential,
     ) -> color_eyre::Result<()> {
-        Self::probe_cloud_connection(provider, endpoint, Some(credential), "openai").await
+        Self::probe_cloud_connection(provider, endpoint, Some(credential)).await
     }
 }
 

@@ -6,18 +6,8 @@ pub(crate) struct Builtin {
 
 pub(crate) const BUILTINS: &[Builtin] = &[
     Builtin {
-        name: "command",
-        description: "Let the agent choose and execute approved commands from context.",
-        source: include_str!("../../skills/command/SKILL.md"),
-    },
-    Builtin {
-        name: "ping-user",
-        description: "Let the agent send or schedule a Pushover notification from context.",
-        source: include_str!("../../skills/ping-user/SKILL.md"),
-    },
-    Builtin {
         name: "websearch",
-        description: "Search the web using the configured source and cite results.",
+        description: "Run a focused local web search and integrate sourced results.",
         source: include_str!("../../skills/websearch/SKILL.md"),
     },
     Builtin {
@@ -27,17 +17,17 @@ pub(crate) const BUILTINS: &[Builtin] = &[
     },
     Builtin {
         name: "exa",
-        description: "Search the web through Exa MCP and cite returned sources.",
+        description: "Research the web with the live Exa MCP tools.",
         source: include_str!("../../skills/exa/SKILL.md"),
     },
     Builtin {
         name: "tavily",
-        description: "Search the web through Tavily MCP and cite returned sources.",
+        description: "Research the web with the live Tavily MCP tools.",
         source: include_str!("../../skills/tavily/SKILL.md"),
     },
     Builtin {
         name: "firecrawl",
-        description: "Search the web through Firecrawl MCP and cite returned sources.",
+        description: "Search or extract web content with the live Firecrawl MCP tools.",
         source: include_str!("../../skills/firecrawl/SKILL.md"),
     },
     Builtin {
@@ -46,9 +36,9 @@ pub(crate) const BUILTINS: &[Builtin] = &[
         source: include_str!("../../skills/gnome/SKILL.md"),
     },
     Builtin {
-        name: "vault",
-        description: "Read and manage the internal TCUI Vault.",
-        source: include_str!("../../skills/vault/SKILL.md"),
+        name: "obsidian",
+        description: "Search, read, or explicitly update Obsidian notes in the configured vault.",
+        source: include_str!("../../skills/obsidian/SKILL.md"),
     },
     Builtin {
         name: "caveman",
@@ -57,42 +47,36 @@ pub(crate) const BUILTINS: &[Builtin] = &[
     },
     Builtin {
         name: "save",
-        description: "Create a persistent Markdown Chat file for the TCUI sidebar.",
+        description: "Create a Markdown artifact for the TermChatUI sidebar.",
         source: include_str!("../../skills/save/SKILL.md"),
     },
     Builtin {
         name: "schedule",
-        description: "Interpret and execute reminder scheduling from natural language and context.",
+        description: "Schedule a local reminder through the host system timer.",
         source: include_str!("../../skills/schedule/SKILL.md"),
     },
     Builtin {
         name: "remindme",
-        description: "Interpret and execute reminders, composing other invoked skills.",
+        description: "Schedule a local reminder through the host system timer.",
         source: include_str!("../../skills/remindme/SKILL.md"),
     },
     #[cfg(feature = "memory")]
     Builtin {
         name: "remember",
-        description: "Save or recall useful facts from the request and conversation context.",
+        description: "Save one durable fact or preference to local memory.",
         source: include_str!("../../skills/remember/SKILL.md"),
     },
     #[cfg(feature = "memory")]
     Builtin {
         name: "memory",
-        description: "Save or recall contextual facts, preferences, and machine configuration.",
+        description: "Search, read, write, forget, or inspect local memory.",
         source: include_str!("../../skills/memory/SKILL.md"),
     },
     #[cfg(feature = "memory")]
     Builtin {
         name: "memorize",
-        description: "Alias for the built-in contextual memory skill.",
+        description: "Search, read, write, forget, or inspect local memory.",
         source: include_str!("../../skills/memory/SKILL.md"),
-    },
-    #[cfg(feature = "memory")]
-    Builtin {
-        name: "recall",
-        description: "Recall local memory without saving or changing it.",
-        source: include_str!("../../skills/recall/SKILL.md"),
     },
 ];
 

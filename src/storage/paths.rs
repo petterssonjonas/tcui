@@ -11,10 +11,6 @@ pub(crate) struct TcuiDataPaths {
     pub(crate) chats_trash_dir: PathBuf,
     pub(crate) memories_dir: PathBuf,
     pub(crate) memories_trash_dir: PathBuf,
-    pub(crate) chat_file_links_dir: PathBuf,
-    pub(crate) chat_file_links_manifest: PathBuf,
-    pub(crate) chat_file_links_lock: PathBuf,
-    pub(crate) migrations_dir: PathBuf,
 }
 
 impl TcuiDataPaths {
@@ -34,10 +30,6 @@ impl TcuiDataPaths {
             chats_trash_dir: root.join("chats").join(".trash"),
             memories_dir: root.join("memories"),
             memories_trash_dir: root.join("memories").join(".trash"),
-            chat_file_links_dir: root.join("chat-file-links"),
-            chat_file_links_manifest: root.join("chat-file-links").join("manifest.json"),
-            chat_file_links_lock: root.join("chat-file-links").join(".lock"),
-            migrations_dir: root.join("migrations"),
             root,
         }
     }
@@ -48,8 +40,6 @@ impl TcuiDataPaths {
         ensure_directory(&self.chats_trash_dir)?;
         ensure_directory(&self.memories_dir)?;
         ensure_directory(&self.memories_trash_dir)?;
-        ensure_directory(&self.chat_file_links_dir)?;
-        ensure_directory(&self.migrations_dir)?;
         Ok(())
     }
 }

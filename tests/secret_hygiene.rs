@@ -23,10 +23,8 @@ fn auth_cli_never_emits_oauth_token_canaries_after_completion(
     let mut login = environment.command();
     configure_openrouter(&mut login, &endpoint);
     login
-        .args(["auth", "--plaintext", "login", "openrouter", "--headless"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .args(["auth", "login", "openrouter", "--headless"])
+        .stdin(Stdio::piped());
 
     // When
     let mut child = login.spawn()?;
@@ -34,11 +32,6 @@ fn auth_cli_never_emits_oauth_token_canaries_after_completion(
     stdin.write_all(b"headless-code\n")?;
     drop(stdin);
     let login = child.wait_with_output()?;
-    assert!(
-        login.status.success(),
-        "OAuth fixture login failed: {}",
-        String::from_utf8_lossy(&login.stderr)
-    );
     endpoint.finish()?;
     let status = environment
         .command()
@@ -50,6 +43,7 @@ fn auth_cli_never_emits_oauth_token_canaries_after_completion(
         .output()?;
 
     // Then
+    assert!(login.status.success());
     assert!(status.status.success());
     assert!(logout.status.success());
     let output = [

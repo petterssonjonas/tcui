@@ -15,31 +15,24 @@ fn unique_temp_dir(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("tcui-{label}-{}-{nanos}", std::process::id()))
 }
 
-pub(crate) struct TestEnv {
+pub(super) struct TestEnv {
     root: PathBuf,
-    previous: [(&'static str, Option<OsString>); 4],
+    original_data_home: Option<OsString>,
 }
 
 impl TestEnv {
-    pub(crate) fn new(label: &str) -> Self {
+    pub(super) fn new(label: &str) -> Self {
         let root = unique_temp_dir(label);
         std::fs::create_dir_all(&root).expect("create isolated root");
-        let previous = ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"]
-            .map(|name| (name, std::env::var_os(name)));
-        for (name, directory) in [
-            ("HOME", "home"),
-            ("XDG_CONFIG_HOME", "config-home"),
-            ("XDG_DATA_HOME", "data"),
-            ("XDG_CACHE_HOME", "cache"),
-        ] {
-            let path = root.join(directory);
-            std::fs::create_dir_all(&path).expect("create isolated directory");
-            std::env::set_var(name, path);
+        let original_data_home = std::env::var_os("XDG_DATA_HOME");
+        std::env::set_var("XDG_DATA_HOME", root.join("data"));
+        Self {
+            root,
+            original_data_home,
         }
-        Self { root, previous }
     }
 
-    pub(crate) fn config(&self) -> AppConfig {
+    pub(super) fn config(&self) -> AppConfig {
         AppConfig {
             key_file: Some(
                 self.root
@@ -53,17 +46,6 @@ impl TestEnv {
         }
     }
 
-    pub(super) fn initialized_config(&self) -> AppConfig {
-        let config = self.config();
-        super::KeyStore::initialize_vault(&config, "test-only-vault-password")
-            .expect("initialize isolated vault");
-        config
-    }
-
-    pub(super) fn database_path(&self) -> PathBuf {
-        self.data_home().join("tcui").join("tcui.db")
-    }
-
     pub(super) fn data_home(&self) -> PathBuf {
         self.root.join("data")
     }
@@ -71,12 +53,9 @@ impl TestEnv {
 
 impl Drop for TestEnv {
     fn drop(&mut self) {
-        let _ = crate::protection::lock();
-        for (name, previous) in &self.previous {
-            match previous {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
+        match self.original_data_home.take() {
+            Some(value) => std::env::set_var("XDG_DATA_HOME", value),
+            None => std::env::remove_var("XDG_DATA_HOME"),
         }
         let _ = std::fs::remove_dir_all(&self.root);
     }

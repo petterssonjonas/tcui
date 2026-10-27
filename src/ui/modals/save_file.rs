@@ -42,7 +42,7 @@ impl SaveFileDialog {
         f.render_widget(Clear, popup_area);
         f.render_widget(block, popup_area);
         f.render_widget(
-            Paragraph::new(Line::from(" Save file ")).style(
+            Paragraph::new(Line::from(" Save Artifact ")).style(
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),

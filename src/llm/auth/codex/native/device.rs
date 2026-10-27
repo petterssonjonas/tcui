@@ -146,7 +146,7 @@ async fn exchange_device_code(
     let tokens = service
         .exchange(&exchange, cancellation, chrono::Utc::now())
         .await?;
-    persist_tokens(config, &tokens, &adapter.connection, adapter.storage)
+    persist_tokens(config, &tokens, None)
 }
 
 #[derive(Serialize)]

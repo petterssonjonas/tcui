@@ -10,8 +10,6 @@ pub(crate) enum CodexNativeError {
     MissingExpiry,
     #[error("native Codex OAuth credential has no refresh token")]
     MissingRefreshToken,
-    #[error("native Codex OAuth refresh was invalidated by a credential or session change")]
-    StaleRefresh,
     #[error("native Codex OAuth device authorization was denied")]
     DeviceDenied,
     #[error("native Codex OAuth device authorization response is malformed")]

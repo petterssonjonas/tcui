@@ -18,15 +18,16 @@ fn typed_api_key_round_trip_preserves_legacy_keys_and_redacts_raw_store() {
     // Given
     let _guard = env_lock().lock().expect("env lock poisoned");
     let env = TestEnv::new("typed-api-key-round-trip");
-    let config = env.initialized_config();
-    KeyStore::set(&config, "OpenAI", "legacy-key").expect("persist legacy key");
+    let config = env.config();
+    KeyStore::save_keys(&config, &[("OpenAI".to_owned(), "legacy-key".to_owned())])
+        .expect("persist legacy key");
     let credential = openrouter_credential("openrouter-key-canary");
 
     // When
     KeyStore::upsert_credential(&config, &credential).expect("persist typed credential");
     let stored = KeyStore::get_credential(&config, "OpenRouter").expect("load credential");
-    let bytes = std::fs::read(env.database_path()).expect("read credential database");
-    let raw = String::from_utf8_lossy(&bytes);
+    let raw = std::fs::read_to_string(config.key_file.as_deref().expect("key file path"))
+        .expect("read encrypted key file");
 
     // Then
     assert_eq!(stored, Some(credential));
@@ -44,7 +45,7 @@ fn typed_api_key_replacement_is_atomic_and_local_removal_is_idempotent() {
     // Given
     let _guard = env_lock().lock().expect("env lock poisoned");
     let env = TestEnv::new("typed-api-key-replacement");
-    let config = env.initialized_config();
+    let config = env.config();
     KeyStore::upsert_credential(&config, &openrouter_credential("first-key"))
         .expect("persist first credential");
 

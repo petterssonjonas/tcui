@@ -15,32 +15,17 @@ use crate::llm::auth::oauth::{
 pub(super) fn persist_tokens(
     config: &AppConfig,
     tokens: &TokenSet,
-    connection: &str,
-    storage: Option<crate::config::key_store::CredentialStorage>,
+    account_fallback: Option<String>,
 ) -> Result<CodexCredential, CodexNativeError> {
-    let credential = credential_from_tokens(tokens, None, connection)?;
-    if let Some(storage) = storage {
-        KeyStore::upsert_oauth_with_storage(config, &credential, storage)?;
-    } else {
-        KeyStore::upsert_oauth(config, &credential)?;
-    }
-    Ok(CodexCredential::native(credential))
-}
-
-fn credential_from_tokens(
-    tokens: &TokenSet,
-    account_fallback: Option<&str>,
-    connection: &str,
-) -> Result<OAuthCredential, CodexNativeError> {
     let account_id = tokens
         .id_token()
         .map(extract_account_id)
         .transpose()?
-        .or_else(|| account_fallback.map(str::to_owned))
+        .or(account_fallback)
         .ok_or(CodexNativeError::MissingAccount)?;
     let expires_at = tokens.expires_at().ok_or(CodexNativeError::MissingExpiry)?;
-    Ok(OAuthCredential {
-        provider: connection.to_owned(),
+    let credential = OAuthCredential {
+        provider: "Codex".to_string(),
         access_token: tokens.access_token().as_str().expose_secret().to_owned(),
         refresh_token: tokens
             .refresh_token()
@@ -49,17 +34,18 @@ fn credential_from_tokens(
         account_id: Some(account_id),
         ownership: OAuthCredentialOwnership::Tcui,
         source: OAuthCredentialSource::NativeOAuth,
-    })
+    };
+    KeyStore::upsert_oauth(config, &credential)?;
+    Ok(CodexCredential::native(credential))
 }
 
 pub(super) async fn refresh(
     adapter: &CodexNativeAdapter,
     config: &AppConfig,
     cancellation: &OAuthCancellation,
-    is_current: impl FnOnce() -> bool,
 ) -> Result<CodexCredential, CodexNativeError> {
-    let credential = KeyStore::get_oauth(config, &adapter.connection)?
-        .ok_or(CodexNativeError::MissingAccount)?;
+    let credential =
+        KeyStore::get_oauth(config, "Codex")?.ok_or(CodexNativeError::MissingAccount)?;
     let refresh_token = credential
         .refresh_token
         .clone()
@@ -68,15 +54,7 @@ pub(super) async fn refresh(
     let request = RefreshTokenExchange::new(adapter.endpoints.client_id.clone(), refresh_token);
     let service = TokenService::hardened(adapter.endpoints.token.clone())?;
     let tokens = service.refresh(&request, cancellation, Utc::now()).await?;
-    let replacement = credential_from_tokens(
-        &tokens,
-        credential.account_id.as_deref(),
-        &adapter.connection,
-    )?;
-    if !KeyStore::replace_oauth_if_current(config, &credential, &replacement, is_current)? {
-        return Err(CodexNativeError::StaleRefresh);
-    }
-    Ok(CodexCredential::native(replacement))
+    persist_tokens(config, &tokens, credential.account_id)
 }
 
 fn extract_account_id(

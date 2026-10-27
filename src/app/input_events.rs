@@ -2,53 +2,12 @@ use super::{Action, TuiApp};
 use crate::app::action::MouseClickAction;
 
 impl TuiApp {
-    pub(crate) fn focus_chat_pane(&mut self, index: usize) -> bool {
-        let changed = self.ui.active_tab != index;
-        if !self.ui.focus_chat_pane(index) {
-            return false;
-        }
-        self.ui.terminals.focused = false;
-        if changed {
-            self.cancel_escape = None;
-            self.ui.list_popup = None;
-            self.refresh_visible_selectors();
-        }
-        true
-    }
-
     fn action_for_slash_command(&self, text: &str) -> Option<Action> {
-        let trimmed = text.trim();
-        let command = trimmed.split_whitespace().next()?;
-        match command {
-            "/fork" => return Some(Action::ForkConversation),
-            "/temp" => {
-                return match trimmed[command.len()..].trim() {
-                    "" => Some(Action::OpenEphemeral),
-                    "close" => Some(Action::CloseEphemeral),
-                    _ => None,
-                };
-            }
-            "/cancel" => return Some(Action::CancelRequest),
-            "/steer" => {
-                return Some(Action::SteerRequest(
-                    trimmed[command.len()..].trim().to_string(),
-                ))
-            }
-            _ => {}
-        }
         match text.trim() {
             "/quit" | "/exit" | "/q" => Some(self.quit_action()),
             "/skills" => Some(Action::ShowSkillsPopup),
             "/mcp" => Some(Action::ShowMcpPopup),
             "/settings" => Some(Action::OpenSettingsPanel),
-            "/security" => Some(Action::OpenSecurity),
-            "/unlock" => Some(Action::UnlockApplication),
-            "/lock" => Some(Action::LockApplication),
-            "/terminal" => Some(Action::OpenTerminal),
-            "/providers" | "/connect" => Some(Action::OpenProviders),
-            "/vault" => Some(Action::OpenCredentialVault),
-            "/vault-search" => Some(Action::ShowLocalSearch(String::new())),
-            "/model" => Some(Action::SetManualModel(String::new())),
             "/help" => Some(Action::ShowHelp),
             "/keybinds" => Some(Action::ShowKeybinds),
             "/web" => Some(Action::ToggleWebSearch),
@@ -56,115 +15,62 @@ impl TuiApp {
         }
     }
 
-    fn submit_composer_input(&mut self) -> Option<Action> {
-        let tab = self.ui.tabs.get(self.ui.active_tab)?;
-        let trimmed = tab.input_content.trim();
-        if let Some(action) = self.action_for_slash_command(trimmed) {
-            if !matches!(action, Action::SteerRequest(_)) {
-                self.take_input_submission();
-            }
-            return Some(action);
-        }
-        let local_action = match trimmed.split_whitespace().next() {
-            Some("/vault") => Some(Action::OpenCredentialVault),
-            Some("/connect" | "/providers") => Some(Action::OpenProviders),
-            _ => trimmed
-                .strip_prefix("/vault-search ")
-                .map(|query| Action::ShowLocalSearch(query.trim().to_string()))
-                .or_else(|| {
-                    trimmed
-                        .strip_prefix("/model ")
-                        .map(|model| Action::SetManualModel(model.trim().to_string()))
-                }),
-        };
-        if let Some(action) = local_action {
-            self.take_input_submission();
-            return Some(action);
-        }
-        if trimmed == "/theme" {
-            self.take_input_submission();
-            self.show_theme_popup("");
-            return None;
-        }
-        if let Some(theme_name) = trimmed.strip_prefix("/theme ") {
-            let theme_name = theme_name.trim().to_string();
-            self.take_input_submission();
-            let _ = self.apply_theme_selection(&theme_name);
-            return None;
-        }
-        if let Some(value) = trimmed.strip_prefix("/web ") {
-            let value = value.trim();
-            if value.eq_ignore_ascii_case("on") || value.eq_ignore_ascii_case("off") {
-                let enabled = value.eq_ignore_ascii_case("on");
-                let current = self
-                    .config
-                    .try_read()
-                    .map(|config| config.web_search.enabled)
-                    .unwrap_or(false);
-                self.take_input_submission();
-                return (enabled != current).then_some(Action::ToggleWebSearch);
-            }
-        }
-        if self.active_request_id().is_some() {
-            self.ui.show_toast(
-                "This conversation already has an active request. Use /cancel or wait; your draft is preserved."
-                    .to_string(),
-            );
-            return None;
-        }
-        self.take_input_submission().map(Action::SendMessage)
-    }
-
     pub(crate) fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> Option<Action> {
-        if self.security_restart.is_some() {
-            return None;
-        }
+        use crossterm::event::{KeyCode, KeyModifiers};
+
         if key.kind != crossterm::event::KeyEventKind::Press {
             return None;
         }
-        let previous_escape = self.cancel_escape.take();
-        self.handle_key_inner(key, previous_escape)
-    }
 
-    fn handle_key_inner(
-        &mut self,
-        key: crossterm::event::KeyEvent,
-        previous_escape: super::request_control::CancelEscape,
-    ) -> Option<Action> {
-        use crossterm::event::{KeyCode, KeyModifiers};
-
-        self.ui.text_selection.cancel();
-        if self.ui.command_review.is_some() || self.ui.terminals.close_pending.is_some() {
-            return self.terminal_key(key).flatten();
-        }
-
-        if self.ui.credential_manager.is_some() {
-            self.handle_credential_manager_key(key);
+        // TODO: Keybind editing is disabled in the settings UI (no keybind entries in
+        // all_settings). This capture flow is preserved and persisted to config, but
+        // normal key dispatch does not yet consult keybinding_overrides. Re-enable
+        // keybind entries in all_settings() once dispatch is wired through the binding map.
+        if let Some(mut capture) = self.ui.keybind_capture.take() {
+            let mut effective_bindings = std::collections::BTreeMap::new();
+            for setting in crate::tui::settings_panel::all_settings() {
+                if let crate::tui::settings_panel::SettingType::Keybind {
+                    action_id,
+                    default_binding,
+                    reserved: _,
+                } = setting.setting_type
+                {
+                    effective_bindings.insert(action_id.to_string(), default_binding.to_string());
+                }
+            }
+            effective_bindings.extend(self.ui.keybinding_overrides.clone());
+            let result = capture.capture_with_overrides(key, &effective_bindings);
+            match result {
+                crate::tui::keybind_capture::CaptureResult::Captured(_) => {
+                    let action_id = capture.action_id.clone();
+                    let action_label = capture.action_label.clone();
+                    if let Some(binding) = capture.confirm() {
+                        self.ui
+                            .keybinding_overrides
+                            .insert(action_id.clone(), binding.clone());
+                        self.ui
+                            .show_toast(format!("Bound {action_label} → {binding}"));
+                        if let Ok(mut config) = self.config.try_write() {
+                            config.tui.keybinding_overrides = self.ui.keybinding_overrides.clone();
+                            let _ = config.save();
+                        }
+                    }
+                }
+                crate::tui::keybind_capture::CaptureResult::Cleared => {
+                    let action_id = capture.action_id.clone();
+                    self.ui.keybinding_overrides.remove(&action_id);
+                    if let Ok(mut config) = self.config.try_write() {
+                        config.tui.keybinding_overrides = self.ui.keybinding_overrides.clone();
+                        let _ = config.save();
+                    }
+                }
+                crate::tui::keybind_capture::CaptureResult::Conflict(_)
+                | crate::tui::keybind_capture::CaptureResult::Waiting => {
+                    self.ui.keybind_capture = Some(capture);
+                }
+                crate::tui::keybind_capture::CaptureResult::Cancelled => {}
+            }
             return None;
-        }
-
-        if self.ui.active_modal.is_none() && self.ui.delete_confirm.is_none() {
-            if key.code == KeyCode::Char('q')
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-                && self.ui.resource_editor.is_some()
-            {
-                return Some(self.quit_action());
-            }
-            if let Some(editor) = self.ui.resource_editor.as_mut() {
-                return match editor.handle_key(key) {
-                    crate::ui::modals::resource_editor::EditorAction::None => None,
-                    crate::ui::modals::resource_editor::EditorAction::Save => {
-                        Some(Action::SaveResourceEditor)
-                    }
-                    crate::ui::modals::resource_editor::EditorAction::Copy => {
-                        Some(Action::CopyResourceEditor)
-                    }
-                    crate::ui::modals::resource_editor::EditorAction::Close => {
-                        self.ui.resource_editor = None;
-                        None
-                    }
-                };
-            }
         }
 
         if self.ui.show_keybinds {
@@ -172,47 +78,6 @@ impl TuiApp {
                 KeyCode::Esc | KeyCode::Enter => Some(Action::DismissKeybinds),
                 _ => None,
             };
-        }
-
-        if let Some(pending) = self.ui.pending_vault_mutation.as_mut() {
-            return match key.code {
-                KeyCode::Esc | KeyCode::Char('n' | 'N') if pending.can_cancel() => {
-                    Some(Action::CancelVaultMutation)
-                }
-                KeyCode::Enter | KeyCode::Char('y' | 'Y') if pending.can_confirm() => {
-                    Some(Action::ConfirmVaultMutation)
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    pending.scroll_up(1);
-                    None
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    pending.scroll_down(1);
-                    None
-                }
-                KeyCode::PageUp => {
-                    pending.scroll_up(8);
-                    None
-                }
-                KeyCode::PageDown => {
-                    pending.scroll_down(8);
-                    None
-                }
-                KeyCode::Home => {
-                    pending.scroll_up(usize::MAX);
-                    None
-                }
-                KeyCode::End => {
-                    pending.scroll_down(usize::MAX);
-                    None
-                }
-                _ => None,
-            };
-        }
-
-        if self.ui.pending_vault_action.is_some() {
-            self.handle_pending_vault_action_key(key);
-            return None;
         }
 
         if let Some(palette) = self.ui.palette.as_mut() {
@@ -268,17 +133,66 @@ impl TuiApp {
                     None
                 }
                 KeyCode::Enter => {
+                    if settings.confirm.is_some() {
+                        settings.confirm_reset();
+                        return None;
+                    }
+                    let selected_id = settings
+                        .selected_setting(&catalog)
+                        .map(|setting| setting.id);
                     match settings.enter(&catalog) {
+                        crate::tui::settings_panel::EnterResult::OpenKeybind {
+                            action_id,
+                            action_label,
+                        } => {
+                            self.ui.keybind_capture =
+                                Some(crate::tui::keybind_capture::KeybindCaptureState::new(
+                                    action_id,
+                                    action_label,
+                                ));
+                        }
                         crate::tui::settings_panel::EnterResult::RunCommand(id) => {
                             self.ui.settings_v2 = None;
                             return crate::tui::settings_panel::command_action(id);
                         }
-                        crate::tui::settings_panel::EnterResult::NavigateSetting(id) => {
-                            self.ui.settings_v2 = None;
-                            return Some(Action::OpenSettingsPage(id.to_string()));
+                        crate::tui::settings_panel::EnterResult::SelectTheme(theme) => {
+                            let _ = self.apply_theme_selection(theme);
                         }
-                        crate::tui::settings_panel::EnterResult::Nothing => {}
+                        crate::tui::settings_panel::EnterResult::SelectToastPosition(position) => {
+                            let _ = self.apply_toast_position_selection(position);
+                        }
+                        crate::tui::settings_panel::EnterResult::ToggledBool => match selected_id {
+                            Some("web_search") => return Some(Action::ToggleWebSearch),
+                            Some("collapse_thinking") => {
+                                return Some(Action::ToggleCollapseThinking);
+                            }
+                            _ => {}
+                        },
+                        crate::tui::settings_panel::EnterResult::Nothing
+                        | crate::tui::settings_panel::EnterResult::EnteredSubsection
+                        | crate::tui::settings_panel::EnterResult::RequestConfirm => {}
                     }
+                    None
+                }
+                KeyCode::Char(' ') => {
+                    let selected_id = settings
+                        .selected_setting(&catalog)
+                        .map(|setting| setting.id);
+                    if !settings.toggle_bool(&catalog) {
+                        settings.insert_char(' ');
+                    } else {
+                        match selected_id {
+                            Some("web_search") => return Some(Action::ToggleWebSearch),
+                            Some("collapse_thinking") => {
+                                return Some(Action::ToggleCollapseThinking);
+                            }
+                            _ => {}
+                        }
+                    }
+                    None
+                }
+                KeyCode::Left | KeyCode::Right if settings.confirm.is_some() => {
+                    settings.toggle_confirm_selection();
                     None
                 }
                 KeyCode::Up => {
@@ -289,7 +203,7 @@ impl TuiApp {
                     settings.move_down(&catalog);
                     None
                 }
-                KeyCode::Tab => {
+                KeyCode::Tab if settings.confirm.is_none() => {
                     settings.toggle_descriptions();
                     None
                 }
@@ -359,53 +273,9 @@ impl TuiApp {
             };
         }
 
-        if self.ui.active_modal.is_none()
-            && self.ui.delete_confirm.is_none()
-            && self.ui.save_file_dialog.is_none()
-            && self.ui.artifact_viewer.is_none()
-            && self.ui.editor_popup.is_none()
-            && self.ui.resource_editor.is_none()
-            && self.ui.list_popup.is_none()
-            && !self.ui.show_session_list
-        {
-            if let Some(action) = self.terminal_key(key) {
-                return action;
-            }
-            if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                return Some(Action::OpenCommandPalette);
-            }
-            if self.ui.app_tabs.active_view() == crate::ui::app_tabs::AppView::Settings {
-                return match key.code {
-                    KeyCode::Char(',') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        Some(Action::ToggleSettings)
-                    }
-                    KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.ui.app_tabs.add_launcher();
-                        self.ui.focus = crate::tui::focus::Focus::Chat;
-                        None
-                    }
-                    KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.request_app_tab_close(self.ui.app_tabs.active_id());
-                        None
-                    }
-                    KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        Some(self.quit_action())
-                    }
-                    _ => self.settings_workspace_key(key),
-                };
-            }
-            if let Some(action) =
-                crate::ui::settings_workspace::keybinding_action(key, &self.ui.keybinding_overrides)
-            {
-                return Some(action);
-            }
-            if self.ui.app_tabs.active_view().is_chat()
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-                && key.code == KeyCode::Char('e')
-            {
-                self.open_chat_draft_editor();
-                return None;
-            }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('e') {
+            self.open_chat_draft_editor();
+            return None;
         }
 
         if let Some(dialog) = &mut self.ui.save_file_dialog {
@@ -452,21 +322,6 @@ impl TuiApp {
                     self.prepare_artifact_save(viewer_handle);
                     None
                 }
-                KeyCode::Char('c') if !viewer.view_only => {
-                    Some(Action::CopyArtifact(viewer_handle))
-                }
-                KeyCode::Char('e') if key.modifiers.is_empty() && !viewer.view_only => {
-                    self.edit_artifact(viewer_handle);
-                    None
-                }
-                KeyCode::Delete if !viewer.view_only => {
-                    self.ui.delete_confirm = Some(viewer_handle);
-                    self.ui.artifact_viewer = None;
-                    None
-                }
-                KeyCode::Char('+') if viewer.can_insert_to_chat() => {
-                    Some(Action::InsertArtifactToChat(viewer_handle))
-                }
                 KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     Some(Action::ExportConversation)
                 }
@@ -474,50 +329,7 @@ impl TuiApp {
             };
         }
 
-        if self.ui.app_tabs.active_view().is_chat()
-            && self.ui.active_modal.is_none()
-            && self.ui.delete_confirm.is_none()
-            && !self.ui.show_session_list
-            && key.code == KeyCode::Enter
-            && !key.modifiers.contains(KeyModifiers::SHIFT)
-            && !self
-                .ui
-                .list_popup
-                .as_ref()
-                .is_some_and(|popup| popup.selected.is_some())
-        {
-            let skill_command =
-                self.ui.tabs.get(self.ui.active_tab).is_some_and(|tab| {
-                    tab.input_content.split_whitespace().next() == Some("/skill")
-                });
-            if skill_command {
-                self.ui.list_popup = None;
-                return self.submit_composer_input();
-            }
-            let local_action = self.ui.tabs.get(self.ui.active_tab).and_then(|tab| {
-                match tab.input_content.split_whitespace().next() {
-                    Some("/vault") => Some(Action::OpenCredentialVault),
-                    Some("/connect" | "/providers") => Some(Action::OpenProviders),
-                    Some(
-                        "/fork" | "/temp" | "/cancel" | "/steer" | "/security" | "/unlock"
-                        | "/lock",
-                    ) => self.action_for_slash_command(&tab.input_content),
-                    _ => None,
-                }
-            });
-            if let Some(action) = local_action {
-                if !matches!(action, Action::SteerRequest(_)) {
-                    self.take_input_submission();
-                }
-                self.ui.list_popup = None;
-                return Some(action);
-            }
-        }
-
-        if self.ui.list_popup.is_some()
-            && self.ui.active_modal.is_none()
-            && self.ui.delete_confirm.is_none()
-        {
+        if self.ui.list_popup.is_some() {
             let live_input = self
                 .ui
                 .list_popup
@@ -546,9 +358,7 @@ impl TuiApp {
                     match action {
                         Some(crate::ui::modals::list_popup::ListPopupAction::InsertText(text)) => {
                             if let Some(action) = self.action_for_slash_command(&text) {
-                                if !matches!(action, Action::SteerRequest(_)) {
-                                    self.replace_input_content(String::new());
-                                }
+                                self.replace_input_content(String::new());
                                 return Some(action);
                             }
                             self.insert_input_text(&text);
@@ -557,9 +367,7 @@ impl TuiApp {
                             text,
                         )) => {
                             if let Some(action) = self.action_for_slash_command(&text) {
-                                if !matches!(action, Action::SteerRequest(_)) {
-                                    self.replace_input_content(String::new());
-                                }
+                                self.replace_input_content(String::new());
                                 return Some(action);
                             }
                             self.replace_input_content(text);
@@ -632,22 +440,10 @@ impl TuiApp {
 
         // Modal input handling takes priority
         if self.ui.active_modal.is_some() {
-            let modal = self.ui.active_modal;
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     self.ui.active_modal = None;
-                    Some(match modal {
-                        Some(crate::ui::Modal::QuitConfirm) => Action::ConfirmQuit,
-                        Some(
-                            crate::ui::Modal::DiscardPendingDocuments
-                            | crate::ui::Modal::DiscardSecurityDrafts,
-                        ) => Action::ConfirmPendingDocumentDiscard,
-                        Some(crate::ui::Modal::ExportChatDraft) => Action::ConfirmChatDraftExport,
-                        Some(crate::ui::Modal::ShareProtectedContext) => {
-                            Action::ConfirmProtectedContext
-                        }
-                        None => Action::CancelModal,
-                    })
+                    Some(Action::ConfirmQuit)
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     self.ui.active_modal = None;
@@ -669,41 +465,6 @@ impl TuiApp {
                 }
             }
         } else {
-            if self.vault_is_active() {
-                return match key.code {
-                    KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
-                        Some(self.quit_action())
-                    }
-                    KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        Some(self.quit_action())
-                    }
-                    KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        Some(Action::OpenCommandPalette)
-                    }
-                    KeyCode::Char(',') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        Some(Action::ToggleSettings)
-                    }
-                    KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.ui.app_tabs.add_launcher();
-                        self.ui.focus = crate::tui::focus::Focus::Chat;
-                        None
-                    }
-                    KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        let active = self.ui.app_tabs.active_id();
-                        self.request_app_tab_close(active);
-                        None
-                    }
-                    _ => self.handle_vault_key(key),
-                };
-            }
-            #[cfg(feature = "memory")]
-            if self.ui.app_tabs.active_view() == crate::ui::app_tabs::AppView::Memories
-                && !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-            {
-                return self.handle_memories_key(key);
-            }
             if !self.ui.app_tabs.active_view().is_chat() {
                 return match key.code {
                     KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
@@ -719,30 +480,18 @@ impl TuiApp {
                         Some(Action::ToggleSettings)
                     }
                     KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.ui.app_tabs.add_launcher();
+                        self.ui.app_tabs.add_placeholder();
                         self.ui.focus = crate::tui::focus::Focus::Chat;
                         None
                     }
                     KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        let active = self.ui.app_tabs.active_id();
-                        self.request_app_tab_close(active);
+                        let active = self.ui.app_tabs.active_index();
+                        self.ui.app_tabs.close(active);
+                        self.ui.focus = crate::tui::focus::Focus::Chat;
                         None
                     }
                     _ => None,
                 };
-            }
-
-            if self.ui.ephemeral.is_some()
-                && key.modifiers == KeyModifiers::ALT
-                && matches!(key.code, KeyCode::Left | KeyCode::Right)
-            {
-                let pane = self.ui.ephemeral.as_ref()?;
-                let index = if key.code == KeyCode::Left {
-                    pane.main_tab_index
-                } else {
-                    pane.tab_index
-                };
-                return Some(Action::FocusChatPane(index));
             }
 
             if self.ui.focus == crate::tui::focus::Focus::LeftSidebar {
@@ -752,21 +501,18 @@ impl TuiApp {
                         return None;
                     }
                     KeyCode::Up | KeyCode::Down => {
-                        let index = self.ui.main_chat_index();
-                        if let Some(tab) = self.ui.tabs.get_mut(index) {
+                        if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
                             tab.sidebar_state
                                 .move_selection(&tab.conversations, key.code == KeyCode::Down);
                         }
                         return None;
                     }
                     KeyCode::Enter => {
-                        let index = self.ui.main_chat_index();
                         let action = self
                             .ui
                             .tabs
-                            .get(index)
+                            .get(self.ui.active_tab)
                             .map(|tab| tab.sidebar_state.selected_action());
-                        self.focus_chat_pane(index);
                         return action.map(|action| match action {
                             crate::ui::sidebar::SidebarAction::NewChat => {
                                 self.ui.focus = crate::tui::focus::Focus::Chat;
@@ -792,18 +538,6 @@ impl TuiApp {
             }
 
             match key.code {
-                KeyCode::Esc if key.modifiers.is_empty() => {
-                    if self.ui.show_session_list {
-                        return Some(Action::ToggleSessionList);
-                    }
-                    let (armed, action) = super::request_control::cancel_escape_action(
-                        previous_escape,
-                        self.active_request_id(),
-                        std::time::Instant::now(),
-                    );
-                    self.cancel_escape = armed;
-                    action
-                }
                 KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
                     Some(self.quit_action())
                 }
@@ -823,13 +557,11 @@ impl TuiApp {
                     Some(Action::ToggleArtifactSidebar)
                 }
                 KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.ui.app_tabs.add_launcher();
+                    self.ui.app_tabs.add_placeholder();
                     self.ui.focus = crate::tui::focus::Focus::Chat;
                     None
                 }
                 KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    let index = self.ui.main_chat_index();
-                    self.focus_chat_pane(index);
                     Some(Action::NewChat)
                 }
                 KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -912,7 +644,50 @@ impl TuiApp {
                         self.insert_input_newline();
                         None
                     } else {
-                        self.submit_composer_input()
+                        if let Some(content) = self.take_input_submission() {
+                            let trimmed = content.trim();
+                            match trimmed {
+                                "/quit" | "/exit" | "/q" => return Some(self.quit_action()),
+                                "/skills" => return Some(Action::ShowSkillsPopup),
+                                "/mcp" => return Some(Action::ShowMcpPopup),
+                                "/settings" => return Some(Action::OpenSettingsPanel),
+                                "/help" => return Some(Action::ShowHelp),
+                                "/keybinds" => return Some(Action::ShowKeybinds),
+                                "/web" => return Some(Action::ToggleWebSearch),
+                                _ => {
+                                    if trimmed == "/theme" {
+                                        self.show_theme_popup("");
+                                        return None;
+                                    }
+                                    if let Some(theme_name) = trimmed.strip_prefix("/theme ") {
+                                        let _ = self.apply_theme_selection(theme_name.trim());
+                                        return None;
+                                    }
+                                    if let Some(query) = trimmed.strip_prefix("/vault ") {
+                                        return Some(Action::ShowLocalSearch(
+                                            query.trim().to_string(),
+                                        ));
+                                    }
+                                    if let Some(value) = trimmed.strip_prefix("/web ") {
+                                        let value = value.trim().to_lowercase();
+                                        if value == "on" || value == "off" {
+                                            let enabled = value == "on";
+                                            let current = self
+                                                .config
+                                                .try_read()
+                                                .map(|config| config.web_search.enabled)
+                                                .unwrap_or(false);
+                                            if enabled != current {
+                                                return Some(Action::ToggleWebSearch);
+                                            }
+                                            return None;
+                                        }
+                                    }
+                                    return Some(Action::SendMessage(content));
+                                }
+                            }
+                        }
+                        None
                     }
                 }
                 KeyCode::Char(c) => {
@@ -922,20 +697,8 @@ impl TuiApp {
                     None
                 }
                 KeyCode::Backspace => {
-                    let last_chip = self
-                        .ui
-                        .tabs
-                        .get(self.ui.active_tab)
-                        .filter(|tab| tab.input_content.is_empty())
-                        .and_then(|tab| tab.pending_document_chips.last())
-                        .map(crate::ui::pending_documents::PendingDocumentChip::id);
-                    match last_chip {
-                        Some(id) => Some(Action::RemovePendingDocument(id)),
-                        None => {
-                            self.backspace_input_char();
-                            None
-                        }
-                    }
+                    self.backspace_input_char();
+                    None
                 }
                 _ => None,
             }
@@ -943,89 +706,11 @@ impl TuiApp {
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> Option<Action> {
-        if self.security_restart.is_some() {
-            return None;
-        }
         use crossterm::event::{MouseButton, MouseEventKind};
 
-        self.cancel_escape = None;
-        if self.ui.command_review.is_some() || self.ui.terminals.close_pending.is_some() {
-            return self.terminal_mouse(mouse).flatten();
-        }
-        if self.ui.active_modal.is_none()
-            && self.ui.palette.is_none()
-            && self.ui.settings_v2.is_none()
-            && self.ui.credential_manager.is_none()
-            && self.ui.pending_vault_mutation.is_none()
-            && self.ui.editor_popup.is_none()
-            && self.ui.resource_editor.is_none()
-            && self.ui.artifact_viewer.is_none()
-            && self.ui.save_file_dialog.is_none()
-            && self.ui.export_dialog.is_none()
-            && self.ui.list_popup.is_none()
-            && self.ui.delete_confirm.is_none()
-            && !self.ui.show_keybinds
-            && !self.ui.show_session_list
-        {
-            if let Some(action) = self.terminal_mouse(mouse) {
-                return action;
-            }
-            if self.ui.app_tabs.active_view() == crate::ui::app_tabs::AppView::Settings
-                && mouse.row > self.ui.last_area.map_or(0, |area| area.y)
-            {
-                return self.settings_workspace_mouse(mouse);
-            }
-        }
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                let pos = ratatui::layout::Position::new(mouse.column, mouse.row);
-                let bounds = if self.ui.credential_manager.is_some() {
-                    self.ui.last_area.map(|area| {
-                        crate::tui::components::centered_rect(86, 82, area)
-                            .inner(ratatui::layout::Margin::new(1, 1))
-                    })
-                } else {
-                    self.ui
-                        .ephemeral
-                        .as_ref()
-                        .and_then(|pane| pane.area)
-                        .filter(|area| area.contains(pos))
-                        .or_else(|| self.ui.chat_area.filter(|area| area.contains(pos)))
-                        .or(self.ui.last_area)
-                }
-                .unwrap_or_default();
-                self.ui.text_selection.begin(pos, bounds);
-                None
-            }
-            MouseEventKind::Drag(MouseButton::Left) => {
-                self.ui
-                    .text_selection
-                    .drag(ratatui::layout::Position::new(mouse.column, mouse.row));
-                None
-            }
-            MouseEventKind::Up(MouseButton::Left) => {
-                let pos = ratatui::layout::Position::new(mouse.column, mouse.row);
-                if !self.ui.text_selection.is_active() {
-                    return None;
-                }
-                if let Some(viewer) = self.ui.artifact_viewer.as_ref() {
-                    if let Err(error) = self.require_artifact_access(viewer.handle()) {
-                        self.ui.text_selection.cancel();
-                        self.ui.show_toast(error.to_string());
-                        return None;
-                    }
-                }
-                if let Some(text) = self.ui.text_selection.finish(pos) {
-                    if !text.is_empty() {
-                        let result = crate::clipboard::copy(&text);
-                        self.clipboard_notice(result);
-                    }
-                    None
-                } else if self.ui.credential_manager.is_none() {
-                    self.handle_mouse_click(mouse.column, mouse.row)
-                } else {
-                    None
-                }
+                self.handle_mouse_click(mouse.column, mouse.row)
             }
             MouseEventKind::Down(MouseButton::Right) => {
                 self.handle_key(crossterm::event::KeyEvent::new(
@@ -1034,10 +719,6 @@ impl TuiApp {
                 ))
             }
             MouseEventKind::ScrollUp => {
-                self.ui.text_selection.cancel();
-                if self.ui.credential_manager.is_some() {
-                    return None;
-                }
                 if self.ui.editor_popup.is_some() {
                     if let Some(editor) = self.ui.editor_popup.as_mut() {
                         editor.send_scroll(false);
@@ -1048,10 +729,6 @@ impl TuiApp {
                 None
             }
             MouseEventKind::ScrollDown => {
-                self.ui.text_selection.cancel();
-                if self.ui.credential_manager.is_some() {
-                    return None;
-                }
                 if self.ui.editor_popup.is_some() {
                     if let Some(editor) = self.ui.editor_popup.as_mut() {
                         editor.send_scroll(true);
@@ -1063,13 +740,6 @@ impl TuiApp {
             }
             _ => None,
         }
-    }
-
-    fn clipboard_notice(&mut self, result: std::io::Result<()>) {
-        self.ui.show_toast(match result {
-            Ok(()) => "Copy sent to clipboard".to_string(),
-            Err(error) => format!("Copy failed: {error}"),
-        });
     }
 
     pub(crate) fn handle_mouse_scroll(
@@ -1094,36 +764,9 @@ impl TuiApp {
             }
             return;
         }
-        if self.ui.active_modal.is_some()
-            || self.ui.command_review.is_some()
-            || self.ui.terminals.close_pending.is_some()
-            || self.ui.delete_confirm.is_some()
-            || self.ui.palette.is_some()
-            || self.ui.settings_v2.is_some()
-            || self.ui.credential_manager.is_some()
-            || self.ui.pending_vault_mutation.is_some()
-            || self.ui.pending_vault_action.is_some()
-            || self.ui.save_file_dialog.is_some()
-            || self.ui.export_dialog.is_some()
-            || self.ui.editor_popup.is_some()
-            || self.ui.resource_editor.is_some()
-            || self.ui.show_keybinds
-            || self.ui.show_session_list
-        {
-            return;
-        }
-        if let Some(viewer) = &mut self.ui.artifact_viewer {
-            if down {
-                viewer.scroll = viewer.scroll.saturating_add(1);
-            } else {
-                viewer.scroll = viewer.scroll.saturating_sub(1);
-            }
-            return;
-        }
 
         if self.ui.app_tabs.active_view().is_chat() && self.ui.sidebar_open {
-            let index = self.ui.main_chat_index();
-            if let Some(tab) = self.ui.tabs.get_mut(index) {
+            if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
                 if tab.sidebar_state.viewport_contains(pos) {
                     tab.sidebar_state.scroll(&tab.conversations, down);
                     self.ui.focus = crate::tui::focus::Focus::LeftSidebar;
@@ -1132,13 +775,21 @@ impl TuiApp {
             }
         }
 
-        if self.vault_is_active() {
-            let _ = self.handle_vault_mouse_scroll(pos, down);
+        if !self.ui.app_tabs.active_view().is_chat() {
             return;
         }
 
-        if !self.ui.app_tabs.active_view().is_chat() {
-            return;
+        if let Some(viewer) = &mut self.ui.artifact_viewer {
+            if let Some(area) = self.ui.chat_area {
+                if area.contains(pos) {
+                    if down {
+                        viewer.scroll = viewer.scroll.saturating_add(1);
+                    } else {
+                        viewer.scroll = viewer.scroll.saturating_sub(1);
+                    }
+                    return;
+                }
+            }
         }
 
         if let Some(section) = self.ui.artifact_sidebar_state.section_at(pos) {
@@ -1155,6 +806,20 @@ impl TuiApp {
                             section,
                             down,
                             tab.temporary_artifacts.len(),
+                            visible,
+                        );
+                    }
+                    crate::ui::artifact_sidebar::ArtifactSection::Saved => {
+                        let visible = self
+                            .ui
+                            .artifact_sidebar_state
+                            .saved_body
+                            .map(crate::ui::artifact_sidebar::ArtifactSidebar::visible_rows)
+                            .unwrap_or(1);
+                        self.ui.artifact_sidebar_state.scroll(
+                            section,
+                            down,
+                            self.ui.saved_artifacts.len(),
                             visible,
                         );
                     }
@@ -1189,19 +854,6 @@ impl TuiApp {
                 }
             }
             return;
-        }
-
-        let dropdown_hit = self.ui.tabs.get(self.ui.active_tab).is_some_and(|tab| {
-            tab.dropdown_item_areas
-                .iter()
-                .any(|area| area.contains(pos))
-        });
-        if !dropdown_hit {
-            if let Some(index) = self.ui.chat_pane_at(pos) {
-                self.focus_chat_pane(index);
-            } else if self.ui.ephemeral.is_some() {
-                return;
-            }
         }
 
         if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
@@ -1241,31 +893,8 @@ impl TuiApp {
     }
 
     pub(crate) fn handle_mouse_click(&mut self, col: u16, row: u16) -> Option<Action> {
-        if self.security_restart.is_some() {
-            return None;
-        }
         let pos = ratatui::layout::Position::new(col, row);
         let area = self.ui.last_area?;
-
-        if let Some(areas) = self.ui.pending_vault_mutation_areas {
-            if areas.cancel.contains(pos)
-                && self
-                    .ui
-                    .pending_vault_mutation
-                    .as_ref()
-                    .is_some_and(crate::app::submission::PendingVaultMutation::can_cancel)
-            {
-                return Some(Action::CancelVaultMutation);
-            }
-            if areas.confirm.is_some_and(|area| area.contains(pos)) {
-                return Some(Action::ConfirmVaultMutation);
-            }
-            return None;
-        }
-
-        if self.ui.pending_vault_action.is_some() {
-            return None;
-        }
 
         if self.ui.delete_confirm.is_some() {
             if let Some(areas) = self.ui.delete_confirm_areas {
@@ -1329,9 +958,6 @@ impl TuiApp {
             return None;
         }
 
-        if self.ui.resource_editor.is_some() {
-            return None;
-        }
         if self.ui.editor_popup.is_some() {
             if let Some(chat_area) = self.ui.chat_area {
                 let popup_area = crate::ui::modals::editor_popup::popup_area_pub(chat_area);
@@ -1342,8 +968,8 @@ impl TuiApp {
                         .as_ref()
                         .is_some_and(|e| e.close_area().is_some_and(|area| area.contains(pos)))
                     {
-                        if let Some(editor) = self.ui.editor_popup.as_mut() {
-                            let _ = editor.request_close();
+                        if let Some(mut editor) = self.ui.editor_popup.take() {
+                            editor.close();
                         }
                     }
                     return None;
@@ -1353,45 +979,33 @@ impl TuiApp {
         }
 
         if self.ui.artifact_viewer.is_some() {
-            let viewer_area = if self.ui.app_tabs.active_view().is_chat() {
-                self.ui.chat_area.unwrap_or(area)
-            } else {
-                area
-            };
-            let popup_area = crate::ui::modals::artifact_viewer::popup_area(viewer_area);
-            if popup_area.contains(pos) {
-                let (close, edit, delete, insert_to_chat, copy, handle) =
-                    self.ui.artifact_viewer.as_ref().map(|viewer| {
-                        (
-                            viewer.hit_areas.close,
-                            viewer.hit_areas.edit,
-                            viewer.hit_areas.delete,
-                            viewer.hit_areas.insert_to_chat,
-                            viewer.hit_areas.copy,
-                            viewer.handle().clone(),
-                        )
-                    })?;
-                if close.is_some_and(|area| area.contains(pos)) {
-                    self.ui.artifact_viewer = None;
+            if let Some(chat_area) = self.ui.chat_area {
+                let popup_area = crate::ui::modals::artifact_viewer::popup_area(chat_area);
+                if popup_area.contains(pos) {
+                    let (close, edit, delete, handle) =
+                        self.ui.artifact_viewer.as_ref().map(|viewer| {
+                            (
+                                viewer.hit_areas.close,
+                                viewer.hit_areas.edit,
+                                viewer.hit_areas.delete,
+                                viewer.handle().clone(),
+                            )
+                        })?;
+                    if close.is_some_and(|area| area.contains(pos)) {
+                        self.ui.artifact_viewer = None;
+                        return None;
+                    }
+                    if edit.is_some_and(|area| area.contains(pos)) {
+                        self.ui.artifact_viewer = None;
+                        self.edit_artifact(handle);
+                        return None;
+                    }
+                    if delete.is_some_and(|area| area.contains(pos)) {
+                        self.ui.delete_confirm = Some(handle);
+                        return None;
+                    }
                     return None;
                 }
-                if edit.is_some_and(|area| area.contains(pos)) {
-                    self.ui.artifact_viewer = None;
-                    self.edit_artifact(handle);
-                    return None;
-                }
-                if delete.is_some_and(|area| area.contains(pos)) {
-                    self.ui.artifact_viewer = None;
-                    self.ui.delete_confirm = Some(handle);
-                    return None;
-                }
-                if copy.is_some_and(|area| area.contains(pos)) {
-                    return Some(Action::CopyArtifact(handle));
-                }
-                if insert_to_chat.is_some_and(|area| area.contains(pos)) {
-                    return Some(Action::InsertArtifactToChat(handle));
-                }
-                return None;
             }
             self.ui.artifact_viewer = None;
             return None;
@@ -1413,21 +1027,9 @@ impl TuiApp {
                 self.ui.list_popup = None;
                 match action {
                     Some(crate::ui::modals::list_popup::ListPopupAction::InsertText(text)) => {
-                        if let Some(action) = self.action_for_slash_command(&text) {
-                            if !matches!(action, Action::SteerRequest(_)) {
-                                self.replace_input_content(String::new());
-                            }
-                            return Some(action);
-                        }
                         self.insert_input_text(&text);
                     }
                     Some(crate::ui::modals::list_popup::ListPopupAction::ReplaceInput(text)) => {
-                        if let Some(action) = self.action_for_slash_command(&text) {
-                            if !matches!(action, Action::SteerRequest(_)) {
-                                self.replace_input_content(String::new());
-                            }
-                            return Some(action);
-                        }
                         self.replace_input_content(text);
                     }
                     Some(crate::ui::modals::list_popup::ListPopupAction::SetTheme(theme)) => {
@@ -1460,22 +1062,10 @@ impl TuiApp {
         }
 
         if self.ui.active_modal.is_some() {
-            let modal = self.ui.active_modal;
             if let Some(modal_areas) = self.ui.modal_areas {
                 if modal_areas.yes.contains(pos) {
                     self.ui.active_modal = None;
-                    return Some(match modal {
-                        Some(crate::ui::Modal::QuitConfirm) => Action::ConfirmQuit,
-                        Some(
-                            crate::ui::Modal::DiscardPendingDocuments
-                            | crate::ui::Modal::DiscardSecurityDrafts,
-                        ) => Action::ConfirmPendingDocumentDiscard,
-                        Some(crate::ui::Modal::ExportChatDraft) => Action::ConfirmChatDraftExport,
-                        Some(crate::ui::Modal::ShareProtectedContext) => {
-                            Action::ConfirmProtectedContext
-                        }
-                        None => Action::CancelModal,
-                    });
+                    return Some(Action::ConfirmQuit);
                 }
                 if modal_areas.no.contains(pos) {
                     self.ui.active_modal = None;
@@ -1484,21 +1074,6 @@ impl TuiApp {
             }
             self.ui.active_modal = None;
             return Some(Action::CancelModal);
-        }
-        if self
-            .ui
-            .ephemeral
-            .as_ref()
-            .and_then(|pane| pane.close_area)
-            .is_some_and(|area| area.contains(pos))
-            && self.ui.palette.is_none()
-            && self.ui.settings_v2.is_none()
-            && self.ui.command_review.is_none()
-            && self.ui.terminals.close_pending.is_none()
-            && self.ui.credential_manager.is_none()
-            && !self.ui.show_session_list
-        {
-            return Some(Action::CloseEphemeral);
         }
 
         if let Some((_, mouse_action)) = self
@@ -1509,39 +1084,24 @@ impl TuiApp {
             .find(|(hit_area, _)| hit_area.contains(pos))
             .copied()
         {
-            if (self.ui.palette.is_some()
-                && !matches!(mouse_action, crate::ui::MouseAction::PaletteItem(_)))
-                || (self.ui.settings_v2.is_some()
-                    && !matches!(mouse_action, crate::ui::MouseAction::SettingsItem(_)))
-                || self.ui.show_session_list
-                || self.ui.command_review.is_some()
-                || self.ui.terminals.close_pending.is_some()
-                || self.ui.credential_manager.is_some()
-            {
-                return None;
-            }
             match mouse_action {
                 crate::ui::MouseAction::AppTabSelect(index) => {
                     self.ui.app_tabs.select(index);
-                    self.ui.terminals.focused = self.ui.app_tabs.tab(index).is_some_and(|tab| {
-                        matches!(tab.view(), crate::ui::app_tabs::AppView::Terminal { .. })
-                    });
                     self.ui.focus = crate::tui::focus::Focus::Chat;
                     return None;
                 }
                 crate::ui::MouseAction::AppTabAdd => {
-                    self.ui.app_tabs.add_launcher();
+                    self.ui.app_tabs.add_placeholder();
                     self.ui.focus = crate::tui::focus::Focus::Chat;
                     return None;
                 }
                 crate::ui::MouseAction::AppTabClose(index) => {
-                    self.request_app_tab_close(index);
+                    self.ui.app_tabs.close(index);
+                    self.ui.focus = crate::tui::focus::Focus::Chat;
                     return None;
                 }
                 crate::ui::MouseAction::Sidebar(action) => {
-                    let index = self.ui.main_chat_index();
-                    self.focus_chat_pane(index);
-                    if let Some(tab) = self.ui.tabs.get_mut(index) {
+                    if let Some(tab) = self.ui.tabs.get_mut(self.ui.active_tab) {
                         tab.sidebar_state.select_action(action);
                     }
                     self.ui.focus = crate::tui::focus::Focus::LeftSidebar;
@@ -1595,55 +1155,15 @@ impl TuiApp {
                         index,
                     )));
                 }
-                crate::ui::MouseAction::Launcher(action) => {
-                    return match action {
-                        crate::ui::launcher::LauncherAction::Vault => {
-                            Some(Action::OpenVaultLauncher)
-                        }
-                        crate::ui::launcher::LauncherAction::Terminal => Some(Action::OpenTerminal),
-                        crate::ui::launcher::LauncherAction::Settings => {
-                            Some(Action::OpenSettingsPanel)
-                        }
-                        #[cfg(feature = "memory")]
-                        crate::ui::launcher::LauncherAction::Memories => {
-                            Some(Action::OpenMemoriesLauncher)
-                        }
-                    };
-                }
             }
-        }
-        if self.ui.palette.is_some()
-            || self.ui.settings_v2.is_some()
-            || self.ui.credential_manager.is_some()
-            || self.ui.command_review.is_some()
-            || self.ui.terminals.close_pending.is_some()
-            || self.ui.show_session_list
-        {
-            return None;
-        }
-
-        if self.vault_is_active() {
-            return self.handle_vault_mouse_click(pos);
-        }
-        #[cfg(feature = "memory")]
-        if self.ui.app_tabs.active_view() == crate::ui::app_tabs::AppView::Memories {
-            return self.handle_memories_mouse(pos);
         }
 
         if !self.ui.app_tabs.active_view().is_chat() {
             return None;
         }
 
-        let dropdown_hit = self.ui.tabs.get(self.ui.active_tab).is_some_and(|tab| {
-            tab.dropdown_item_areas
-                .iter()
-                .any(|area| area.contains(pos))
-        });
-        if !dropdown_hit {
-            if let Some(index) = self.ui.chat_pane_at(pos) {
-                self.focus_chat_pane(index);
-                self.ui.focus = crate::tui::focus::Focus::Chat;
-            }
+        if self.ui.chat_area.is_some_and(|area| area.contains(pos)) {
+            self.ui.focus = crate::tui::focus::Focus::Chat;
         }
 
         let mut clicked_link = None;
@@ -1698,14 +1218,6 @@ impl TuiApp {
             }
         }
 
-        if let Some(id) = self.ui.tabs.get(self.ui.active_tab).and_then(|tab| {
-            tab.pending_document_chip_hit_areas
-                .iter()
-                .find_map(|(id, area)| area.contains(pos).then_some(*id))
-        }) {
-            return Some(Action::RemovePendingDocument(id));
-        }
-
         if self.ui.show_selector {
             let mut selected_provider = None;
             let mut selected_model = None;
@@ -1726,9 +1238,7 @@ impl TuiApp {
                                         self.ui.visible_providers[real_idx].0.clone();
                                     if tab.tab.provider != new_provider {
                                         tab.tab.provider = new_provider.clone();
-                                        tab.tab.endpoint = None;
                                         tab.tab.model.clear();
-                                        tab.manual_model_override = false;
                                         tab.tab.reasoning_effort = None;
                                         selected_provider = Some(new_provider);
                                     }
@@ -1738,7 +1248,6 @@ impl TuiApp {
                                 if real_idx < self.ui.current_models.len() {
                                     let model = self.ui.current_models[real_idx].id.clone();
                                     tab.tab.model = model.clone();
-                                    tab.manual_model_override = false;
                                     tab.tab.reasoning_effort = None;
                                     selected_model = Some(model);
                                 }
@@ -1820,49 +1329,6 @@ impl TuiApp {
             }
         }
 
-        if self.ui.palette.is_none() && self.ui.settings_v2.is_none() {
-            if let Some((message_index, block_index, action)) =
-                self.ui.tabs.get(self.ui.active_tab).and_then(|tab| {
-                    tab.command_hit_areas.iter().find_map(
-                        |(message_index, block_index, action, area)| {
-                            area.contains(pos)
-                                .then_some((*message_index, *block_index, *action))
-                        },
-                    )
-                })
-            {
-                match action {
-                    crate::ui::chat_tab::CommandBlockAction::Run => {
-                        self.open_command_review(message_index, block_index);
-                    }
-                    crate::ui::chat_tab::CommandBlockAction::Copy => {
-                        if let Some(block) =
-                            self.command_block_for_message(message_index, block_index)
-                        {
-                            let result = crate::clipboard::copy(&block.code);
-                            self.clipboard_notice(result);
-                        }
-                    }
-                }
-                return None;
-            }
-            if let Some((tab, index)) = self.ui.tabs.get(self.ui.active_tab).and_then(|tab| {
-                tab.copy_hit_areas
-                    .iter()
-                    .find_map(|(index, area)| area.contains(pos).then_some((tab, *index)))
-            }) {
-                if let Some(message) = tab
-                    .messages
-                    .get(index)
-                    .filter(|message| message.role == "assistant")
-                {
-                    let result = crate::clipboard::copy(&message.content);
-                    self.clipboard_notice(result);
-                }
-                return None;
-            }
-        }
-
         if let Some(action) = self.ui.artifact_sidebar_state.action_at(pos) {
             match action {
                 crate::ui::artifact_sidebar::ArtifactSidebarAction::ToggleSection(section) => {
@@ -1880,12 +1346,6 @@ impl TuiApp {
                 crate::ui::artifact_sidebar::ArtifactSidebarAction::Save(handle) => {
                     self.prepare_artifact_save(handle);
                 }
-                crate::ui::artifact_sidebar::ArtifactSidebarAction::Context(handle) => {
-                    self.insert_artifact_to_chat(handle);
-                }
-                crate::ui::artifact_sidebar::ArtifactSidebarAction::Copy(handle) => {
-                    self.copy_artifact(handle);
-                }
                 crate::ui::artifact_sidebar::ArtifactSidebarAction::Delete(handle) => {
                     self.ui.delete_confirm = Some(handle);
                 }
@@ -1900,511 +1360,5 @@ impl TuiApp {
         }
 
         None
-    }
-}
-
-#[cfg(test)]
-#[path = "ephemeral_input_tests.rs"]
-mod ephemeral_tests;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::app::submission::{InputSubmission, PendingDocuments, PreparedUserTurn};
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
-    }
-
-    fn register_request(app: &mut TuiApp) -> crate::app::submission::SubmissionId {
-        let id = PreparedUserTurn::prepare(&InputSubmission::new(
-            "request",
-            PendingDocuments::default(),
-        ))
-        .expect("prepare request")
-        .submission_id();
-        let conversation = app.ui.tabs[0].active_conversation;
-        app.register_request(
-            crate::app::requests::RequestRoute {
-                request_id: id,
-                origin_conversation_id: conversation,
-                destination_conversation_id: conversation,
-            },
-            0,
-            app.ui.tabs[0].messages.clone(),
-        )
-        .expect("register request");
-        id
-    }
-
-    fn arm_escape(app: &mut TuiApp) {
-        let id = register_request(app);
-        app.cancel_escape = Some((id, std::time::Instant::now()));
-    }
-
-    #[test]
-    fn security_commands_are_local_controls_even_without_a_provider() {
-        for (input, restart) in [
-            (
-                "/security",
-                crate::protection::ui::SecurityRestart::Configure,
-            ),
-            ("/unlock", crate::protection::ui::SecurityRestart::Unlock),
-            (" /lock ", crate::protection::ui::SecurityRestart::Lock),
-        ] {
-            crate::app::tests::with_test_app("security-slash-controls", |app| {
-                let runtime = tokio::runtime::Runtime::new().expect("runtime");
-                for character in input.chars() {
-                    if let Some(action) = app.handle_key(key(KeyCode::Char(character))) {
-                        runtime.block_on(app.dispatch(action)).expect("typed input");
-                    }
-                }
-                let action = app.handle_key(key(KeyCode::Enter)).expect("local command");
-                runtime
-                    .block_on(app.dispatch(action))
-                    .expect("local control");
-                while app.security_restart.is_none() {
-                    let Ok(action) = app.action_rx.try_recv() else {
-                        break;
-                    };
-                    runtime
-                        .block_on(app.dispatch(action))
-                        .expect("queued control");
-                }
-                assert_eq!(app.security_restart, Some(restart));
-                assert!(app.ui.protection_blocked);
-                assert!(app.ui.tabs[0].input_content.is_empty());
-                assert!(app.ui.tabs[0].messages.is_empty());
-            });
-        }
-    }
-
-    #[test]
-    fn lock_waits_for_inserted_document_discard_before_clearing_caches() {
-        crate::app::tests::with_test_app("security-document-discard", |app| {
-            let document = crate::app::submission::PendingDocument::snapshot(
-                "security-test",
-                "private.md",
-                b"private draft",
-            )
-            .expect("snapshot");
-            app.pending_documents_mut()
-                .insert(document)
-                .expect("insert");
-            app.lock_application().expect("request lock");
-            assert!(app.security_restart.is_none());
-            assert!(app.has_pending_documents());
-            assert!(matches!(
-                app.ui.active_modal,
-                Some(crate::ui::Modal::DiscardSecurityDrafts)
-            ));
-            app.confirm_pending_document_discard()
-                .expect("confirm discard");
-            assert!(app.pending_documents.is_empty());
-            assert_eq!(
-                app.security_restart,
-                Some(crate::protection::ui::SecurityRestart::Lock)
-            );
-        });
-    }
-
-    #[test]
-    fn palette_security_transition_cannot_discard_composer_or_history_drafts_without_consent() {
-        crate::app::tests::with_test_app("security-composer-discard", |app| {
-            app.replace_input_content("unsent private message".into());
-            app.ui.tabs[0].input_history_draft = Some("original unsent draft".into());
-            let runtime = tokio::runtime::Runtime::new().expect("runtime");
-            runtime
-                .block_on(app.dispatch(Action::OpenSecurity))
-                .expect("palette action");
-            assert_eq!(
-                app.ui.active_modal,
-                Some(crate::ui::Modal::DiscardSecurityDrafts)
-            );
-            assert!(app.security_restart.is_none());
-            let cancel = app
-                .handle_key(key(KeyCode::Esc))
-                .expect("cancel confirmation");
-            runtime
-                .block_on(app.dispatch(cancel))
-                .expect("cancel transition");
-            assert_eq!(app.ui.tabs[0].input_content, "unsent private message");
-            assert_eq!(
-                app.ui.tabs[0].input_history_draft.as_deref(),
-                Some("original unsent draft")
-            );
-            assert!(app.pending_document_discard_action.is_none());
-            assert!(!app.ui.protection_blocked);
-
-            app.ui.tabs[0].input_content.clear();
-            app.unlock_application();
-            assert_eq!(
-                app.ui.active_modal,
-                Some(crate::ui::Modal::DiscardSecurityDrafts)
-            );
-            app.confirm_pending_document_discard()
-                .expect("explicit discard");
-            assert!(app.ui.tabs[0].input_history_draft.is_none());
-            assert!(app.ui.protection_blocked);
-        });
-    }
-
-    #[test]
-    fn security_transitions_require_consent_before_closing_a_real_terminal() {
-        crate::app::tests::with_test_app("security-terminal-consent", |app| {
-            crate::protection::configure(
-                crate::protection::ProtectionPolicy {
-                    app_password: true,
-                    ..Default::default()
-                },
-                "terminal-consent-password",
-            )
-            .expect("initialize unlocked protection");
-            let runtime = tokio::runtime::Runtime::new().expect("runtime");
-            let terminal = runtime
-                .block_on(
-                    crate::ui::modals::terminal_editor::TerminalEditorState::new_shell(
-                        Some("/bin/sh"),
-                        &std::env::temp_dir(),
-                        ratatui::layout::Rect::new(0, 0, 80, 24),
-                    ),
-                )
-                .expect("real shell PTY");
-            let id = app
-                .ui
-                .terminals
-                .insert(crate::ui::terminal_workspace::TerminalSession {
-                    terminal,
-                    cwd: std::env::temp_dir(),
-                    host: "localhost".into(),
-                });
-            for restart in [
-                crate::protection::ui::SecurityRestart::Configure,
-                crate::protection::ui::SecurityRestart::Unlock,
-                crate::protection::ui::SecurityRestart::Lock,
-                crate::protection::ui::SecurityRestart::InitializePassword,
-            ] {
-                app.request_security_restart(restart);
-                assert_eq!(
-                    app.ui.active_modal,
-                    Some(crate::ui::Modal::DiscardSecurityDrafts)
-                );
-                assert!(app.security_restart.is_none());
-                let cancel = app.handle_key(key(KeyCode::Esc)).expect("cancel action");
-                runtime.block_on(app.dispatch(cancel)).expect("cancel");
-                assert!(app.security_restart.is_none());
-                assert!(app.pending_document_discard_action.is_none());
-                assert!(!app.ui.protection_blocked);
-                assert!(crate::protection::is_unlocked().expect("key remains unlocked"));
-                assert!(!app
-                    .ui
-                    .terminals
-                    .sessions
-                    .get_mut(&id)
-                    .expect("same session")
-                    .terminal
-                    .poll_output());
-            }
-            app.unlock_application();
-            let confirm = app
-                .handle_key(key(KeyCode::Char('y')))
-                .expect("confirm action");
-            runtime.block_on(app.dispatch(confirm)).expect("confirm");
-            assert_eq!(
-                app.security_restart,
-                Some(crate::protection::ui::SecurityRestart::Unlock)
-            );
-            assert!(app.ui.terminals.has_running());
-            runtime
-                .block_on(app.quiesce_for_security_restart())
-                .expect("teardown");
-            assert!(app.ui.terminals.sessions[&id].terminal.is_done());
-        });
-    }
-
-    #[test]
-    fn security_transition_includes_unfocused_temporary_drafts() {
-        crate::app::tests::with_test_app("security-ephemeral-discard", |app| {
-            app.open_ephemeral().expect("temporary chat");
-            app.replace_input_content("temporary unsent draft".into());
-            let index = app.ui.active_tab;
-            app.focus_chat_pane(0);
-            app.lock_application().expect("lock request");
-            assert_eq!(
-                app.ui.active_modal,
-                Some(crate::ui::Modal::DiscardSecurityDrafts)
-            );
-            assert!(app.security_restart.is_none());
-            let runtime = tokio::runtime::Runtime::new().expect("runtime");
-            runtime
-                .block_on(app.dispatch(Action::CancelModal))
-                .expect("cancel");
-            assert_eq!(app.ui.tabs[index].input_content, "temporary unsent draft");
-            assert!(app.ui.ephemeral.is_some());
-        });
-    }
-
-    #[test]
-    fn protected_chat_editor_requires_plaintext_export_consent_before_creating_a_file() {
-        crate::app::tests::with_test_app("security-chat-editor-consent", |app| {
-            crate::protection::configure(
-                crate::protection::ProtectionPolicy {
-                    chats: true,
-                    ..Default::default()
-                },
-                "editor-test-password",
-            )
-            .expect("protect chats");
-            app.replace_input_content("protected draft canary".into());
-            app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
-            assert!(app.ui.editor_popup.is_none());
-            assert_eq!(app.ui.active_modal, Some(crate::ui::Modal::ExportChatDraft));
-            let cancel = app.handle_key(key(KeyCode::Esc)).expect("cancel export");
-            let runtime = tokio::runtime::Runtime::new().expect("runtime");
-            runtime.block_on(app.dispatch(cancel)).expect("cancel");
-            assert!(app.ui.editor_popup.is_none());
-            assert_eq!(app.ui.tabs[0].input_content, "protected draft canary");
-        });
-    }
-
-    #[test]
-    fn slash_controls_parse_tokens_and_never_become_model_messages() {
-        crate::app::tests::with_test_app("request-slash-controls", |app| {
-            for (input, command) in [
-                (" /fork ", "fork"),
-                ("/cancel", "cancel"),
-                ("/steer", "steer"),
-                ("/steer \t change direction\nnow ", "steer"),
-            ] {
-                app.replace_input_content(input.into());
-                let action = app.handle_key(key(KeyCode::Enter));
-                match (command, action) {
-                    ("fork", Some(Action::ForkConversation))
-                    | ("cancel", Some(Action::CancelRequest)) => {
-                        assert!(app.ui.tabs[0].input_content.is_empty());
-                    }
-                    ("steer", Some(Action::SteerRequest(instruction))) => {
-                        let expected = input.trim().strip_prefix("/steer").unwrap().trim();
-                        assert_eq!(instruction, expected);
-                        assert_eq!(app.ui.tabs[0].input_content, input);
-                    }
-                    (_, action) => panic!("Unexpected control action: {action:?}"),
-                }
-            }
-            assert!(app.ui.tabs[0].messages.is_empty());
-        });
-    }
-
-    #[test]
-    fn slash_skill_submits_with_one_enter_despite_an_empty_completion_popup() {
-        crate::app::tests::with_test_app("slash-skill-submit", |app| {
-            let input = "/skill recall what is this machine for?";
-            app.replace_input_content(input.to_owned());
-            assert!(matches!(
-                app.handle_key(key(KeyCode::Enter)),
-                Some(Action::SendMessage(content)) if content == input
-            ));
-            assert!(app.ui.tabs[0].input_content.is_empty());
-        });
-    }
-
-    #[test]
-    fn slash_control_prefixes_do_not_match_other_commands() {
-        crate::app::tests::with_test_app("request-slash-boundaries", |app| {
-            for input in ["/forked", "/cancelled", "/steering", "hello /cancel"] {
-                app.ui.tabs[0].input_content = input.into();
-                assert!(matches!(
-                    app.handle_key(key(KeyCode::Enter)),
-                    Some(Action::SendMessage(content)) if content == input
-                ));
-            }
-        });
-    }
-
-    #[test]
-    fn non_escape_key_clears_cancel_chord() {
-        crate::app::tests::with_test_app("request-chord-non-escape", |app| {
-            arm_escape(app);
-            app.handle_key(key(KeyCode::Char('x')));
-            assert!(app.cancel_escape.is_none());
-            assert_eq!(app.ui.tabs[0].input_content, "x");
-        });
-    }
-
-    #[test]
-    fn modal_escape_dismisses_without_arming_or_cancelling() {
-        crate::app::tests::with_test_app("request-chord-modal", |app| {
-            arm_escape(app);
-            app.ui.active_modal = Some(crate::ui::Modal::QuitConfirm);
-            assert!(matches!(
-                app.handle_key(key(KeyCode::Esc)),
-                Some(Action::CancelModal)
-            ));
-            assert!(app.ui.active_modal.is_none());
-            assert!(app.cancel_escape.is_none());
-        });
-    }
-
-    #[test]
-    fn keybind_overlay_escape_keeps_overlay_priority() {
-        crate::app::tests::with_test_app("request-chord-keybinds", |app| {
-            arm_escape(app);
-            app.ui.show_keybinds = true;
-            assert!(matches!(
-                app.handle_key(key(KeyCode::Esc)),
-                Some(Action::DismissKeybinds)
-            ));
-            assert!(app.cancel_escape.is_none());
-        });
-    }
-
-    #[test]
-    fn list_popup_escape_keeps_overlay_priority() {
-        crate::app::tests::with_test_app("request-chord-list-popup", |app| {
-            arm_escape(app);
-            app.ui.list_popup = Some(crate::ui::modals::list_popup::ListPopup::new(
-                "Items",
-                "Empty",
-                Vec::new(),
-            ));
-            assert!(matches!(
-                app.handle_key(key(KeyCode::Esc)),
-                Some(Action::CloseListPopup)
-            ));
-            assert!(app.cancel_escape.is_none());
-        });
-    }
-
-    #[test]
-    fn terminal_confirmation_escape_dismisses_without_arming() {
-        crate::app::tests::with_test_app("request-chord-terminal", |app| {
-            arm_escape(app);
-            app.ui.terminals.close_pending = Some(42);
-            assert!(app.handle_key(key(KeyCode::Esc)).is_none());
-            assert!(app.ui.terminals.close_pending.is_none());
-            assert!(app.cancel_escape.is_none());
-        });
-    }
-
-    #[test]
-    fn session_overlay_escape_closes_without_arming() {
-        crate::app::tests::with_test_app("request-chord-sessions", |app| {
-            arm_escape(app);
-            app.ui.show_session_list = true;
-            assert!(matches!(
-                app.handle_key(key(KeyCode::Esc)),
-                Some(Action::ToggleSessionList)
-            ));
-            assert!(app.cancel_escape.is_none());
-        });
-    }
-
-    #[test]
-    fn escape_in_a_different_view_clears_chord() {
-        crate::app::tests::with_test_app("request-chord-view", |app| {
-            arm_escape(app);
-            app.ui
-                .app_tabs
-                .open_view(crate::ui::app_tabs::AppView::Settings);
-            assert!(!matches!(
-                app.handle_key(key(KeyCode::Esc)),
-                Some(Action::CancelRequest)
-            ));
-            assert!(app.cancel_escape.is_none());
-        });
-    }
-
-    #[test]
-    fn double_escape_targets_displayed_request_and_consumes_chord() {
-        crate::app::tests::with_test_app("request-double-escape", |app| {
-            let id = register_request(app);
-            assert!(app.handle_key(key(KeyCode::Esc)).is_none());
-            assert_eq!(app.cancel_escape.map(|(armed, _)| armed), Some(id));
-            assert!(matches!(
-                app.handle_key(key(KeyCode::Esc)),
-                Some(Action::CancelRequest)
-            ));
-            assert!(app.cancel_escape.is_none());
-        });
-    }
-
-    #[test]
-    fn busy_send_keeps_composer_cursor_history_and_documents() {
-        crate::app::tests::with_test_app("request-busy-draft", |app| {
-            register_request(app);
-            app.pending_documents_mut()
-                .insert(
-                    crate::app::submission::PendingDocument::snapshot(
-                        "source",
-                        "draft.md",
-                        b"queued document",
-                    )
-                    .expect("snapshot document"),
-                )
-                .expect("queue document");
-            for draft in ["draft question", "/unknown-command", "/web invalid"] {
-                app.ui.tabs[0].input_content = draft.into();
-                app.ui.tabs[0].input_cursor = 4;
-                app.ui.tabs[0].input_scroll = 2;
-                app.ui.tabs[0].input_history_index = Some(0);
-                app.ui.tabs[0].input_history_draft = Some("older draft".into());
-                assert!(app.handle_key(key(KeyCode::Enter)).is_none());
-                assert_eq!(app.ui.tabs[0].input_content, draft);
-                assert_eq!(app.ui.tabs[0].input_cursor, 4);
-                assert_eq!(app.ui.tabs[0].input_scroll, 2);
-                assert_eq!(app.ui.tabs[0].input_history_index, Some(0));
-                assert_eq!(
-                    app.ui.tabs[0].input_history_draft.as_deref(),
-                    Some("older draft")
-                );
-                assert_eq!(app.pending_documents_mut().len(), 1);
-            }
-        });
-    }
-
-    #[test]
-    fn switching_conversation_disarms_escape_without_cancelling_background_request() {
-        crate::app::tests::with_test_app("request-chord-conversation", |app| {
-            let id = register_request(app);
-            let original = app.ui.tabs[0].active_conversation;
-            app.handle_key(key(KeyCode::Esc));
-            let other = app
-                .storage
-                .create_conversation(0)
-                .expect("create other conversation");
-            app.load_conversation_into_tab(0, other)
-                .expect("switch conversation");
-            assert!(app.cancel_escape.is_none());
-            assert!(app.handle_key(key(KeyCode::Esc)).is_none());
-            assert!(!app.requests.get(&id).expect("background request").cancelled);
-            app.load_conversation_into_tab(0, original)
-                .expect("return to conversation");
-            assert!(app.handle_key(key(KeyCode::Esc)).is_none());
-            assert_eq!(app.cancel_escape.map(|(armed, _)| armed), Some(id));
-        });
-    }
-
-    #[test]
-    fn focused_terminal_escape_is_not_a_chat_cancel_chord() {
-        crate::app::tests::with_test_app("request-chord-focused-terminal", |app| {
-            arm_escape(app);
-            let (terminal, _probe) =
-                crate::ui::modals::terminal_editor::terminal_editor_test_support::live_editor();
-            let id = app
-                .ui
-                .terminals
-                .insert(crate::ui::terminal_workspace::TerminalSession {
-                    terminal,
-                    cwd: std::path::PathBuf::from("/tmp"),
-                    host: "test-host".into(),
-                });
-            app.ui.terminals.split_session = Some(id);
-            app.ui.terminals.focused = true;
-            assert!(app.handle_key(key(KeyCode::Esc)).is_none());
-            assert!(app.handle_key(key(KeyCode::Esc)).is_none());
-            assert!(app.cancel_escape.is_none());
-            assert!(app.ui.tabs[0].streaming);
-        });
     }
 }

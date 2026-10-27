@@ -79,7 +79,6 @@ mod tests {
             title: title.to_string(),
             similarity,
             excerpt: excerpt.to_string(),
-            metadata: None,
         }
     }
 }

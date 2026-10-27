@@ -3,7 +3,7 @@
     reason = "Resolver fixtures isolate process-global HOME and XDG paths across async refreshes."
 )]
 
-use super::{CredentialError, CredentialRequest};
+use super::{resolve_provider_credential, CredentialError, CredentialRequest, CredentialSource};
 use chrono::{Duration, Utc};
 use secrecy::ExposeSecret;
 use std::ffi::OsString;
@@ -21,8 +21,6 @@ pub(super) struct NativeTestEnvironment {
     root: PathBuf,
     original_home: Option<OsString>,
     original_data_home: Option<OsString>,
-    original_config_home: Option<OsString>,
-    original_cache_home: Option<OsString>,
 }
 
 impl NativeTestEnvironment {
@@ -35,20 +33,12 @@ impl NativeTestEnvironment {
         std::fs::create_dir_all(&root).expect("create test root");
         let original_home = std::env::var_os("HOME");
         let original_data_home = std::env::var_os("XDG_DATA_HOME");
-        let original_config_home = std::env::var_os("XDG_CONFIG_HOME");
-        let original_cache_home = std::env::var_os("XDG_CACHE_HOME");
         std::env::set_var("HOME", &root);
         std::env::set_var("XDG_DATA_HOME", root.join("data"));
-        std::env::set_var("XDG_CONFIG_HOME", root.join("config"));
-        std::env::set_var("XDG_CACHE_HOME", root.join("cache"));
-        KeyStore::initialize_vault(&AppConfig::default(), "resolver fixture password")
-            .expect("initialize encrypted fixture vault");
         Self {
             root,
             original_home,
             original_data_home,
-            original_config_home,
-            original_cache_home,
         }
     }
 
@@ -62,7 +52,6 @@ impl NativeTestEnvironment {
 
 impl Drop for NativeTestEnvironment {
     fn drop(&mut self) {
-        let _ = crate::protection::lock();
         match self.original_home.take() {
             Some(home) => std::env::set_var("HOME", home),
             None => std::env::remove_var("HOME"),
@@ -71,73 +60,55 @@ impl Drop for NativeTestEnvironment {
             Some(data_home) => std::env::set_var("XDG_DATA_HOME", data_home),
             None => std::env::remove_var("XDG_DATA_HOME"),
         }
-        match self.original_config_home.take() {
-            Some(config_home) => std::env::set_var("XDG_CONFIG_HOME", config_home),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
-        match self.original_cache_home.take() {
-            Some(cache_home) => std::env::set_var("XDG_CACHE_HOME", cache_home),
-            None => std::env::remove_var("XDG_CACHE_HOME"),
-        }
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
 #[tokio::test]
-async fn resolver_uses_only_explicitly_saved_keys() {
-    let _guard = crate::test_support::env_lock().lock().unwrap();
-    let environment = NativeTestEnvironment::new("resolver-explicit-key");
-    let config = environment.config();
-    KeyStore::set(&config, "OpenRouter", "saved-key").unwrap();
-    let credential = super::resolver::resolve_provider_credential_with_config(
-        CredentialRequest::new("OpenRouter", "IGNORED", "https://openrouter.ai/api/v1"),
-        &config,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(credential.bearer_token().expose_secret(), "saved-key");
-}
+async fn resolver_returns_environment_api_key_with_source_metadata() {
+    // Given
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
+    std::env::set_var("TCUI_RESOLVER_TEST_KEY", "environment-key");
 
-#[tokio::test]
-async fn provider_credentials_remain_available_while_configuration_is_locked() {
-    let _guard = crate::test_support::env_lock().lock().unwrap();
-    let environment = NativeTestEnvironment::new("resolver-config-contention");
-    let config = environment.config();
-    config.save().unwrap();
-    KeyStore::set(&config, "OpenRouter", "stored-during-config-lock").unwrap();
-    let lock_path = environment.root.join("config/tcui/.config.lock");
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(lock_path)
-        .unwrap();
-    lock.try_lock().unwrap();
-    assert!(AppConfig::load().is_err());
-    let credential = super::resolve_provider_credential(CredentialRequest::new(
+    // When
+    let credential = resolve_provider_credential(CredentialRequest::new(
         "OpenRouter",
-        "IGNORED",
+        "TCUI_RESOLVER_TEST_KEY",
         "https://openrouter.ai/api/v1",
     ))
     .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(
-        credential.bearer_token().expose_secret(),
-        "stored-during-config-lock"
-    );
+    .expect("resolve environment credential")
+    .expect("credential is present");
+
+    // Then
+    assert_eq!(credential.source(), CredentialSource::Environment);
+    assert_eq!(credential.bearer_token().expose_secret(), "environment-key");
+
+    std::env::remove_var("TCUI_RESOLVER_TEST_KEY");
 }
 
 #[tokio::test]
-async fn resolver_rejects_custom_native_oauth_endpoints() {
-    let result = super::resolve_provider_credential(CredentialRequest::new(
-        "OpenRouter OAuth",
-        "IGNORED",
-        "https://custom.example/v1",
+async fn resolver_rejects_an_untrusted_endpoint_before_reading_an_environment_key() {
+    // Given
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock");
+    std::env::set_var("TCUI_RESOLVER_TEST_KEY", "environment-key");
+
+    // When
+    let result = resolve_provider_credential(CredentialRequest::new(
+        "OpenRouter",
+        "TCUI_RESOLVER_TEST_KEY",
+        "https://untrusted.example/v1",
     ))
     .await;
+
+    // Then
     assert!(matches!(result, Err(CredentialError::UntrustedEndpoint)));
+
+    std::env::remove_var("TCUI_RESOLVER_TEST_KEY");
 }
 
 #[tokio::test]

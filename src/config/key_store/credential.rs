@@ -20,7 +20,6 @@ impl fmt::Debug for Credential {
     }
 }
 
-#[cfg(test)]
 impl Credential {
     pub fn as_api_key(&self) -> &str {
         match self {

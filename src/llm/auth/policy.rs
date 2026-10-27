@@ -1,17 +1,11 @@
 pub(crate) fn canonical_provider_name(name: &str) -> String {
-    match crate::config::key_store::provider_base_name(name)
-        .trim()
-        .to_lowercase()
-        .as_str()
-    {
+    match name.trim().to_lowercase().as_str() {
         "google ai" | "google" | "gemini" => "Gemini".to_string(),
         "openai" => "OpenAI".to_string(),
-        "codex" | "openai codex" | "openai oauth" => "Codex".to_string(),
+        "codex" | "openai codex" => "Codex".to_string(),
         "zen" | "opencode zen" => "OpenCode Zen".to_string(),
         "opencode go" => "OpenCode Go".to_string(),
         "openrouter" => "OpenRouter".to_string(),
-        "openrouter oauth" => "OpenRouter OAuth".to_string(),
-        "anthropic agent sdk" => "Anthropic Agent SDK".to_string(),
         "kilo gateway" => "Kilo Gateway".to_string(),
         "berget.ai" => "Berget.ai".to_string(),
         other => other
@@ -28,19 +22,27 @@ pub(crate) fn canonical_provider_name(name: &str) -> String {
     }
 }
 
+pub(crate) fn is_oauth_provider(name: &str) -> bool {
+    matches!(canonical_provider_name(name).as_str(), "Codex" | "Gemini")
+}
+
 pub(crate) fn trusted_provider_endpoint(name: &str, endpoint: &str) -> bool {
-    match canonical_provider_name(name).as_str() {
-        // OAuth grants are bound to their native service, unlike user-saved API keys.
-        "Codex" => endpoint.trim_end_matches('/') == "https://chatgpt.com/backend-api/codex",
-        "OpenRouter OAuth" => endpoint.trim_end_matches('/') == "https://openrouter.ai/api/v1",
-        "Anthropic Agent SDK" => endpoint.trim_end_matches('/') == "https://api.anthropic.com/v1",
-        _ => reqwest::Url::parse(endpoint).is_ok_and(|url| {
-            matches!(url.scheme(), "http" | "https")
-                && url.host_str().is_some()
-                && url.username().is_empty()
-                && url.password().is_none()
-                && url.query().is_none()
-                && url.fragment().is_none()
-        }),
+    let provider = canonical_provider_name(name);
+    match provider.as_str() {
+        "Codex" => endpoint == "https://chatgpt.com/backend-api/codex",
+        "Gemini" | "Google Ai" => {
+            endpoint.starts_with("https://generativelanguage.googleapis.com/")
+        }
+        "OpenAI" => endpoint == "https://api.openai.com/v1",
+        "Anthropic" => endpoint == "https://api.anthropic.com/v1",
+        "Ollama" => endpoint == "http://localhost:11434/v1",
+        "OpenRouter" => endpoint == "https://openrouter.ai/api/v1",
+        "Kilo Gateway" => endpoint == "https://api.kilo.ai/api/gateway",
+        "Mistral" => endpoint == "https://api.mistral.ai/v1",
+        "Groq" => endpoint == "https://api.groq.com/openai/v1",
+        "Berget.ai" => endpoint == "https://api.berget.ai/v1",
+        "OpenCode Go" => endpoint == "https://opencode.ai/zen/go/v1",
+        "OpenCode Zen" => endpoint == "https://opencode.ai/zen/v1",
+        _ => true,
     }
 }

@@ -5,12 +5,69 @@
 
 use std::os::unix::fs::PermissionsExt;
 
-use super::codex::{logout_external_cli, CodexCliError};
+use super::codex::{login_with_cli, logout_external_cli, CodexCliError};
 use super::codex_test_support::TestEnvironment;
 use crate::llm::auth::oauth::oauth_cancellation;
 
 #[tokio::test]
-async fn nonzero_external_logout_returns_typed_error_without_saving_credentials(
+async fn default_cli_login_invokes_codex_login_and_reads_credential_in_place(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock poisoned");
+    let environment = TestEnvironment::new("codex-cli-login")?;
+    let arguments = install_fake_codex(&environment)?;
+    let (cancellation, _) = oauth_cancellation();
+
+    let credential = login_with_cli(false, &cancellation).await?;
+
+    assert_eq!(std::fs::read_to_string(arguments)?, "login\n");
+    assert_eq!(credential.account_id(), Some("account-from-cli"));
+    assert!(!environment.root.join("data/tcui/keys.toml").exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn headless_cli_login_invokes_codex_login_with_device_auth(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock poisoned");
+    let environment = TestEnvironment::new("codex-cli-device-login")?;
+    let arguments = install_fake_codex(&environment)?;
+    let (cancellation, _) = oauth_cancellation();
+
+    let _credential = login_with_cli(true, &cancellation).await?;
+
+    assert_eq!(
+        std::fs::read_to_string(arguments)?,
+        "login\n--device-auth\n"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn valid_external_auth_is_reused_without_invoking_codex(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .expect("environment lock poisoned");
+    let environment = TestEnvironment::new("codex-cli-reuse")?;
+    let arguments = install_fake_codex(&environment)?;
+    environment.write_external_auth(
+        r#"{"tokens":{"access_token":"external-access","account_id":"external-account"}}"#,
+    )?;
+    let (cancellation, _) = oauth_cancellation();
+
+    let credential = login_with_cli(false, &cancellation).await?;
+
+    assert_eq!(credential.account_id(), Some("external-account"));
+    assert!(!arguments.exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn nonzero_cli_login_returns_typed_error_without_creating_tcui_storage(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
@@ -19,18 +76,15 @@ async fn nonzero_external_logout_returns_typed_error_without_saving_credentials(
     install_failing_codex(&environment, "exit 7")?;
     let (cancellation, _) = oauth_cancellation();
 
-    let error = logout_external_cli(&cancellation).await.unwrap_err();
+    let error = login_with_cli(false, &cancellation).await.unwrap_err();
 
     assert!(matches!(error, CodexCliError::NonzeroExit));
-    assert!(
-        crate::config::KeyStore::get_oauth(&crate::config::AppConfig::default(), "Codex")?
-            .is_none()
-    );
+    assert!(!environment.root.join("data/tcui/keys.toml").exists());
     Ok(())
 }
 
 #[tokio::test]
-async fn cancelled_external_logout_kills_the_child_and_returns_typed_error(
+async fn cancelled_cli_login_kills_the_child_and_returns_typed_error(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
@@ -40,7 +94,7 @@ async fn cancelled_external_logout_kills_the_child_and_returns_typed_error(
     let (cancellation, handle) = oauth_cancellation();
     handle.cancel();
 
-    let error = logout_external_cli(&cancellation).await.unwrap_err();
+    let error = login_with_cli(false, &cancellation).await.unwrap_err();
 
     assert!(matches!(error, CodexCliError::Cancelled));
     Ok(())
@@ -56,7 +110,7 @@ async fn cancelled_codex_process_group_terminates_the_grandchild(
     let environment = TestEnvironment::new("codex-cli-process-group")?;
     let pids = install_grouped_codex(&environment)?;
     let (cancellation, canceller) = oauth_cancellation();
-    let login = tokio::spawn(async move { logout_external_cli(&cancellation).await });
+    let login = tokio::spawn(async move { login_with_cli(false, &cancellation).await });
     let (leader, grandchild) = read_pids(&pids).await?;
     let leader = rustix::process::Pid::from_raw(leader)
         .ok_or_else(|| std::io::Error::other("invalid process-group leader"))?;
@@ -72,7 +126,7 @@ async fn cancelled_codex_process_group_terminates_the_grandchild(
 }
 
 #[tokio::test]
-async fn missing_external_cli_returns_explicit_logout_guidance(
+async fn malformed_external_auth_with_missing_cli_returns_native_fallback_guidance(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = crate::test_support::env_lock()
         .lock()
@@ -84,10 +138,10 @@ async fn missing_external_cli_returns_explicit_logout_guidance(
     std::env::set_var("PATH", empty_path);
     let (cancellation, _) = oauth_cancellation();
 
-    let error = logout_external_cli(&cancellation).await.unwrap_err();
+    let error = login_with_cli(false, &cancellation).await.unwrap_err();
 
     assert!(matches!(error, CodexCliError::MissingCli));
-    assert!(error.to_string().contains("explicitly log out"));
+    assert!(error.to_string().contains("--native"));
     Ok(())
 }
 
@@ -107,6 +161,25 @@ async fn external_logout_delegates_to_codex_and_requires_auth_file_removal(
     assert_eq!(std::fs::read_to_string(arguments)?, "logout\n");
     assert!(!environment.auth_path().exists());
     Ok(())
+}
+
+fn install_fake_codex(environment: &TestEnvironment) -> std::io::Result<std::path::PathBuf> {
+    let bin = environment.root.join("bin");
+    let arguments = environment.root.join("codex-arguments");
+    std::fs::create_dir_all(&bin)?;
+    let executable = bin.join("codex");
+    std::fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\numask 077\nprintf '%s\\n' \"$@\" > {}\nmkdir -p \"$HOME/.codex\"\nprintf '%s' '{{\"tokens\":{{\"access_token\":\"fake-access\",\"account_id\":\"account-from-cli\"}}}}' > \"$HOME/.codex/auth.json\"\n",
+            arguments.display()
+        ),
+    )?;
+    let mut permissions = std::fs::metadata(&executable)?.permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&executable, permissions)?;
+    environment.prepend_path(&bin);
+    Ok(arguments)
 }
 
 fn install_failing_codex(environment: &TestEnvironment, body: &str) -> std::io::Result<()> {

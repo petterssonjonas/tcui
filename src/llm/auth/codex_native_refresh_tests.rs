@@ -50,7 +50,7 @@ async fn native_refresh_rotates_tokens_and_preserves_account_identity(
     )?;
     let (cancellation, _) = oauth_cancellation();
 
-    let credential = adapter.refresh(&config, &cancellation, || true).await?;
+    let credential = adapter.refresh(&config, &cancellation).await?;
     let request = server.await??;
 
     assert!(request.contains("grant_type=refresh_token"));
@@ -60,52 +60,6 @@ async fn native_refresh_rotates_tokens_and_preserves_account_identity(
         .ok_or_else(|| std::io::Error::other("missing rotated credential"))?;
     assert_eq!(stored.access_token, "new-access");
     assert_eq!(stored.refresh_token.as_deref(), Some("new-refresh"));
-    Ok(())
-}
-
-#[tokio::test]
-async fn plaintext_native_refresh_keeps_connection_identity_and_encrypted_sibling_locked(
-) -> Result<(), Box<dyn std::error::Error>> {
-    let _guard = crate::test_support::env_lock()
-        .lock()
-        .expect("environment lock");
-    let _environment = TestEnvironment::new("codex-mixed-refresh")?;
-    let config = AppConfig::default();
-    let mut credential = OAuthCredential {
-        provider: "Codex".into(),
-        access_token: "encrypted-access".into(),
-        refresh_token: Some("old-refresh".into()),
-        expires_at: Utc::now() - Duration::minutes(1),
-        account_id: Some("refresh-account".into()),
-        ownership: OAuthCredentialOwnership::Tcui,
-        source: OAuthCredentialSource::NativeOAuth,
-    };
-    KeyStore::upsert_oauth(&config, &credential)?;
-    credential.provider = "Codex::plaintext".into();
-    credential.access_token = "plaintext-access".into();
-    KeyStore::upsert_oauth(&config, &credential)?;
-    KeyStore::lock_vault(&config)?;
-    let (endpoint, server) = refresh_server().await?;
-    let adapter = CodexNativeAdapter::fixture(
-        "https://authorize.example.test/oauth/authorize",
-        &endpoint,
-        &endpoint,
-        &endpoint,
-    )?
-    .for_connection("Codex::plaintext");
-    let (cancellation, _) = oauth_cancellation();
-    adapter.refresh(&config, &cancellation, || true).await?;
-    server.await??;
-    let refreshed = KeyStore::get_oauth(&config, "Codex::plaintext")?
-        .ok_or_else(|| std::io::Error::other("missing refreshed connection"))?;
-    assert_eq!(refreshed.provider, "Codex::plaintext");
-    assert_eq!(refreshed.access_token, "new-access");
-    assert_eq!(refreshed.refresh_token.as_deref(), Some("new-refresh"));
-    assert!(KeyStore::get_oauth(&config, "Codex").is_err());
-    KeyStore::unlock_vault(&config, "codex fixture password")?;
-    let sibling = KeyStore::get_oauth(&config, "Codex")?
-        .ok_or_else(|| std::io::Error::other("missing encrypted sibling"))?;
-    assert_eq!(sibling.access_token, "encrypted-access");
     Ok(())
 }
 

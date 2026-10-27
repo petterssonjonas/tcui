@@ -96,13 +96,9 @@ impl SharedKey {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn load_from_path(path: &Path) -> Result<Self, StorageCryptoError> {
         Self::read_from_path(path)
-    }
-
-    /// Create a fresh private key file without replacing an existing key.
-    pub(crate) fn create_at(path: &Path) -> Result<Self, StorageCryptoError> {
-        Ok(create_key_file(path)?)
     }
 
     fn read_from_path(path: &Path) -> Result<Self, StorageCryptoError> {
@@ -213,43 +209,25 @@ fn create_key_file(path: &Path) -> io::Result<SharedKey> {
         bytes: rand::random::<[u8; 32]>(),
     };
     let encoded = STANDARD.encode(key.bytes);
-    let mut file = create_private_key_file(path)?;
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(encoded.as_bytes())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(0o400))?;
-    }
     file.sync_all()?;
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .ok_or_else(|| io::Error::other("key path has no parent"))?;
-    sync_parent(parent)?;
+    drop(file);
+    set_unix_mode(path, 0o400)?;
+    sync_parent(path.parent().unwrap_or(Path::new(".")))?;
     Ok(key)
-}
-
-fn create_private_key_file(path: &Path) -> io::Result<std::fs::File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)
 }
 
 fn encrypt_bytes(
     key: &SharedKey,
     plaintext: &[u8],
     aad: &[u8],
-) -> Result<([u8; 12], Vec<u8>), StorageCryptoError> {
-    let nonce = rand::random::<[u8; 12]>();
+) -> Result<(Vec<u8>, Vec<u8>), StorageCryptoError> {
+    let nonce = rand::random::<[u8; 12]>().to_vec();
     let ciphertext = key
         .cipher()?
         .encrypt(
-            (&nonce).into(),
+            nonce.as_slice().into(),
             Payload {
                 msg: plaintext,
                 aad,
@@ -265,9 +243,6 @@ fn decrypt_bytes(
     ciphertext: &[u8],
     aad: &[u8],
 ) -> Result<Vec<u8>, StorageCryptoError> {
-    let nonce: &[u8; 12] = nonce
-        .try_into()
-        .map_err(|_| StorageCryptoError::InvalidEnvelope)?;
     key.cipher()?
         .decrypt(
             nonce.into(),
@@ -384,49 +359,6 @@ mod tests {
     struct LocalCipherDocument {
         title: String,
         body: String,
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn shared_key_file_is_private_before_the_first_secret_byte_and_is_exclusive() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let _guard = env_lock().lock().unwrap();
-
-        let root = unique_temp_dir("shared-key-birth-mode");
-        std::fs::create_dir(&root).expect("test root");
-        let path = root.join("chat.key");
-        let mut file = create_private_key_file(&path).expect("exclusive private creation");
-        let metadata = file.metadata().expect("birth metadata");
-        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
-        assert_eq!(metadata.len(), 0);
-        file.write_all(b"dummy existing key").expect("seed key");
-        assert_eq!(
-            create_private_key_file(&path).unwrap_err().kind(),
-            io::ErrorKind::AlreadyExists
-        );
-        assert_eq!(std::fs::read(&path).unwrap(), b"dummy existing key");
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn decrypts_document_written_before_crypto_upgrade() {
-        // Generated with aes-gcm 0.10.3; do not regenerate with the current cipher.
-        let stored = concat!(
-            "enc:v1:BwcHBwcHBwcHBwcH:",
-            "RN2LzCH4QBPDaD3J7Y7WT1PpA1GyHwJazkOgrX5vY2SbyNR5G7vhjZWvhCqtdYel",
-            "FqDUusNQ84rpz0IJsaRxQinb6Q==",
-        );
-        let document: LocalCipherDocument =
-            decrypt_serialized(&SharedKey { bytes: [42; 32] }, "chat-document", stored)
-                .expect("decrypt existing document");
-        assert_eq!(
-            document,
-            LocalCipherDocument {
-                title: "Migration".into(),
-                body: "Saved before upgrade".into(),
-            }
-        );
     }
 
     fn env_lock() -> &'static std::sync::Mutex<()> {

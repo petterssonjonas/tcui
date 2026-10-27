@@ -2,7 +2,7 @@ use std::fmt;
 
 const SUPPORTED_PROVIDER_IDS: &str = "codex, openrouter";
 
-pub(crate) const CODEX_NATIVE_EXPERIMENTAL_DISCLOSURE: &str = "OpenAI OAuth authorization is independent from the Codex CLI and requires a supported ChatGPT account.";
+pub(crate) const CODEX_NATIVE_EXPERIMENTAL_DISCLOSURE: &str = "Experimental native Codex authorization is independent from the Codex CLI and may change or stop working. Continue only if you explicitly selected --native.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AuthProvider {
@@ -11,6 +11,13 @@ pub(crate) enum AuthProvider {
 }
 
 impl AuthProvider {
+    pub(crate) const fn supports_native_authorization(self) -> bool {
+        match self {
+            Self::Codex => true,
+            Self::OpenRouter => false,
+        }
+    }
+
     pub(crate) const fn manages_external_credentials(self) -> bool {
         match self {
             Self::Codex => true,
@@ -46,7 +53,7 @@ impl fmt::Display for AuthProvider {
 pub(crate) struct AuthLoginRequest {
     pub(crate) provider: AuthProvider,
     pub(crate) headless: bool,
-    pub(crate) open_browser: bool,
+    pub(crate) native: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,7 +78,7 @@ impl AuthCommandRequest {
     pub(crate) fn disclosure(&self) -> Option<&'static str> {
         match self {
             Self::Login(login) => {
-                if login.provider == AuthProvider::Codex {
+                if login.provider == AuthProvider::Codex && login.native {
                     Some(CODEX_NATIVE_EXPERIMENTAL_DISCLOSURE)
                 } else {
                     None
@@ -139,7 +146,7 @@ pub(crate) enum AuthCommandError {
     MissingExternalCli { provider: AuthProvider },
     #[error("A transport failure prevented {provider} authorization.")]
     TransportFailure { provider: AuthProvider },
-    #[error("TCUI could not access the {provider} credential store. Use /vault in the TUI, --vault-password-stdin to unlock encrypted storage, or explicitly choose --plaintext.")]
+    #[error("TCUI could not access the local {provider} credential store.")]
     CredentialStore { provider: AuthProvider },
     #[error("No provider authentication is configured.")]
     NoAuthenticationConfigured,

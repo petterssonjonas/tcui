@@ -7,7 +7,7 @@ use chrono::{Duration, Utc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::codex::{
-    codex_status, read_external_credential, resolve_connection, CodexCredentialSource,
+    codex_status, read_external_credential, resolve_credential, CodexCredentialSource,
     CodexNativeAdapter,
 };
 use super::codex_test_support::TestEnvironment;
@@ -90,7 +90,7 @@ fn tcui_native_credential_has_precedence_without_mutating_external_auth(
         },
     )?;
 
-    let credential = resolve_connection(&config, "Codex")?
+    let credential = resolve_credential(&config)?
         .ok_or_else(|| std::io::Error::other("missing preferred credential"))?;
 
     assert_eq!(credential.source(), CodexCredentialSource::TcuiNative);
@@ -132,7 +132,7 @@ async fn native_status_is_redacted_and_ordinary_logout_preserves_external_auth(
         },
     )?;
 
-    let status = codex_status(&config, "Codex")?;
+    let status = codex_status(&config)?;
     let (endpoint, server) = revoke_server().await?;
     let (cancellation, _) = crate::llm::auth::oauth::oauth_cancellation();
     let removed = CodexNativeAdapter::fixture_with_revocation(

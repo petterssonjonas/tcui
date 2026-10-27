@@ -15,12 +15,6 @@ const AUTH_EXIT_CODE_SUMMARY: &str = "Exit codes: 0 success; 10 unauthenticated;
 pub(crate) struct AuthCommandArgs {
     #[command(subcommand)]
     operation: AuthOperationArgs,
-    /// Explicitly store credentials unencrypted in the application SQLite database.
-    #[arg(long, global = true, conflicts_with = "vault_password_stdin")]
-    pub(crate) plaintext: bool,
-    /// Read one password line from piped stdin to initialize or unlock the encrypted vault.
-    #[arg(long, global = true)]
-    pub(crate) vault_password_stdin: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -34,12 +28,10 @@ enum AuthOperationArgs {
 #[command(after_help = "Supported providers: codex, openrouter.")]
 struct AuthLoginArgs {
     provider: String,
-    /// Use device-code authorization for Codex, or manual-only authorization for OpenRouter.
     #[arg(long)]
     headless: bool,
-    /// Explicitly open the authorization URL on this machine (never needed over SSH).
-    #[arg(long, conflicts_with = "headless")]
-    open_browser: bool,
+    #[arg(long)]
+    native: bool,
 }
 
 #[derive(Debug, Args)]
@@ -56,20 +48,6 @@ struct AuthStatusArgs {
     provider: Option<String>,
 }
 
-impl AuthCommandArgs {
-    pub(crate) fn uses_tcui_store(&self) -> bool {
-        !matches!(
-            &self.operation,
-            AuthOperationArgs::Logout(logout)
-                if logout.external
-                    && matches!(
-                        AuthProvider::try_from(logout.provider.as_str()),
-                        Ok(AuthProvider::Codex)
-                    )
-        )
-    }
-}
-
 impl TryFrom<AuthCommandArgs> for AuthCommandRequest {
     type Error = AuthCommandError;
 
@@ -77,10 +55,16 @@ impl TryFrom<AuthCommandArgs> for AuthCommandRequest {
         match arguments.operation {
             AuthOperationArgs::Login(login) => {
                 let provider = AuthProvider::try_from(login.provider.as_str())?;
+                if login.native && !provider.supports_native_authorization() {
+                    return Err(AuthCommandError::UnsupportedOption {
+                        provider,
+                        option: "--native",
+                    });
+                }
                 Ok(Self::Login(AuthLoginRequest {
                     provider,
                     headless: login.headless,
-                    open_browser: login.open_browser,
+                    native: login.native,
                 }))
             }
             AuthOperationArgs::Logout(logout) => {

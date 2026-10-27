@@ -1,5 +1,4 @@
 use std::fmt;
-use std::future::Future;
 
 use reqwest::Url;
 
@@ -84,15 +83,11 @@ impl OpenRouterLoopbackAuthorization {
         Ok(open_authorization_url(browser, self.authorization_url())?)
     }
 
-    pub(crate) async fn receive_code_with_redirect(
+    pub(crate) async fn receive_code(
         self,
         cancellation: &OAuthCancellation,
-        input: impl Future<Output = Result<zeroize::Zeroizing<String>, super::super::oauth::OAuthError>>,
     ) -> Result<OpenRouterCodeGrant, OpenRouterError> {
-        let code = self
-            .callback
-            .receive_with_redirect(cancellation, input)
-            .await?;
+        let code = self.callback.receive(cancellation).await?;
         Ok(self.authorization.into_grant(code))
     }
 }

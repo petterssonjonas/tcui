@@ -5,27 +5,11 @@ use crate::app::Message;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum MemoryActivity {
     Recalling,
-    Recalled {
-        titles: Vec<String>,
-    },
+    Recalled { titles: Vec<String> },
     Saving,
-    Saved {
-        title: String,
-        path: String,
-    },
-    AlreadyKnown {
-        title: String,
-    },
-    Failed {
-        message: String,
-    },
-    AwaitingInput {
-        instruction: String,
-        read_only: bool,
-    },
-    Removed {
-        path: String,
-    },
+    Saved { title: String, path: String },
+    AlreadyKnown { title: String },
+    Failed { message: String },
 }
 
 pub(crate) fn activities(message: &Message) -> Vec<MemoryActivity> {

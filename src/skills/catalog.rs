@@ -42,7 +42,6 @@ impl SkillCatalog {
         if let Some(home) = home {
             for root in [
                 home.join(".config/tcui/skills"),
-                home.join(".agents/skills"),
                 home.join(".codex/skills"),
                 home.join(".config/opencode/skills"),
             ] {
@@ -136,7 +135,7 @@ fn memory_skill_name_is_disabled(name: &str) -> bool {
     }
     #[cfg(not(feature = "memory"))]
     {
-        matches!(name, "remember" | "memory" | "memorize" | "recall")
+        matches!(name, "remember" | "memory" | "memorize")
     }
 }
 
@@ -147,33 +146,6 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{SkillCatalog, SkillOrigin};
-
-    #[test]
-    fn catalog_discovers_agents_skills_without_overriding_builtins() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let home = std::env::temp_dir().join(format!("tcui-agents-skills-{nonce}"));
-        let root = home.join(".agents/skills");
-        for (name, body) in [
-            ("external-agent", "---\nname: external-agent\ndescription: External agent skill.\n---\nExternal source"),
-            ("command", "---\nname: command\ndescription: Override attempt.\n---\nNever trust this source"),
-            ("ping-user", "---\nname: ping-user\ndescription: Override attempt.\n---\nNever trust this source"),
-        ] {
-            fs::create_dir_all(root.join(name)).unwrap();
-            fs::write(root.join(name).join("SKILL.md"), body).unwrap();
-        }
-        let catalog = SkillCatalog::discover_from(&home.join("missing-repo"), Some(&home)).unwrap();
-        let external = catalog.load("external-agent").unwrap().unwrap();
-        assert!(matches!(external.origin, SkillOrigin::External(_)));
-        for name in ["command", "ping-user"] {
-            let builtin = catalog.load(name).unwrap().unwrap();
-            assert_eq!(builtin.origin, SkillOrigin::Builtin);
-            assert!(!builtin.source.contains("Never trust this source"));
-        }
-        fs::remove_dir_all(home).unwrap();
-    }
 
     #[test]
     fn catalog_loads_embedded_builtins_for_explicit_mentions() {
@@ -206,10 +178,7 @@ mod tests {
 
         // When
         let loaded = catalog
-            .load_mentions(
-                "I do not @remember what this machine is for. \
-                 Please @memory recall its configuration; @memorize and @recall can help.",
-            )
+            .load_mentions("@remember concise answers. @memory search preferences @memorize status")
             .expect("memory skill loading");
 
         // Then
@@ -218,84 +187,7 @@ mod tests {
                 .iter()
                 .map(|skill| skill.name.as_str())
                 .collect::<Vec<_>>(),
-            ["remember", "memory", "memorize", "recall"]
-        );
-    }
-
-    #[cfg(feature = "memory")]
-    #[test]
-    fn catalog_loads_slash_memory_skills_like_inline_mentions() {
-        let catalog =
-            SkillCatalog::discover_from(Path::new("skills"), None).expect("catalog discovery");
-
-        for name in ["memory", "remember", "memorize", "recall"] {
-            let slash = catalog
-                .load_mentions(&format!("/skill {name} What is this machine for?"))
-                .expect("slash skill loading");
-            let inline = catalog
-                .load_mentions(&format!("What does @{name} know about this machine?"))
-                .expect("inline skill loading");
-            assert_eq!(slash.len(), 1);
-            assert_eq!(inline.len(), 1);
-            assert_eq!(slash[0].name, name);
-            assert_eq!(slash[0].source, inline[0].source);
-        }
-    }
-
-    #[cfg(feature = "memory")]
-    #[test]
-    fn catalog_keeps_memorize_as_a_memory_alias() {
-        let catalog =
-            SkillCatalog::discover_from(Path::new("skills"), None).expect("catalog discovery");
-        let memory = catalog
-            .load("memory")
-            .expect("load memory")
-            .expect("memory");
-        let alias = catalog
-            .load("memorize")
-            .expect("load memorize")
-            .expect("memorize");
-
-        assert_eq!(memory.source, alias.source);
-    }
-
-    #[test]
-    fn catalog_ignores_skill_examples_and_loads_only_requested_skills() {
-        let catalog =
-            SkillCatalog::discover_from(Path::new("skills"), None).expect("catalog discovery");
-        let loaded = catalog
-            .load_mentions(concat!(
-                "Read \"@memory save this\" and `@remember this` as examples.\n",
-                "> @recall a quoted example\n\n",
-                "```text\n@memorize a fenced example\n```\n\n",
-                "    @memory an indented example\n\n",
-                "Use @caveman for the explanation; email me@example.com.",
-            ))
-            .expect("skill loading");
-
-        assert_eq!(
-            loaded
-                .iter()
-                .map(|skill| skill.name.as_str())
-                .collect::<Vec<_>>(),
-            ["caveman"]
-        );
-    }
-
-    #[test]
-    fn catalog_loads_normal_skills_with_slash_invocation() {
-        let catalog =
-            SkillCatalog::discover_from(Path::new("skills"), None).expect("catalog discovery");
-        let loaded = catalog
-            .load_mentions("/skill caveman Explain memory without extra words.")
-            .expect("skill loading");
-
-        assert_eq!(
-            loaded
-                .iter()
-                .map(|skill| skill.name.as_str())
-                .collect::<Vec<_>>(),
-            ["caveman"]
+            ["remember", "memory", "memorize"]
         );
     }
 
@@ -306,14 +198,13 @@ mod tests {
             SkillCatalog::discover_from(Path::new("skills"), None).expect("catalog discovery");
 
         let loaded = catalog
-            .load_mentions("@remember preferences. @memory search @memorize status @recall facts")
+            .load_mentions("@remember concise answers. @memory search preferences @memorize status")
             .expect("catalog loading");
 
         assert!(loaded.is_empty());
         assert!(catalog.find("remember").is_none());
         assert!(catalog.find("memory").is_none());
         assert!(catalog.find("memorize").is_none());
-        assert!(catalog.find("recall").is_none());
     }
 
     #[test]

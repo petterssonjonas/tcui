@@ -1,16 +1,9 @@
 #![allow(dead_code)]
 use color_eyre::Result;
 use serde::{Deserialize, Deserializer, Serialize};
-#[cfg(test)]
 use std::path::PathBuf;
 
 use crate::config::{McpServerConfig, WebSearchConfig};
-
-pub(crate) mod persistence;
-
-pub(crate) use persistence::atomic_replace_in as replace_private_file;
-#[cfg(test)]
-pub(crate) use persistence::{inject_failure as inject_private_file_failure, TestFailurePoint};
 
 pub const LOCAL_PROVIDER_NAME: &str = "Local Inference";
 
@@ -220,42 +213,20 @@ pub struct LocalInferenceConfig {
     pub api_token_env: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CommandConfig {
-    pub whitelist: Vec<String>,
-    pub blacklist: Vec<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct PushoverConfig {
+pub struct NtfyConfig {
     pub enabled: bool,
-    pub application: String,
-    pub use_vault: bool,
-    /// Storage for new or explicitly replaced Pushover keys only.
-    pub encrypt_credentials: bool,
-    pub env_file: Option<String>,
-}
-
-impl Default for PushoverConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            application: "tcui".to_owned(),
-            use_vault: false,
-            encrypt_credentials: true,
-            env_file: None,
-        }
-    }
+    pub host: String,
+    pub port: u16,
+    pub topic: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NotificationConfig {
-    /// Allow automatic delivery through Herdr, a supported terminal, or local DBus.
     pub desktop: bool,
-    pub pushover: PushoverConfig,
+    pub ntfy: NtfyConfig,
 }
 
 impl LocalInferenceConfig {
@@ -290,18 +261,14 @@ pub struct AppConfig {
     #[serde(default, alias = "kitty_text_max_scale")]
     pub kitty_heading_downscale: HeadingDownscale,
     pub quit_confirmation: bool,
+    pub use_env_keys: bool,
     pub disabled_providers: Vec<String>,
     pub disabled_models: Vec<String>,
     pub key_file: Option<String>,
     pub image_protocol: String,
-    /// Legacy Saved directory used only by the one-time, source-preserving migration.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub saved_files_dir: Option<String>,
-    pub show_memories: bool,
-    #[serde(alias = "show_markdown_vault")]
-    pub show_vault: bool,
+    pub vault_path: Option<String>,
+    pub artifact_save_dir: Option<String>,
     pub notifications: NotificationConfig,
-    pub commands: CommandConfig,
     pub local_inference: LocalInferenceConfig,
     pub web_search: WebSearchConfig,
     #[serde(default, deserialize_with = "crate::config::tui::deserialize_tui")]
@@ -337,11 +304,35 @@ pub struct ProviderConfig {
 
 impl AppConfig {
     pub fn load() -> Result<Self> {
-        persistence::load()
+        if let Some(path) = Self::xdg_config_path()?.filter(|path| path.exists()) {
+            let content = std::fs::read_to_string(&path)?;
+            let config = Self::load_toml(&path)?;
+            Self::rewrite_if_migrated(&path, &content, &config)?;
+            Self::bootstrap_xdg_layout(&config)?;
+            return Ok(config);
+        }
+        if let Some(path) = Self::legacy_json_path()?.filter(|path| path.exists()) {
+            let content = std::fs::read_to_string(&path)?;
+            let config: AppConfig = serde_json::from_str(&content)?;
+            config.save()?;
+            Self::bootstrap_xdg_layout(&config)?;
+            return Ok(config);
+        }
+        let config = Self::default();
+        Self::bootstrap_xdg_layout(&config)?;
+        Ok(config)
     }
 
     pub fn save(&self) -> Result<()> {
-        persistence::save(self)
+        let config_path = Self::write_path()?;
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        } else {
+            return Ok(());
+        }
+        let content = toml::to_string_pretty(self)?;
+        std::fs::write(config_path, content)?;
+        Ok(())
     }
 
     pub fn provider_entries(&self) -> Vec<(String, String, String, String, String)> {
@@ -364,6 +355,64 @@ impl AppConfig {
             provider.name == provider_name || provider.name.eq_ignore_ascii_case(provider_name)
         })
     }
+
+    fn load_toml(path: &PathBuf) -> Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        Ok(toml::from_str(&content)?)
+    }
+
+    fn write_path() -> Result<PathBuf> {
+        Ok(Self::xdg_config_path()?.unwrap_or_else(|| PathBuf::from(".").join("config.toml")))
+    }
+
+    fn xdg_config_path() -> Result<Option<PathBuf>> {
+        let dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+        Ok(Some(dir.join("tcui").join("config.toml")))
+    }
+
+    fn legacy_json_path() -> Result<Option<PathBuf>> {
+        let dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+        Ok(Some(dir.join("tcui").join("config.json")))
+    }
+
+    fn xdg_config_root() -> PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("tcui")
+    }
+
+    fn xdg_data_root() -> PathBuf {
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("tcui")
+    }
+
+    fn bootstrap_xdg_layout(config: &Self) -> Result<()> {
+        let config_root = Self::xdg_config_root();
+        std::fs::create_dir_all(&config_root)?;
+        for dir in ["skills", "souls", "themes", "mcp"] {
+            std::fs::create_dir_all(config_root.join(dir))?;
+        }
+
+        if let Some(config_path) = Self::xdg_config_path()? {
+            if !config_path.exists() {
+                std::fs::write(&config_path, toml::to_string_pretty(config)?)?;
+            }
+        }
+
+        std::fs::create_dir_all(Self::xdg_data_root())?;
+        crate::config::key_store::KeyStore::save_keys(config, &[])?;
+        Ok(())
+    }
+
+    fn rewrite_if_migrated(path: &PathBuf, original: &str, config: &Self) -> Result<()> {
+        let original_value: toml::Value = toml::from_str(original)?;
+        let rewritten_value: toml::Value = toml::from_str(&toml::to_string_pretty(config)?)?;
+        if original_value != rewritten_value {
+            std::fs::write(path, toml::to_string_pretty(config)?)?;
+        }
+        Ok(())
+    }
 }
 
 impl Default for AppConfig {
@@ -382,21 +431,20 @@ impl Default for AppConfig {
             kitty_enhanced_text: false,
             kitty_heading_downscale: HeadingDownscale::None,
             quit_confirmation: true,
+            use_env_keys: false,
             disabled_providers: Vec::new(),
             disabled_models: Vec::new(),
             key_file: None,
             image_protocol: "auto".to_string(),
-            saved_files_dir: None,
-            show_memories: true,
-            show_vault: true,
+            vault_path: None,
+            artifact_save_dir: Some(default_artifact_save_dir()),
             notifications: NotificationConfig::default(),
-            commands: CommandConfig::default(),
             local_inference: LocalInferenceConfig::default(),
             web_search: WebSearchConfig::default(),
             tui: crate::config::tui::TuiConfig::default(),
             #[cfg(feature = "memory")]
             memory: crate::memory::MemoryConfig::default(),
-            providers: Vec::new(),
+            providers: default_providers(),
             mcp_servers: default_mcp_servers(),
             tab_configs: vec![TabConfig {
                 name: "Local".to_string(),
@@ -429,11 +477,31 @@ impl Default for LocalInferenceConfig {
     }
 }
 
+pub(crate) fn default_artifact_save_dir() -> String {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("tcui")
+        .join("artifacts")
+        .display()
+        .to_string()
+}
+
+impl Default for NtfyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: String::new(),
+            port: 80,
+            topic: "tcui".to_string(),
+        }
+    }
+}
+
 impl Default for NotificationConfig {
     fn default() -> Self {
         Self {
             desktop: true,
-            pushover: PushoverConfig::default(),
+            ntfy: NtfyConfig::default(),
         }
     }
 }
@@ -464,7 +532,7 @@ impl Default for ProviderConfig {
     }
 }
 
-pub fn provider_presets() -> Vec<ProviderConfig> {
+fn default_providers() -> Vec<ProviderConfig> {
     [
         (
             "OpenAI",
@@ -492,20 +560,6 @@ pub fn provider_presets() -> Vec<ProviderConfig> {
             "https://openrouter.ai/api/v1",
             "OPENROUTER_API_KEY",
             "openrouter",
-            "api_key",
-        ),
-        (
-            "OpenRouter OAuth",
-            "https://openrouter.ai/api/v1",
-            "",
-            "openrouter",
-            "oauth",
-        ),
-        (
-            "Anthropic Agent SDK",
-            "https://api.anthropic.com/v1",
-            "",
-            "anthropic_sdk",
             "api_key",
         ),
         (
@@ -551,6 +605,13 @@ pub fn provider_presets() -> Vec<ProviderConfig> {
             "api_key",
         ),
         (
+            "Gemini",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            "GEMINI_API_KEY",
+            "gemini",
+            "oauth",
+        ),
+        (
             "Codex",
             "https://chatgpt.com/backend-api/codex",
             "CODEX_API_KEY",
@@ -572,10 +633,30 @@ pub fn provider_presets() -> Vec<ProviderConfig> {
 }
 
 fn default_mcp_servers() -> Vec<McpServerConfig> {
-    crate::mcp::profiles()
-        .iter()
-        .map(|profile| profile.config(false))
-        .collect()
+    vec![
+        McpServerConfig {
+            name: "Exa".to_string(),
+            transport: "streamable_http".to_string(),
+            url: Some("https://mcp.exa.ai/mcp".to_string()),
+            enabled: false,
+            ..McpServerConfig::default()
+        },
+        McpServerConfig {
+            name: "Tavily".to_string(),
+            transport: "streamable_http".to_string(),
+            url: Some("https://mcp.tavily.com/mcp/".to_string()),
+            enabled: false,
+            ..McpServerConfig::default()
+        },
+        McpServerConfig {
+            name: "Firecrawl".to_string(),
+            transport: "stdio".to_string(),
+            command: Some("npx".to_string()),
+            args: Some(vec!["-y".to_string(), "firecrawl-mcp".to_string()]),
+            enabled: false,
+            ..McpServerConfig::default()
+        },
+    ]
 }
 
 #[cfg(test)]
@@ -593,22 +674,6 @@ mod tests {
             .expect("system clock before epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("tcui-{label}-{}-{nanos}", std::process::id()))
-    }
-
-    #[test]
-    fn pushover_legacy_configuration_keeps_encrypted_storage_default() {
-        let legacy: PushoverConfig =
-            toml::from_str("enabled = true\nuse_vault = true\napplication = 'work'").unwrap();
-        assert!(legacy.encrypt_credentials);
-        assert!(legacy.use_vault);
-        assert_eq!(legacy.application, "work");
-        let plaintext: PushoverConfig =
-            toml::from_str("enabled = true\nuse_vault = true\nencrypt_credentials = false")
-                .unwrap();
-        assert!(!plaintext.encrypt_credentials);
-        let round_trip: PushoverConfig =
-            toml::from_str(&toml::to_string(&plaintext).unwrap()).unwrap();
-        assert!(!round_trip.encrypt_credentials);
     }
 
     #[test]
@@ -639,11 +704,49 @@ kitty_text_max_scale = 1
     }
 
     #[test]
+    fn default_config_matches_expected_defaults() {
+        let config = AppConfig::default();
+
+        assert_eq!(config.theme, "system");
+        assert_eq!(config.default_model, "gpt-4o");
+        assert_eq!(config.default_provider, "openai");
+        assert_eq!(config.markdown_mode, MarkdownMode::Full);
+        assert!(config.quit_confirmation);
+        assert!(config.collapse_thinking);
+        assert!(!config.use_env_keys);
+        assert_eq!(config.image_protocol, "auto");
+        assert!(!config.providers.is_empty());
+    }
+
+    #[test]
+    fn provider_entries_returns_name_endpoint_env_backend_auth() {
+        let config = AppConfig::default();
+        let entries = config.provider_entries();
+
+        assert!(!entries.is_empty());
+        let openai = entries
+            .iter()
+            .find(|(name, _, _, _, _)| name == "OpenAI")
+            .expect("OpenAI provider");
+        assert_eq!(openai.1, "https://api.openai.com/v1");
+        assert_eq!(openai.2, "OPENAI_API_KEY");
+        assert_eq!(openai.3, "openai");
+        assert_eq!(openai.4, "api_key");
+    }
+
+    #[test]
+    fn codex_default_uses_the_subscription_responses_backend() {
+        let config = AppConfig::default();
+        let codex = config.provider_config("Codex").expect("find Codex");
+
+        assert_eq!(codex.endpoint, "https://chatgpt.com/backend-api/codex");
+        assert_eq!(codex.backend_type, "codex");
+        assert_eq!(codex.auth_type, "oauth");
+    }
+
+    #[test]
     fn provider_config_finds_by_name_case_insensitive() {
-        let config = AppConfig {
-            providers: provider_presets(),
-            ..AppConfig::default()
-        };
+        let config = AppConfig::default();
 
         let openai = config.provider_config("openai").expect("find openai");
         assert_eq!(openai.name, "OpenAI");
@@ -654,6 +757,3 @@ kitty_text_max_scale = 1
         assert!(config.provider_config("nonexistent").is_none());
     }
 }
-
-#[cfg(test)]
-mod vault_config_migration;

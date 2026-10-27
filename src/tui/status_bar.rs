@@ -103,9 +103,9 @@ impl StatusBar {
         }
         let theme = crate::theme::active_theme();
         let provider = if self.provider.is_empty() {
-            std::borrow::Cow::Borrowed("/connect")
+            "none"
         } else {
-            crate::ui::provider_display_name(&self.provider)
+            self.provider.as_str()
         };
         let color = if self.provider.is_empty() {
             theme.warning

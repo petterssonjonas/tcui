@@ -1,4 +1,4 @@
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::llm::auth::oauth::{
     BrowserLauncher, HeadlessAuthorizationInput, HeadlessInput, OAuthCancellation, OAuthError,
@@ -7,70 +7,64 @@ use crate::llm::auth::oauth::{
 
 pub(super) struct PrintingBrowser {
     label: &'static str,
-    open_browser: bool,
 }
 
 impl PrintingBrowser {
-    pub(super) const fn new(label: &'static str, open_browser: bool) -> Self {
-        Self {
-            label,
-            open_browser,
-        }
+    pub(super) const fn new(label: &'static str) -> Self {
+        Self { label }
     }
 }
 
 impl BrowserLauncher for PrintingBrowser {
     fn open(&self, url: &reqwest::Url) -> Result<(), OAuthError> {
         println!("{}: {url}", self.label);
-        println!("Open this URL in your browser. Paste the final response URL and press Enter, even if localhost cannot load.");
-        if self.open_browser {
-            SystemBrowser.open(url)?;
-        }
-        Ok(())
+        SystemBrowser.open(url)
     }
 }
 
-/// Reads one bounded authorization response without retaining it in command history.
+/// Reads headless authorization input from stdin with a cancellable async
+/// architecture.
+///
+/// The previous implementation used `tokio::task::spawn_blocking(read_stdin)`,
+/// which created a blocking task that **survived cancellation**: dropping the
+/// `JoinHandle` in the `select!` does not abort the underlying `read_line`
+/// call, leaving a blocking-thread-pool thread occupied until the process
+/// exits.
+///
+/// This implementation uses `tokio::io::stdin()` with `AsyncBufReadExt::
+/// read_line`. The returned future is a proper async future: when the
+/// `select!` drops it on cancellation, the async read is cancelled and the
+/// underlying blocking operation's result is discarded. The thread returns
+/// to the pool on its next yield point.
+///
+/// Cancel-safety note: `read_line` is documented as NOT cancel-safe because
+/// a partially-read line loses buffered data. This is acceptable here because
+/// the function reads exactly one line and the process exits immediately
+/// after; there is no second read that could observe corrupted buffer state.
 pub(super) async fn read_headless_input(
     cancellation: &OAuthCancellation,
 ) -> Result<PastedInput, OAuthError> {
     let mut cancellation = cancellation.clone();
     let stdin = tokio::io::stdin();
-    let mut reader = BufReader::new(stdin.take(4097));
-    let mut input = zeroize::Zeroizing::new(String::new());
+    let mut reader = BufReader::new(stdin);
+    let mut input = String::new();
 
     tokio::select! {
         biased;
         _ = cancellation.cancelled() => Err(OAuthError::Cancelled),
         result = reader.read_line(&mut input) => {
             result.map_err(|_| OAuthError::CallbackIo)?;
-            if input.len() > 4096 {
-                return Err(OAuthError::HeadlessInputTooLarge);
-            }
             if cancellation.is_cancelled() {
                 Err(OAuthError::Cancelled)
             } else {
-                Ok(parse_headless_input(input.trim().to_owned()))
+                Ok(parse_headless_input(input))
             }
         }
-    }
-}
-
-pub(super) async fn read_callback_url(
-    cancellation: &OAuthCancellation,
-) -> Result<zeroize::Zeroizing<String>, OAuthError> {
-    let mut input = read_headless_input(cancellation).await?;
-    match input.read_authorization_input()? {
-        HeadlessAuthorizationInput::RedirectUrl(value) => Ok(zeroize::Zeroizing::new(value)),
-        HeadlessAuthorizationInput::Code(value) if value.is_empty() => {
-            // Closed stdin does not disable the optional loopback callback.
-            std::future::pending().await
-        }
-        HeadlessAuthorizationInput::Code(_) => Err(OAuthError::MalformedCallback),
     }
 }
 
 fn parse_headless_input(input: String) -> PastedInput {
+    let input = input.trim().to_owned();
     let parsed = if input.starts_with("http://") || input.starts_with("https://") {
         HeadlessAuthorizationInput::RedirectUrl(input)
     } else {

@@ -1,2 +1,7 @@
-Be helpful, clear, and concise. Ask when essential context is missing, and adapt
-explanations to the user's experience.
+---
+name: default
+type: soul
+description: General purpose assistant
+---
+
+You are a helpful, concise, and informative assistant. Provide clear answers and suggest code when relevant.

@@ -1,5 +1,3 @@
-use std::future::Future;
-
 use crate::config::AppConfig;
 use crate::llm::auth::oauth::{
     open_authorization_url, AuthorizationCodeExchange, AuthorizationRequest, BrowserLauncher,
@@ -18,7 +16,6 @@ pub(super) async fn login(
     config: &AppConfig,
     browser: &impl BrowserLauncher,
     cancellation: &OAuthCancellation,
-    input: impl Future<Output = Result<zeroize::Zeroizing<String>, crate::llm::auth::oauth::OAuthError>>,
 ) -> Result<super::super::credential::CodexCredential, CodexNativeError> {
     let state = State::generate()?;
     let callback = bind_callback(adapter, state.clone()).await?;
@@ -36,7 +33,7 @@ pub(super) async fn login(
     let authorization_url = request.build_url(&adapter.endpoints.authorization)?;
     open_authorization_url(browser, &authorization_url)?;
     let redirect_uri = callback.redirect_uri().clone();
-    let code = callback.receive_with_redirect(cancellation, input).await?;
+    let code = callback.receive(cancellation).await?;
     let exchange = AuthorizationCodeExchange::new(
         adapter.endpoints.client_id.clone(),
         redirect_uri,
@@ -47,7 +44,7 @@ pub(super) async fn login(
     let tokens = service
         .exchange(&exchange, cancellation, chrono::Utc::now())
         .await?;
-    persist_tokens(config, &tokens, &adapter.connection, adapter.storage)
+    persist_tokens(config, &tokens, None)
 }
 
 async fn bind_callback(

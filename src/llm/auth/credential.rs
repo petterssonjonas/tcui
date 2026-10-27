@@ -48,10 +48,7 @@ impl Credential {
 
     #[cfg_attr(
         not(test),
-        expect(
-            dead_code,
-            reason = "Source metadata is exercised by credential policy tests."
-        )
+        expect(dead_code, reason = "Todo 7 displays source-aware credential status.")
     )]
     pub(crate) const fn source(&self) -> CredentialSource {
         self.source
@@ -68,16 +65,11 @@ impl Credential {
         matches!(self.kind, CredentialKind::CodexOAuth(_))
     }
 
-    pub(crate) fn permits_endpoint(&self, provider: &str, endpoint: &str) -> bool {
-        self.provider == super::canonical_provider_name(provider)
-            && super::trusted_provider_endpoint(&self.provider, endpoint)
-    }
-
     #[cfg(test)]
     pub(crate) fn api_key_for_test(provider: &str, key: &str) -> Self {
         Self::api_key(
             provider.to_owned(),
-            CredentialSource::TcuiStoredApiKey,
+            CredentialSource::Environment,
             key.to_owned(),
         )
     }
