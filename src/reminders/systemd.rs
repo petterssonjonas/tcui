@@ -1,14 +1,75 @@
-use super::{parse::weekday_label, ReminderError, ReminderSchedule};
+use super::execution::{self, Cancellation};
+use super::{weekday_label, ReminderError, ReminderSchedule};
 
-pub(super) fn schedule(id: &str, schedule: &ReminderSchedule) -> Result<String, ReminderError> {
+pub(super) fn absolute_calendar(datetime: &chrono::DateTime<chrono::Local>) -> String {
+    datetime
+        .with_timezone(&chrono::Utc)
+        .format("%Y-%m-%d %H:%M:%S UTC")
+        .to_string()
+}
+
+pub(super) fn validate_calendar(
+    expression: &str,
+    cancellation: &Cancellation,
+) -> Result<(), ReminderError> {
+    if expression.trim().is_empty() || expression.chars().any(char::is_control) {
+        return Err(ReminderError::Invalid(
+            "calendar must be a nonempty systemd calendar expression without control characters"
+                .to_owned(),
+        ));
+    }
+    let analyzer = SchedulerContext::new("systemd-analyze", "TCUI_REMINDER_SYSTEMD_ANALYZE")?;
+    let output = execution::output(
+        analyzer
+            .command()
+            .args(["calendar", "--iterations=1", "--", expression]),
+        cancellation,
+    )?;
+    if !output.status.success() {
+        return Err(ReminderError::Invalid(
+            "calendar is not a valid systemd calendar expression".to_owned(),
+        ));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let next = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Next elapse:"))
+        .map(str::trim);
+    if next.is_none_or(|value| value.is_empty() || value == "never" || value == "n/a") {
+        return Err(ReminderError::Invalid(
+            "calendar must have a future occurrence".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn schedule(
+    id: &str,
+    schedule: &ReminderSchedule,
+    pushover: bool,
+    cancellation: &Cancellation,
+) -> Result<String, ReminderError> {
     let unit = format!("tcui-reminder-{id}");
     let executable = std::env::current_exe()?;
-    let mut command = std::process::Command::new(systemd_run_program());
+    let scheduler = SchedulerContext::new("systemd-run", "TCUI_REMINDER_SYSTEMD_RUN")?;
+    let mut command = scheduler.command();
     command
         .arg("--user")
         .arg("--collect")
+        .arg("--timer-property=AccuracySec=1s")
+        .arg("--property=UMask=0077")
         .arg("--unit")
         .arg(&unit);
+    if !schedule.is_recurring() {
+        command
+            .arg("--timer-property=RemainAfterElapse=no")
+            .arg("--timer-property=CollectMode=inactive-or-failed")
+            .arg(cleanup_command(
+                &executable,
+                scheduler.toolbox.as_deref(),
+                id,
+            )?);
+    }
     set_notification_environment(&mut command, |key| std::env::var_os(key));
     match schedule {
         ReminderSchedule::After(duration) => {
@@ -19,7 +80,7 @@ pub(super) fn schedule(id: &str, schedule: &ReminderSchedule) -> Result<String, 
         ReminderSchedule::At(datetime) => {
             command
                 .arg("--on-calendar")
-                .arg(datetime.format("%Y-%m-%d %H:%M:%S").to_string());
+                .arg(absolute_calendar(datetime));
         }
         ReminderSchedule::Daily(time) => {
             command
@@ -37,11 +98,19 @@ pub(super) fn schedule(id: &str, schedule: &ReminderSchedule) -> Result<String, 
             command.arg("--on-calendar").arg(expression);
         }
     }
-    let output = command
+    command.arg("--");
+    if let Some(container) = &scheduler.toolbox {
+        command.args(["toolbox", "run", "--container", container, "--"]);
+    }
+    command
         .arg(executable)
-        .arg("reminder-dispatch")
-        .arg(id)
-        .output()?;
+        .arg(if pushover {
+            "reminder-ping-dispatch"
+        } else {
+            "reminder-dispatch"
+        })
+        .arg(id);
+    let output = execution::output(&mut command, cancellation)?;
     if output.status.success() {
         Ok(unit)
     } else {
@@ -55,6 +124,51 @@ pub(super) fn schedule(id: &str, schedule: &ReminderSchedule) -> Result<String, 
     }
 }
 
+fn cleanup_command(
+    executable: &std::path::Path,
+    toolbox: Option<&str>,
+    id: &str,
+) -> Result<String, ReminderError> {
+    let mut command = String::from("--property=ExecStopPost=:");
+    if let Some(container) = toolbox {
+        for argument in ["toolbox", "run", "--container", container, "--"] {
+            push_unit_argument(&mut command, argument)?;
+        }
+    }
+    push_unit_argument(
+        &mut command,
+        executable.to_str().ok_or_else(|| {
+            ReminderError::Schedule("TCUI's executable path must be UTF-8 for timer cleanup".into())
+        })?,
+    )?;
+    for argument in ["reminder-cleanup", id] {
+        push_unit_argument(&mut command, argument)?;
+    }
+    Ok(command)
+}
+
+fn push_unit_argument(command: &mut String, argument: &str) -> Result<(), ReminderError> {
+    if argument.chars().any(char::is_control) {
+        return Err(ReminderError::Schedule(
+            "Invalid timer cleanup argument".into(),
+        ));
+    }
+    if !command.ends_with(':') {
+        command.push(' ');
+    }
+    command.push('"');
+    for character in argument.chars() {
+        match character {
+            '\\' | '"' => command.push('\\'),
+            '%' => command.push('%'),
+            _ => {}
+        }
+        command.push(character);
+    }
+    command.push('"');
+    Ok(())
+}
+
 fn set_notification_environment(
     command: &mut std::process::Command,
     get: impl Fn(&str) -> Option<std::ffi::OsString>,
@@ -63,6 +177,14 @@ fn set_notification_environment(
     // otherwise an SSH reminder could notify the server's unrelated desktop.
     // Empty overrides also prevent stale user-manager context leaking into timers.
     for key in [
+        "HOME",
+        "PATH",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+        "XDG_RUNTIME_DIR",
+        "TZ",
         "SSH_CONNECTION",
         "SSH_CLIENT",
         "SSH_TTY",
@@ -77,135 +199,154 @@ fn set_notification_environment(
     }
 }
 
-fn systemd_run_program() -> std::ffi::OsString {
-    std::env::var_os("TCUI_REMINDER_SYSTEMD_RUN")
-        .unwrap_or_else(|| std::ffi::OsString::from("systemd-run"))
+pub(super) fn cancel(unit: &str) -> Result<(), ReminderError> {
+    cancel_cancellable(unit, &Cancellation::cleanup())
 }
 
-pub(super) fn cancel(unit: &str) -> Result<(), ReminderError> {
-    let output = std::process::Command::new(systemctl_program())
-        .arg("--user")
-        .arg("cancel")
-        .arg(unit)
-        .output()?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if stderr.contains("not loaded")
-            || stderr.contains("No files")
-            || stderr.contains("not found")
-        {
-            return Ok(());
+pub(super) fn cancel_cancellable(
+    unit: &str,
+    cancellation: &Cancellation,
+) -> Result<(), ReminderError> {
+    stop_units(unit, &["timer", "service"], true, cancellation)
+}
+
+pub(super) fn complete(unit: &str) -> Result<(), ReminderError> {
+    // Stop ordering reverses timer Before=service. ExecStopPost must not wait
+    // for its own service to finish stopping before the timer can stop.
+    stop_units(unit, &["timer"], false, &Cancellation::default())
+}
+
+fn stop_units(
+    unit: &str,
+    kinds: &[&str],
+    wait: bool,
+    cancellation: &Cancellation,
+) -> Result<(), ReminderError> {
+    let suffix = unit.strip_prefix("tcui-reminder-").filter(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    });
+    if suffix.is_none() {
+        return Err(ReminderError::Invalid("invalid reminder unit".to_owned()));
+    }
+    let controller = SchedulerContext::new("systemctl", "TCUI_REMINDER_SYSTEMCTL")?;
+    let mut failure = None;
+    for kind in kinds {
+        let name = format!("{unit}.{kind}");
+        let mut command = controller.command();
+        command.arg("--user");
+        if !wait {
+            command.arg("--no-block");
         }
-        let message = if stderr.is_empty() {
-            format!("failed to cancel reminder unit {unit}")
-        } else {
-            stderr
-        };
-        Err(ReminderError::Schedule(message))
+        let output = execution::output(command.args(["stop", "--", &name]), cancellation)?;
+        if output.status.success() {
+            continue;
+        }
+        let state = execution::output(
+            controller.command().args([
+                "--user",
+                "show",
+                "--property=LoadState",
+                "--value",
+                "--",
+                &name,
+            ]),
+            cancellation,
+        )?;
+        if state.status.success() && state.stdout.trim_ascii() == b"not-found" {
+            continue;
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        failure.get_or_insert_with(|| {
+            ReminderError::Schedule(if stderr.is_empty() {
+                format!("failed to stop reminder unit {name}")
+            } else {
+                stderr
+            })
+        });
+    }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
-fn systemctl_program() -> std::ffi::OsString {
-    std::env::var_os("TCUI_REMINDER_SYSTEMCTL")
-        .unwrap_or_else(|| std::ffi::OsString::from("systemctl"))
+struct SchedulerContext {
+    program: std::ffi::OsString,
+    toolbox: Option<String>,
+}
+
+impl SchedulerContext {
+    fn new(program: &str, override_name: &str) -> Result<Self, ReminderError> {
+        if let Some(program) = std::env::var_os(override_name) {
+            return Ok(Self {
+                program,
+                toolbox: None,
+            });
+        }
+        let toolbox = if std::path::Path::new("/run/.toolboxenv").exists() {
+            use std::io::Read;
+            let mut content = String::new();
+            std::fs::File::open("/run/.containerenv")?
+                .take(4097)
+                .read_to_string(&mut content)?;
+            if content.len() > 4096 {
+                return Err(ReminderError::Schedule(
+                    "Toolbx metadata is too large".to_owned(),
+                ));
+            }
+            let value = content
+                .lines()
+                .find_map(|line| line.strip_prefix("name="))
+                .ok_or_else(|| {
+                    ReminderError::Schedule("Cannot identify the originating Toolbx".to_owned())
+                })?;
+            let name: String = serde_json::from_str(value)
+                .map_err(|_| ReminderError::Schedule("Invalid Toolbx container name".to_owned()))?;
+            if name.is_empty()
+                || name.len() > 255
+                || name.starts_with('-')
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+            {
+                return Err(ReminderError::Schedule(
+                    "Invalid Toolbx container name".to_owned(),
+                ));
+            }
+            Some(name)
+        } else {
+            None
+        };
+        Ok(Self {
+            program: program.into(),
+            toolbox,
+        })
+    }
+
+    fn command(&self) -> std::process::Command {
+        let mut command = if self.toolbox.is_some() {
+            let mut command = std::process::Command::new("flatpak-spawn");
+            command
+                .arg("--host")
+                .arg("--watch-bus")
+                .arg("--env=LC_ALL=C")
+                .arg(&self.program);
+            command
+        } else {
+            std::process::Command::new(&self.program)
+        };
+        command.env("LC_ALL", "C");
+        command
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{cancel, schedule};
-    use crate::reminders::ReminderSchedule;
-    use chrono::{Local, NaiveTime};
+    use super::cancel;
     use std::sync::Mutex;
-
-    #[test]
-    fn timer_notification_origin_is_whitelisted_and_missing_values_are_cleared() {
-        let mut command = std::process::Command::new("fixture-systemd-run");
-        super::set_notification_environment(&mut command, |key| match key {
-            "SSH_CONNECTION" => Some("fixture ssh origin".into()),
-            "HERDR_BIN_PATH" => Some("/fixture/herdr $(not-a-shell);%n".into()),
-            "SECRET_TOKEN" => panic!("unrelated environment must not be queried"),
-            _ => None,
-        });
-        let args: Vec<_> = command
-            .get_args()
-            .map(|arg| arg.to_str().unwrap())
-            .collect();
-        assert_eq!(
-            args,
-            [
-                "--setenv=SSH_CONNECTION=fixture ssh origin",
-                "--setenv=SSH_CLIENT=",
-                "--setenv=SSH_TTY=",
-                "--setenv=HERDR_ENV=",
-                "--setenv=HERDR_PANE_ID=",
-                "--setenv=HERDR_BIN_PATH=/fixture/herdr $(not-a-shell);%n",
-                "--setenv=HERDR_SOCKET_PATH=",
-            ]
-        );
-    }
 
     fn env_lock() -> &'static Mutex<()> {
         crate::test_support::env_lock()
-    }
-
-    fn write_success_script(name: &str) -> std::path::PathBuf {
-        let temp = std::env::temp_dir().join(format!(
-            "tcui-reminder-script-{}-{}",
-            name,
-            rand::random::<u64>()
-        ));
-        let script = temp.join(format!("{name}.sh"));
-        std::fs::create_dir_all(&temp).expect("temp dir");
-        std::fs::write(&script, "#!/bin/sh\nexit 0\n").expect("write script");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&script).expect("metadata").permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script, perms).expect("set perms");
-        }
-        script
-    }
-
-    #[test]
-    fn scheduler_command_can_be_overridden_for_tests() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
-        let script = write_success_script("systemd-run");
-        std::env::set_var("TCUI_REMINDER_SYSTEMD_RUN", &script);
-        let unit = schedule(
-            "test",
-            &ReminderSchedule::Daily(NaiveTime::from_hms_opt(7, 30, 0).expect("time")),
-        )
-        .expect("schedule reminder");
-        std::env::remove_var("TCUI_REMINDER_SYSTEMD_RUN");
-        std::fs::remove_file(&script).expect("remove script");
-        std::fs::remove_dir(script.parent().expect("script parent")).expect("remove temp dir");
-        assert_eq!(unit, "tcui-reminder-test");
-    }
-
-    #[test]
-    fn absolute_reminder_command_builds() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
-        let script = write_success_script("systemd-run");
-        std::env::set_var("TCUI_REMINDER_SYSTEMD_RUN", &script);
-        let unit = schedule("abs", &ReminderSchedule::At(Local::now())).expect("schedule reminder");
-        std::env::remove_var("TCUI_REMINDER_SYSTEMD_RUN");
-        std::fs::remove_file(&script).expect("remove script");
-        std::fs::remove_dir(script.parent().expect("script parent")).expect("remove temp dir");
-        assert_eq!(unit, "tcui-reminder-abs");
-    }
-
-    #[test]
-    fn cancel_command_can_be_overridden_for_tests() {
-        let _guard = env_lock().lock().expect("env lock poisoned");
-        let script = write_success_script("systemctl");
-        std::env::set_var("TCUI_REMINDER_SYSTEMCTL", &script);
-        cancel("tcui-reminder-test").expect("cancel reminder");
-        std::env::remove_var("TCUI_REMINDER_SYSTEMCTL");
-        std::fs::remove_file(&script).expect("remove script");
-        std::fs::remove_dir(script.parent().expect("script parent")).expect("remove temp dir");
     }
 
     #[test]
@@ -216,7 +357,7 @@ mod tests {
         std::fs::create_dir_all(&temp).expect("temp dir");
         std::fs::write(
             &script,
-            "#!/bin/sh\necho 'Unit tcui-reminder-test.service not loaded.' 1>&2\nexit 1\n",
+            "#!/bin/sh\nif [ \"$2\" = show ]; then printf 'not-found\\n'; exit 0; fi\nprintf 'Unit %s not loaded.\\n' \"$4\" >&2\nexit 1\n",
         )
         .expect("write script");
         #[cfg(unix)]

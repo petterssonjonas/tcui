@@ -210,23 +210,37 @@ category on the dedicated Settings tab. `/settings` and the launcher open that
 tab directly.
 
 Settings are grouped into Appearance, Terminal, Layout, Chat, Web search,
-Connections, Models, Local inference, Notifications, Files, Keyboard, MCP,
-Privacy, and Memory when that feature is enabled. Controls include sidebar
-widths, status widgets, local probe timeouts, ntfy delivery, memory limits, and
-terminal defaults. Provider secrets stay in their dedicated manager. Inactive
-legacy fields are not presented as working settings.
+Connections, Models, Local inference, Notifications, Pushover, Files & vaults,
+Keyboard, MCP, Privacy, and Memory when that feature is enabled. Controls include
+previously hidden sidebar widths, status widgets, local probe timeouts, mobile
+notifications, memory limits, and terminal defaults. Provider secrets stay in
+their dedicated managers. Inactive legacy fields are not presented as working settings.
 
 Use Tab to switch category/list focus and arrows to navigate. Toggle booleans or
-cycle choices directly; Enter edits text and numbers and commits valid values.
-Changes still persist individually. Click **Save settings** or press `Ctrl+S`
-to explicitly save the current live configuration. Save also validates and commits
-an active text, number, or JSON draft. Success is confirmed only after persistence;
-invalid input or a write failure keeps the draft and previous saved value for retry.
+cycle choices directly; Enter edits text and numbers and applies valid values.
+Changes still persist individually. The **Save** button and **Ctrl+S** also save
+all current settings, including a valid open draft. A failed save keeps the draft
+and previous saved value. Enter adds a line in multiline fields; Ctrl+Enter applies
+the field. Esc cancels an edit. Global tab/settings shortcuts preserve open drafts.
 
-Keyboard actions show current/default bindings: Enter captures a binding, Enter
-confirms it, and Backspace resets it. Finish or cancel shortcut capture before
-clicking Save; `Ctrl+S` remains captured shortcut input while capture is active.
-Advanced MCP and bulk keybinding editors accept validated JSON.
+Settings accept plaintext, not JSON. Provider/model lists and command rules use one
+entry per line. Non-command lists preserve spaces; `\n`, `\r`, `\t`, and `\\` encode
+literal control characters/backslashes, and `\e` represents an empty entry.
+Keyboard actions support capture/reset; bulk mappings use `new_chat=alt+n`.
+Status widget rows use `provider 1 1` (widget ID, row, area).
+MCP servers use labeled blocks separated by a blank line, for example:
+
+```text
+name: local-tools
+transport: stdio
+command: my-mcp-server
+args: '--directory' 'path with spaces' ''
+enabled: false
+```
+
+The other MCP field is `url:` for HTTP servers. Omit absent optional fields;
+`args:` with no value means an empty argument list. MCP fields support `\\`, `\n`,
+`\r`, and `\t` escapes. Saving configuration does not run server commands.
 
 Terminal placement updates the current split immediately. Shell/directory and
 provider/model defaults apply to new sessions or conversations; existing sessions
@@ -234,6 +248,46 @@ keep their state. Recovery retention changes policy for the next startup recover
 pass, not an immediate purge.
 
 ## Commands and terminal tabs
+
+### Approved direct commands
+
+Mention `@command` in your request to let the agent choose and run approved
+programs, for example `Please @command check the current UTC date`.
+`/skill command ...` is also supported. Configure **Settings → Terminal → Command
+whitelist** and **Command blacklist**, with one rule per line. An empty whitelist
+denies all direct launches. Blacklist matches always win, including canonical
+symlink targets. Each rule is an executable name or absolute path, optionally
+followed by an exact literal argument prefix. Quote values that contain spaces.
+
+`curl` permits any curl arguments. `curl -H` permits `curl -H "X-Name: value" URL`,
+but not `curl URL`, `curl --header ...`, or `curl -s -H ...`. Rules do not normalize
+option aliases or match flags at arbitrary positions. A bare blacklist rule denies
+every argument list for that executable; a constrained rule denies matching prefixes.
+A whitelisted name approves its canonical PATH executable, not every file with the
+same basename. Native Pushover calls must match their complete curl arguments too.
+
+The agent receives the conversation, current request, and invoked skill bodies.
+It chooses executables and literal arguments, observes actual tool results, and
+can continue with another action. TCUI does not interpret shell syntax: `$HOME`,
+`$(...)`, pipes, and semicolons remain literal arguments. Optional standard input
+supports private request bodies. History, attachments, quoted examples, and
+assistant output cannot authorize commands by themselves.
+
+Arguments are bounded, each output stream is limited to 64 KiB, and execution
+times out after 30 seconds. Cancelling a request terminates its Unix process
+group. Children receive a restricted environment rather than ambient API keys or
+shell startup hooks. Command output becomes untrusted chat/model context: do not
+approve helpers that print secrets.
+
+This is an executable allowlist, **not a sandbox**. Trust the approved executable,
+its location, and its contents. Scripts, interpreters, wrappers, and powerful
+utilities retain their own capabilities and can launch other programs. The
+policy governs TCUI's direct command and Pushover launches, not commands you
+manually approve in an interactive terminal. Skills can be composed in one
+request, including `@remindme` and `@ping-user`; no pipe-delimited user grammar
+or directive ordering is required.
+
+### Reviewed shell blocks
 
 Completed assistant command blocks use an explicit fence such as `bash tcui-run`.
 Supported shells are `sh`, `bash`, `shell`, `zsh`, and `fish`; `tcui-run` is required.
@@ -473,15 +527,131 @@ notification route instead of blindly running `notify-send`:
   never fall back to the server's D-Bus or sound service. Unverified multiplexer
   passthrough is disabled.
 
-Response notifications still occur only while TCUI is unfocused. Helper errors
-are captured rather than printed over the TUI, and a failed backend is disabled
-for the process lifetime. Set `desktop = false` under `[notifications]` in
-`config.toml` to disable automatic desktop delivery explicitly. Configured ntfy delivery is
-independent.
+Response notifications still occur only while TCUI is unfocused. Desktop helper
+errors are captured rather than printed over the TUI, and a failed desktop backend
+is disabled for the process lifetime. Set `desktop = false` under `[notifications]`
+in `config.toml` to disable automatic desktop delivery explicitly. Configured
+Pushover delivery is independent.
 
 Detached SSH reminders cannot notify a terminal that is no longer attached.
-They preserve Herdr routing context when available; otherwise use explicitly
-configured ntfy for delivery after disconnecting.
+They preserve Herdr routing context when available; otherwise configure Pushover
+for delivery after disconnecting.
+
+### Pushover
+
+TCUI sends Pushover HTTPS requests directly through `curl`; no notification script
+or Python installation is needed. Install curl on the machine or Toolbox where
+TCUI runs, then approve `curl` in **Settings → Terminal → Command whitelist**.
+The blacklist still overrides approval. Approving curl also permits explicit
+`@command curl` requests; command approval is not a filesystem or network sandbox.
+
+Visit [pushover.net](https://pushover.net), download the Pushover mobile app, and
+obtain your user key and an application API token. Pushover requires both; TCUI
+does not ship a shared application token. Additional named application tokens
+are optional.
+
+Open **Settings → Pushover**, enable delivery, and select **Use TCUI-keystore
+credentials**. **Set / replace user key (masked)** and **Set / replace selected
+app token (masked)** open masked credential entry. **Encrypt new / replacement
+keys** defaults to enabled; turn it off only to explicitly store the next key in
+plaintext SQLite. Changing this option does not convert existing keys. Replacing
+an encrypted key requires unlocking it, even when its replacement is plaintext.
+
+The default application name is `tcui`. To add another token, change **Selected
+application name**, then store that application's token. Other saved application
+tokens remain unchanged. Names use 1–64 lowercase ASCII letters, digits, hyphens
+or underscores. Encrypted records require unlock; explicit plaintext Pushover
+records remain readable while the credential vault is locked.
+
+```toml
+[commands]
+whitelist = ["curl"]
+blacklist = []
+
+[notifications.pushover]
+enabled = true
+use_vault = true
+encrypt_credentials = true
+application = "tcui"
+```
+
+Alternatively, turn off TCUI-keystore credentials and set **Environment credential file**
+to an absolute, user-owned, private `0600` literal `KEY=value` file, or supply
+environment variables. TCUI does not automatically load the project's `.env`.
+Use `PUSHOVER_USER_KEY` for the user key. For the default `tcui` application,
+`PUSHOVER_TCUI_APP_TOKEN` takes precedence over `PUSHOVER_APP_TOKEN`. For any named
+application, supply `PUSHOVER_APP_TOKEN`; the TCUI-specific token is never used.
+In environment/file mode this generic token represents the currently selected
+application, not a stored mapping of multiple application profiles. Environment
+values override corresponding file values. TCUI-keystore mode never falls back
+to files or environment when a selected key is locked or missing.
+
+For immediate delivery, ask `@ping-user Tell me the backup is ready`. The agent
+can use the local Pushover tool without reading raw keys, or explicitly request
+Pushover credentials to construct an approved curl call. **Reading raw keys sends
+them to the configured AI provider.** This capability exposes only Pushover keys,
+not other environment-file values, provider credentials, or the master password.
+Private credential observations are excluded from ordinary chat context, and
+known keys are redacted from displayed results and sensitive provider diagnostics.
+
+Curl receives the JSON request through standard input, not secret-bearing command
+arguments or environment variables. TCUI reports native delivery success only
+after curl succeeds and the Pushover API returns success.
+
+### Scheduled notifications
+
+Invoke skills naturally anywhere in the current request, for example:
+
+- `@remindme via @ping-user in 20 min to look into those companies`
+- `Please @ping-user in 60 minutes to review the backup`
+- `@schedule a reminder for tomorrow at noon via @ping-user`
+- `@remindme show my pending reminders`
+- `Please @remindme cancel the reminder we just created`
+
+The agent reads the full conversation and invoked skills, interprets timing and
+message content, and calls the reminder tool. No leading directive, fixed duration
+grammar, or `|` separator is required. Future Pushover requests use scheduling,
+not an immediate notification. The agent observes registration/cancellation
+results before reporting success; completed-action receipts remain in the chat
+even if a later model response fails.
+
+Pushover-enabled reminders capture credentials from the configured source during
+scheduling. Missing keys, a locked encrypted record, or denied curl fail rather
+than silently creating a local-only timer when Pushover was requested.
+Relative, absolute, daily, weekly, and systemd-calendar schedules are supported.
+Reminders also attempt configured desktop delivery independently.
+
+Timers use the host's user systemd manager. Inside Toolbox, TCUI registers through
+`flatpak-spawn --host --watch-bus` and re-enters the originating container for delivery.
+Keep that container, TCUI executable path, and curl available. Closing TCUI does
+not cancel a timer, but these transient timers do not promise reboot survival;
+the user manager must remain running after logout.
+
+**Pending Pushover jobs contain plaintext messages and credentials**, even with
+app/chat/vault encryption enabled. Snapshots live in private `0600` files under
+`$XDG_DATA_HOME/tcui/reminder-notifications/`, normally
+`~/.local/share/tcui/reminder-notifications/`.
+They intentionally work without unlocking TCUI again. Locking the vault,
+changing its password, or replacing vault keys does not revoke captured
+credentials: cancel existing jobs first. The enabled flag and command policy
+are checked again at delivery. Registered one-shot snapshots and records are
+removed after the delivery attempt, including failure; there is no automatic
+retry. A service post-stop hook also attempts cleanup if the callback fails before
+delivery. One-shot timers and services are configured for collection after success
+or failure; completion disarms the timer without waiting on its own stop hook.
+Recurring snapshots remain until cancellation.
+
+Cleanup requires the TCUI executable/container to remain available. Cleanup errors
+are reported, and unresolved registration is retained when possible so cancellation
+can retry. Missing or unreadable metadata plus unknown cadence is not permission
+to delete a possibly recurring snapshot: restore its metadata or recover/remove
+it explicitly.
+
+Reminder metadata uses a separate private `reminder.key`, not the password-protected
+chat key. Back up `reminders.toml` together with `reminder.key` when moving reminders.
+Existing legacy records retain their ciphertext and migrate their original
+`chat.key` without replacement. Missing or incompatible keys require restoration;
+TCUI does not generate a replacement over unreadable reminder data.
 
 ## Vault and Memories
 

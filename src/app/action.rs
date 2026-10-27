@@ -53,6 +53,7 @@ pub enum Action {
     ),
     FinalizeAssistantMessage(AssistantFinalization),
     StopStream(crate::app::submission::SubmissionId),
+    PersistHostActionReceipts(crate::app::submission::SubmissionId),
     AddMessage(usize, Message),
     AddGeneratedFile(usize, crate::app::GeneratedFile),
     LoadConversation(i64),
@@ -95,6 +96,9 @@ pub enum Action {
     UnlockApplication,
     LockApplication,
     OpenSearchCredentials,
+    OpenPushoverCredential {
+        application: bool,
+    },
     SetManualModel(String),
     MouseClick(MouseClickAction),
     SaveGeneratedFile,
@@ -110,10 +114,12 @@ pub enum Action {
     OpenCommandPalette,
     OpenSettingsPanel,
     OpenSettingsPage(String),
-    SaveSettings,
     ApplySetting {
         id: String,
         value: String,
+    },
+    SaveSettings {
+        draft: Option<(String, String)>,
     },
     OpenTerminal,
     ApproveCommandReview,

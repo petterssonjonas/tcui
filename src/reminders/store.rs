@@ -4,9 +4,11 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use cap_std::fs::Dir;
+use color_eyre::eyre::{eyre, WrapErr};
 use rustix::fs::{fstat, openat, statat, AtFlags, Mode, OFlags};
 use serde::{Deserialize, Serialize};
 
+use super::execution::Cancellation;
 use super::{ReminderError, ReminderRecord};
 
 const STORE_FILE: &str = "reminders.toml";
@@ -18,9 +20,19 @@ struct ReminderStoreFile {
     reminders: Vec<ReminderRecord>,
 }
 
+#[cfg(test)]
 pub(super) fn upsert(record: ReminderRecord) -> Result<(), ReminderError> {
+    upsert_cancellable(record, &Cancellation::default())
+}
+
+pub(super) fn upsert_cancellable(
+    record: ReminderRecord,
+    cancellation: &Cancellation,
+) -> Result<(), ReminderError> {
     let store = LockedStore::open(&store_root(dirs::data_dir())?)?;
-    store.upsert(record)
+    // The stable metadata lock may have blocked after the caller cancelled.
+    cancellation.check()?;
+    store.upsert(record, cancellation)
 }
 
 pub(super) fn get(id: &str) -> Result<Option<ReminderRecord>, ReminderError> {
@@ -42,6 +54,42 @@ pub(super) fn list() -> Result<Vec<ReminderRecord>, ReminderError> {
     let mut reminders = store.load()?.reminders;
     reminders.sort_by(|left, right| left.created_at.cmp(&right.created_at));
     Ok(reminders)
+}
+
+pub(super) fn message_key() -> color_eyre::Result<crate::storage::crypto::SharedKey> {
+    use crate::storage::crypto::SharedKey;
+
+    let root = store_root(dirs::data_dir())?;
+    let store = LockedStore::open(&root)?;
+    let path = root.join("reminder.key");
+    if path.try_exists()? {
+        return Ok(SharedKey::load_from_path(&path)?);
+    }
+    let records = store.load()?.reminders;
+    if records
+        .iter()
+        .any(|record| record.message.starts_with("enc:v1:"))
+    {
+        let legacy = root.join("chat.key");
+        let metadata = std::fs::symlink_metadata(&legacy)
+            .wrap_err("Existing reminders require reminder.key or their original chat.key; restore a matching key before retrying")?;
+        if !metadata.file_type().is_file() {
+            return Err(eyre!("The legacy reminder key must be a regular file"));
+        }
+        let key = SharedKey::load_from_path(&legacy)?;
+        for record in &records {
+            let _plaintext = zeroize::Zeroizing::new(
+                crate::storage::crypto::decrypt_shared_text_with_key(&key, &record.message)
+                    .wrap_err("chat.key cannot unlock existing reminders; restore their matching reminder.key or original chat.key")?,
+            );
+        }
+        // Keep existing ciphertext readable without overwriting or rotating its key.
+        std::fs::hard_link(&legacy, &path)?;
+        crate::storage::paths::set_unix_mode(&path, 0o400)?;
+        File::open(&root)?.sync_all()?;
+        return Ok(key);
+    }
+    Ok(SharedKey::create_at(&path)?)
 }
 
 fn store_root(base: Option<PathBuf>) -> io::Result<PathBuf> {
@@ -108,21 +156,32 @@ impl LockedStore {
         Ok(toml::from_str(&content)?)
     }
 
-    fn upsert(&self, record: ReminderRecord) -> Result<(), ReminderError> {
+    fn upsert(
+        &self,
+        record: ReminderRecord,
+        cancellation: &Cancellation,
+    ) -> Result<(), ReminderError> {
         let mut file = self.load()?;
         file.reminders.retain(|existing| existing.id != record.id);
         file.reminders.push(record);
-        self.save(&file)
+        self.save(&file, Some(cancellation))
     }
 
     fn remove(&self, id: &str) -> Result<(), ReminderError> {
         let mut file = self.load()?;
         file.reminders.retain(|record| record.id != id);
-        self.save(&file)
+        self.save(&file, None)
     }
 
-    fn save(&self, file: &ReminderStoreFile) -> Result<(), ReminderError> {
+    fn save(
+        &self,
+        file: &ReminderStoreFile,
+        cancellation: Option<&Cancellation>,
+    ) -> Result<(), ReminderError> {
         let content = toml::to_string_pretty(file)?;
+        if let Some(cancellation) = cancellation {
+            cancellation.check()?;
+        }
         crate::config::app_config::replace_private_file(
             &self.directory,
             OsStr::new(STORE_FILE),
@@ -185,6 +244,7 @@ mod tests {
             message: format!("Dummy legacy message for {id}"),
             unit: format!("tcui-reminder-{id}"),
             created_at: "2026-10-24T09:00:00+00:00".to_string(),
+            pushover: false,
         }
     }
 

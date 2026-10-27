@@ -6,6 +6,16 @@ pub(crate) struct Builtin {
 
 pub(crate) const BUILTINS: &[Builtin] = &[
     Builtin {
+        name: "command",
+        description: "Let the agent choose and execute approved commands from context.",
+        source: include_str!("../../skills/command/SKILL.md"),
+    },
+    Builtin {
+        name: "ping-user",
+        description: "Let the agent send or schedule a Pushover notification from context.",
+        source: include_str!("../../skills/ping-user/SKILL.md"),
+    },
+    Builtin {
         name: "websearch",
         description: "Search the web using the configured source and cite results.",
         source: include_str!("../../skills/websearch/SKILL.md"),
@@ -52,12 +62,12 @@ pub(crate) const BUILTINS: &[Builtin] = &[
     },
     Builtin {
         name: "schedule",
-        description: "Schedule a local reminder through the host system timer.",
+        description: "Interpret and execute reminder scheduling from natural language and context.",
         source: include_str!("../../skills/schedule/SKILL.md"),
     },
     Builtin {
         name: "remindme",
-        description: "Schedule a local reminder through the host system timer.",
+        description: "Interpret and execute reminders, composing other invoked skills.",
         source: include_str!("../../skills/remindme/SKILL.md"),
     },
     #[cfg(feature = "memory")]

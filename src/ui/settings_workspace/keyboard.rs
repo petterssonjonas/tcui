@@ -150,14 +150,10 @@ impl KeyboardSettings {
         self.capture.is_some()
     }
 
-    pub fn has_draft(&self) -> bool {
-        self.capture.is_some() || self.pending.is_some()
-    }
-
-    pub fn saved(&mut self) {
-        if !self.has_draft() {
-            self.feedback = "Settings saved.".into();
-            self.has_error = false;
+    pub fn pending_draft(&self) -> Option<(String, String)> {
+        match &self.pending {
+            Some(SettingsIntent::Apply { id, value }) => Some((id.clone(), value.clone())),
+            _ => None,
         }
     }
 
@@ -406,7 +402,7 @@ impl KeyboardSettings {
                 base
             };
             frame.render_widget(
-                Paragraph::new(" Advanced: bulk JSON overrides").style(style),
+                Paragraph::new(" Bulk mappings: command=chord").style(style),
                 rect,
             );
             hit_areas.push((rect, count));
@@ -447,7 +443,7 @@ impl KeyboardSettings {
         );
         frame.render_widget(
             Paragraph::new(
-                "Ctrl+S save · / search · Enter capture · Backspace reset · Esc cancel · Tab categories",
+                "/ search · Enter capture · Backspace reset · Esc cancel · Tab categories",
             )
             .style(base),
             help,

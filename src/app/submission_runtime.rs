@@ -26,6 +26,7 @@ pub(crate) struct RequestPreparation {
 pub(crate) struct PreparedLaunch {
     pub(crate) request: PreparedChatRequest,
     pub(crate) notices: Vec<String>,
+    pub(crate) redactions: crate::skill_runtime::host_execution::Secrets,
     #[cfg(feature = "memory")]
     pub(crate) memory_activities: Vec<crate::memory::MemoryActivity>,
 }
@@ -128,6 +129,7 @@ pub(crate) async fn prepare_launch(
         return Ok(PreparationOutcome::Ready(Box::new(PreparedLaunch {
             request,
             notices,
+            redactions: crate::skill_runtime::host_execution::Secrets::default(),
             #[cfg(feature = "memory")]
             memory_activities: Vec::new(),
         })));
@@ -230,10 +232,22 @@ pub(crate) async fn prepare_launch(
         }
     }
     request.system_prompt = runtime_system_prompt;
+    let mut redactions = crate::skill_runtime::host_execution::Secrets::default();
+    if skills.host_requested {
+        let actions =
+            crate::skill_runtime::host_execution::run(&config, &user_request, &request).await;
+        request.messages.extend(actions.messages);
+        notices.extend(actions.notices);
+        redactions = actions.redactions;
+        request.system_prompt.push_str(
+            "\n\nHost actions have already been processed for this turn. Report the actual host results below. Never claim a command, notification, or reminder succeeded without successful host evidence. Do not ask the user to repeat a rigid command format. Do not execute or recommend repeating an action that already succeeded.",
+        );
+    }
     let request = prepare_chat_request(request)?;
     Ok(PreparationOutcome::Ready(Box::new(PreparedLaunch {
         request,
         notices,
+        redactions,
         #[cfg(feature = "memory")]
         memory_activities,
     })))

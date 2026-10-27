@@ -24,6 +24,9 @@ pub(crate) struct ConversationRequest {
     pub(crate) finalized: bool,
     pub(crate) cancelled: bool,
     pub(crate) hide_answer: bool,
+    pub(crate) host_receipts: crate::skill_runtime::host_receipts::Receipts,
+    host_receipts_applied: usize,
+    producer_stopping: bool,
 }
 
 impl Drop for ConversationRequest {
@@ -157,6 +160,9 @@ impl TuiApp {
                 finalized: false,
                 cancelled: false,
                 hide_answer: false,
+                host_receipts: crate::skill_runtime::host_receipts::Receipts::default(),
+                host_receipts_applied: 0,
+                producer_stopping: false,
             },
         );
         self.cancel_escape = None;
@@ -372,10 +378,39 @@ impl TuiApp {
         Ok(())
     }
 
+    pub(crate) fn persist_host_action_receipts(&mut self, id: SubmissionId) -> Result<()> {
+        if !self.requests.contains_key(&id) {
+            return Ok(());
+        }
+        self.ensure_request_destination(id)?;
+        let request = self
+            .requests
+            .get_mut(&id)
+            .ok_or_else(|| eyre!("Request disappeared"))?;
+        let receipts = request.host_receipts.snapshot();
+        if receipts.len() == request.host_receipts_applied {
+            return Ok(());
+        }
+        let count = receipts.len();
+        for mut message in receipts.into_iter().skip(request.host_receipts_applied) {
+            message.conversation_id = request.route.destination_conversation_id;
+            request.messages.insert(request.assistant_idx, message);
+            request.assistant_idx += 1;
+        }
+        request.host_receipts_applied = count;
+        self.storage
+            .replace_messages(request.route.destination_conversation_id, &request.messages)?;
+        for index in 0..self.ui.tabs.len() {
+            self.sync_request_view(index);
+        }
+        Ok(())
+    }
+
     pub(crate) fn finish_request(&mut self, id: SubmissionId) -> Result<()> {
         if !self.requests.contains_key(&id) {
             return Ok(());
         }
+        self.persist_host_action_receipts(id)?;
         self.ensure_request_destination(id)?;
         if let Some(request) = self.requests.get_mut(&id) {
             if !request.finalized && !request.cancelled {
@@ -430,6 +465,7 @@ impl TuiApp {
     pub(crate) fn cancel_request(&mut self, id: SubmissionId) -> Result<()> {
         if let Some(request) = self.requests.get_mut(&id) {
             if let Some(handle) = request.abort.take() {
+                request.producer_stopping |= !handle.is_finished();
                 handle.abort();
             }
             if !request.cancelled && !request.finalized {
@@ -445,7 +481,24 @@ impl TuiApp {
             self.sync_request_view(index);
         }
         self.ensure_request_destination(id)?;
-        self.finish_request(id)
+        if self
+            .requests
+            .get(&id)
+            .is_some_and(|request| request.producer_stopping)
+        {
+            // Abort is only a request. StreamCompletion flushes after the last poll
+            // has stopped, including receipts published concurrently with cancellation.
+            self.persist_host_action_receipts(id)?;
+            if let Some(request) = self.requests.get(&id) {
+                self.storage.replace_messages(
+                    request.route.destination_conversation_id,
+                    &request.messages,
+                )?;
+            }
+            Ok(())
+        } else {
+            self.finish_request(id)
+        }
     }
 }
 

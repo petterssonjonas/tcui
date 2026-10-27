@@ -33,11 +33,15 @@ Type any slash command in the message box:
 
 - Press `Ctrl+P` to search settings and actions. With no query, choose **Settings tab**.
   Search results navigate to the selected setting; the popup does not edit values.
-  Settings changes still validate and persist individually. Click **Save settings**
-  or press `Ctrl+S` to save the current configuration and any valid active draft.
-  A failed save keeps the draft and reports an error; success is confirmed after writing.
+  Changes persist individually. Click **Save** or press **Ctrl+S** to save all current
+  settings and a valid open draft. Failed saves retain the draft. In multiline
+  editors, Enter adds a line and Ctrl+Enter applies; Esc cancels.
+  Settings use plaintext: lists/rules have one entry per line; status widgets use
+  `provider 1 1`; bulk shortcuts use `new_chat=alt+n`. Non-command list escapes are
+  `\\`, `\n`, `\r`, `\t`, and `\e` for an empty entry. MCP uses labeled fields
+  `name:`, `transport:`, `command:`, `args:`, `url:`, and `enabled:`, with a blank line
+  between servers. Quote literal arguments with spaces; MCP supports text escapes.
   In Keyboard settings, Enter captures a binding and Backspace resets it.
-  Finish or cancel capture before clicking Save; `Ctrl+S` remains capture input there.
 - Click the **provider** or **model** labels in the status bar to change
   selectors.
 - Settings groups include terminal defaults, appearance, layout, chat, web search,
@@ -68,6 +72,9 @@ Type any slash command in the message box:
 - Notifications use Herdr, a reachable local desktop service, or supported
   Kitty/Ghostty/WezTerm terminal delivery over SSH. Unsupported routes are off;
   SSH never sends desktop notifications to the server's D-Bus.
+- Optional Pushover delivery uses curl directly. Configure encrypted user and
+  application keys in Settings → Pushover, and approve curl in Settings → Terminal.
+  A locked vault never falls back to plaintext credentials.
 
 ## Application protection
 
@@ -219,6 +226,50 @@ must first be upgraded on their source instance with its original key metadata.
   Shift+PageUp/PageDown scroll terminal history.
 - Closing live terminals or quitting with them requires confirmation. Sessions
   survive switching views, not application exit.
+
+## Approved commands and reminders
+
+- Mention `@command` to let the agent choose approved programs and literal arguments.
+  It reads the conversation and invoked skills, executes tools, and observes results.
+  Enter one whitelist/blacklist rule per line in Settings → Terminal; blacklist wins.
+  `curl` allows any arguments; `curl -H` requires the exact argument prefix `-H`.
+  Quotes preserve spaces. Rules do not normalize flag aliases or reorder arguments.
+  Native Pushover delivery is subject to the full argument policy too.
+  No shell is used. Command output becomes untrusted chat/model context. Trust
+  approved programs and their contents: this is not a sandbox, and does not
+  restrict manually approved terminal commands. Quoted examples and history alone
+  cannot authorize a command.
+- Commands have a 30-second timeout and 64-KiB output limit per stream.
+  Cancel the request to terminate its Unix process group.
+- `@ping-user Tell me the backup is ready` asks for immediate Pushover delivery.
+  Settings → Pushover opens masked user-key and selected app-token entry.
+  New/replacement keys are encrypted by default; plaintext storage is an explicit
+  choice. Replacing an encrypted key requires unlock. Other saved keys are unchanged.
+  One application token is required; additional named tokens are optional.
+  Curl must be whitelisted; keys are supplied through standard input.
+- The agent can explicitly read Pushover keys from the selected TCUI-keystore or
+  environment/file source. **Raw key reads disclose those keys to your AI provider.**
+  Encrypted records require unlock; plaintext Pushover records can be read while
+  locked. A locked/missing keystore key never falls back to an environment file.
+  Other credentials are not exposed through this tool.
+- Ask `@remindme via @ping-user in 20 min to review those companies` or
+  `Please @ping-user tomorrow at noon to review the backup`. Skills can appear
+  anywhere in the current request; no fixed grammar, directive order, or separator
+  is required. The agent uses conversation context and actual scheduling results.
+  `@schedule` also supports scheduling; ask naturally to list or cancel reminders.
+  Completed-action receipts survive a later model failure.
+- Scheduling requires the host's user systemd manager. Toolbox timers re-enter the
+  originating container. Keep that container, TCUI binary, and curl available.
+  Timers can outlive TCUI, but do not promise delivery after logout or reboot.
+- Pending Pushover jobs store plaintext messages and keys in private files, even
+  when the app is encrypted. Locking or changing the vault password does not revoke
+  them. Cancel jobs to remove them. Registered one-shot snapshots are consumed after
+  one attempt, including failure; a post-stop hook also handles early callback
+  failures. One-shot timer/service units are collected; recurring snapshots remain
+  until cancelled. Cleanup errors require recovery or cancellation after restoring
+  the executable/container; unknown cadence never authorizes deleting recurring data.
+- Back up `reminders.toml` with `reminder.key`; reminder protection is independent
+  of the app password so authorized background delivery works while TCUI is locked.
 
 ## Tips
 

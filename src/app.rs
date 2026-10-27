@@ -55,6 +55,10 @@ mod saved_file_migration_tests;
 #[path = "app/vault_restart_tests.rs"]
 mod vault_restart_tests;
 
+#[cfg(test)]
+#[path = "app/host_execution_tests.rs"]
+mod host_execution_tests;
+
 pub use action::Action;
 pub use generated_file::GeneratedFile;
 pub use message::Message;

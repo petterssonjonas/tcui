@@ -9,6 +9,8 @@ use crate::mcp::{merged_configs, profile_by_skill, McpClient, McpToolSummary};
 use crate::skills::{Skill, SkillCatalog};
 use crate::vault::read_tools::{execute_read_only, parse_read_only_operation, VaultReadOnlyLimits};
 
+pub(crate) mod host_execution;
+pub(crate) mod host_receipts;
 pub(crate) mod vault_mutation;
 
 const MAX_SKILL_CHARS: usize = 20_000;
@@ -22,6 +24,7 @@ pub(crate) struct SkillPreparation {
     pub(crate) messages: Vec<Message>,
     pub(crate) notices: Vec<String>,
     pub(crate) search_requested: bool,
+    pub(crate) host_requested: bool,
     pub(crate) vault_mutation: Option<crate::vault::mutation_plan::VaultMutationKind>,
 }
 
@@ -81,6 +84,7 @@ pub(crate) async fn prepare(
     let mut vault_prepared = false;
     let mut searched_backends = [None; 4];
     for skill in skills {
+        prepared.host_requested |= host_execution::is_host_skill(&skill.name);
         if skill.name == "vault" {
             if vault_prepared {
                 continue;

@@ -41,6 +41,15 @@ pub fn mentions(text: &str) -> Vec<String> {
                             start += 1;
                         }
                         start
+                    } else if index == command_start
+                        && character == '/'
+                        && ["remindme", "schedule"].iter().any(|name| {
+                            text[index + 1..].strip_prefix(name).is_some_and(|rest| {
+                                rest.is_empty() || rest.starts_with(char::is_whitespace)
+                            })
+                        })
+                    {
+                        index + 1
                     } else {
                         index += character.len_utf8();
                         continue;
@@ -126,6 +135,20 @@ mod tests {
         let prompt =
             "/skill memory I do not remember what this machine is for. Also @websearch it.";
         assert_eq!(mentions(prompt), ["memory", "websearch"]);
+    }
+
+    #[test]
+    fn reminder_aliases_and_free_prose_compose_with_ping_skill() {
+        assert_eq!(
+            mentions("/remindme via @ping-user in 20 min to review that subject"),
+            ["remindme", "ping-user"]
+        );
+        assert_eq!(
+            mentions("Please @remindme about that in an hour via @ping-user"),
+            ["remindme", "ping-user"]
+        );
+        assert_eq!(mentions("/schedule remind me tomorrow"), ["schedule"]);
+        assert!(mentions("Explain `/remindme tomorrow` without invoking it").is_empty());
     }
 
     #[test]

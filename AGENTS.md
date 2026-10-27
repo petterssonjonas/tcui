@@ -6,7 +6,7 @@ Use ASD-STE100 (Simplified Technical English) when communicating technical infor
 
 ## Workflow rules
 
-- Never enable auto-merge.
+- Never enable auto-merge. No need to mention this.
 - Only `development` and `main` are long-lived. Refresh `origin/development` before creating each feature branch and worktree at `~/Projects/.worktrees/<project>/<feature>`; deliver coherent PRs to `development` and squash merge.
 - Promote `development` to `main` through a reviewed PR. Use a merge commit to preserve shared ancestry; never delete `development`. Agents must never merge to `main`.
 - Build and publish distribution packages only for an explicitly published Release, which may create its tag. A tag alone must not create a Release or trigger distribution packaging. Keep validation CI separate from CD.

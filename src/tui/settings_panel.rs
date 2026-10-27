@@ -16,6 +16,7 @@ pub enum SettingCategory {
     ChatBehavior,
     Privacy,
     Notifications,
+    Pushover,
     Terminal,
     WebSearch,
     #[cfg(feature = "memory")]
@@ -37,6 +38,7 @@ impl SettingCategory {
             Self::ChatBehavior => "Chat",
             Self::Privacy => "Privacy",
             Self::Notifications => "Notifications",
+            Self::Pushover => "Pushover",
             Self::Terminal => "Terminal",
             Self::WebSearch => "Web search",
             #[cfg(feature = "memory")]
@@ -356,6 +358,8 @@ pub fn command_action(id: &str) -> Option<crate::app::Action> {
         "unlock_application" => Some(Action::UnlockApplication),
         "lock_application" => Some(Action::LockApplication),
         "search_api_keys" => Some(Action::OpenSearchCredentials),
+        "pushover_user_key" => Some(Action::OpenPushoverCredential { application: false }),
+        "pushover_app_key" => Some(Action::OpenPushoverCredential { application: true }),
         "export_conversation" => Some(Action::ExportConversation),
         "show_skills" => Some(Action::ShowSkillsPopup),
         "show_mcp" => Some(Action::ShowMcpPopup),
