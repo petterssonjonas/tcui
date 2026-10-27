@@ -42,6 +42,8 @@ Type any slash command in the message box:
   `name:`, `transport:`, `command:`, `args:`, `url:`, and `enabled:`, with a blank line
   between servers. Quote literal arguments with spaces; MCP supports text escapes.
   In Keyboard settings, Enter captures a binding and Backspace resets it.
+  During capture, Ctrl+S is binding input. After a failed binding write, Ctrl+S
+  retries that binding. Finish or cancel capture before clicking Save.
 - Click the **provider** or **model** labels in the status bar to change
   selectors.
 - Settings groups include terminal defaults, appearance, layout, chat, web search,

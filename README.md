@@ -227,6 +227,9 @@ Settings accept plaintext, not JSON. Provider/model lists and command rules use 
 entry per line. Non-command lists preserve spaces; `\n`, `\r`, `\t`, and `\\` encode
 literal control characters/backslashes, and `\e` represents an empty entry.
 Keyboard actions support capture/reset; bulk mappings use `new_chat=alt+n`.
+While capturing a shortcut, Ctrl+S and other chords are binding input, not Save.
+After a failed binding write, Ctrl+S retries the retained binding. Outside capture,
+only exact Ctrl+S invokes Save; added modifiers do not.
 Status widget rows use `provider 1 1` (widget ID, row, area).
 MCP servers use labeled blocks separated by a blank line, for example:
 
