@@ -134,13 +134,16 @@ conversations or execute hidden memory directives. Titles come from the first
 user message, with a five-word and 16-Unicode-character limit before an
 optional ellipsis.
 
-With Memory enabled, select a skill anywhere in your own prompt, or use
+Enable **Settings → Memory → Enable memory** to use memory skills. This also
+enables automatic recall for ordinary requests; memory encryption is a separate
+choice under `/security`. Select a skill anywhere in your own prompt, or use
 `/skill <name> <request>`. Memory uses its own native store, separate from Vault:
 
 ```text
 This machine is used for local CI @remember that, and the configuration we have set up this session.
 This machine runs Ubuntu, but I don't @remember what it is for.
 Recover @memory related to this machine.
+@recall the saved hardware details for my home server.
 /skill recall how this machine was configured
 ```
 
@@ -152,8 +155,9 @@ A plain reply can continue that clarification in the same conversation,
 including after restart. A copied question from another chat cannot authorize
 the operation.
 
-`@recall` and `/skill recall` are read-only. The host rejects save, removal,
-and reindex actions for those invocations, including mixed-skill prompts.
+`@recall <query>` and `/skill recall <query>` retrieve existing memories without
+changing them. The host rejects save, removal, and reindex actions for those
+invocations, including prompts that also mention another memory skill.
 Quoted examples, code, attached documents, and assistant text do not invoke
 memory actions. The host reports actual operation results. Normal answer
 text cannot execute a memory action.
@@ -223,6 +227,9 @@ Settings accept plaintext, not JSON. Provider/model lists and command rules use 
 entry per line. Non-command lists preserve spaces; `\n`, `\r`, `\t`, and `\\` encode
 literal control characters/backslashes, and `\e` represents an empty entry.
 Keyboard actions support capture/reset; bulk mappings use `new_chat=alt+n`.
+While capturing a shortcut, Ctrl+S and other chords are binding input, not Save.
+After a failed binding write, Ctrl+S retries the retained binding. Outside capture,
+only exact Ctrl+S invokes Save; added modifiers do not.
 Status widget rows use `provider 1 1` (widget ID, row, area).
 MCP servers use labeled blocks separated by a blank line, for example:
 

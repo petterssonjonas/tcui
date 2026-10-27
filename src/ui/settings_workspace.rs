@@ -400,7 +400,10 @@ impl SettingsWorkspaceState {
         if key.kind == KeyEventKind::Release {
             return None;
         }
-        if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if key.code == KeyCode::Char('s')
+            && key.modifiers == KeyModifiers::CONTROL
+            && !self.keyboard.is_capturing()
+        {
             return self.save_intent();
         }
         if self.edit.is_none() && self.category == SettingCategory::Keybind && !self.rail_focused {

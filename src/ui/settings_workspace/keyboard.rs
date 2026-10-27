@@ -226,7 +226,9 @@ impl KeyboardSettings {
         bindings: &BTreeMap<String, String>,
     ) -> Option<Option<SettingsIntent>> {
         if self.has_error && self.pending.is_some() {
-            if key.code == KeyCode::Enter {
+            if key.code == KeyCode::Enter
+                || (key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL)
+            {
                 return Some(self.pending.clone());
             }
             if key.code == KeyCode::Esc {
