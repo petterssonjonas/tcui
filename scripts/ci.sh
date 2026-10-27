@@ -22,9 +22,10 @@ jactionlint
 shellcheck scripts/ci.sh scripts/setup-ci.sh scripts/release-ref.sh scripts/package.sh \
   scripts/build-release.sh scripts/smoke-oldest-runtime.sh scripts/verify-packages.sh \
   scripts/install.sh scripts/scan-secrets.sh evals/smoke.sh tests/install.sh tests/release-abi.sh \
-  tests/release-build.sh
+  tests/release-build.sh tests/release-ref.sh
 bash tests/install.sh
 bash tests/release-abi.sh
+bash tests/release-ref.sh
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 run_tests --all-features

@@ -1,12 +1,8 @@
 name: release
 
 on:
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Existing stable vX.Y.Z tag on main to build and publish"
-        type: string
-        required: true
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -24,11 +20,19 @@ jobs:
     permissions:
       contents: write
     env:
-      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      RELEASE_ID: ${{ github.event.release.id }}
+      RELEASE_SHA: ${{ github.sha }}
       MISE_EXEC_AUTO_INSTALL: "false"
     steps:
-      - name: Require dispatch on main
-        run: test "$GITHUB_REF" = refs/heads/main
+      - name: Require a published stable release
+        env:
+          RELEASE_DRAFT: ${{ github.event.release.draft }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          test "$GITHUB_EVENT_NAME" = release
+          test "$RELEASE_DRAFT" = false
+          test "$RELEASE_PRERELEASE" = false
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: main
@@ -36,8 +40,12 @@ jobs:
           persist-credentials: false
       - name: Validate exact release commit
         id: release
+        shell: bash
         run: |
-          sha="$(bash scripts/release-ref.sh "$RELEASE_TAG")"
+          sha="$(bash scripts/release-ref.sh "$RELEASE_TAG" "$RELEASE_SHA")"
+          # Release events load their workflow from the tag, not current main.
+          # Refuse a stale release definition before building or uploading.
+          git show "$sha:.github/workflows/release.yml" | cmp - .github/workflows/release.yml
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -58,14 +66,28 @@ jobs:
         run: bash scripts/smoke-oldest-runtime.sh
       - name: Scan release history for secrets
         run: bash scripts/scan-secrets.sh
-      - name: Publish validated assets without overwriting a release
+      - name: Upload validated assets to the published release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_SHA: ${{ steps.release.outputs.sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
-          test "$(bash scripts/release-ref.sh "$RELEASE_TAG")" = "$RELEASE_SHA"
+          bash scripts/release-ref.sh "$RELEASE_TAG" "$RELEASE_SHA"
           test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)" = "$RELEASE_SHA"
-          gh release create "$RELEASE_TAG" "${CARGO_TARGET_DIR:-target}"/dist/* \
-            --repo "$GITHUB_REPOSITORY" --verify-tag --target "$RELEASE_SHA" \
-            --title "TCUI $RELEASE_TAG" --generate-notes
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RUNNER_TEMP/release.json"
+          python3 - "$RUNNER_TEMP/release.json" <<'PY'
+          import json, os, sys
+          with open(sys.argv[1]) as source:
+              release = json.load(source)
+          assert str(release["id"]) == os.environ["RELEASE_ID"]
+          assert release["tag_name"] == os.environ["RELEASE_TAG"]
+          assert not release["draft"] and not release["prerelease"] and release["published_at"]
+          PY
+          for asset in "${CARGO_TARGET_DIR:-target}"/dist/*; do
+            name="$(basename "$asset")"
+            [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]]
+            # The release ID fixes the upload destination; duplicate names fail.
+            gh api --method POST \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$name" \
+              -H 'Content-Type: application/octet-stream' --input "$asset"
+          done
